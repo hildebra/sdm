@@ -12,7 +12,7 @@ program_LIBRARY_DIRS :=
 program_LIBRARIES :=
 
 
-CPPFLAGS +=-Wall -O3 -std=c++0x -lz
+CPPFLAGS +=-Wall -O3 -std=c++0x 
 CPPFLAGS += $(foreach includedir,$(program_INCLUDE_DIRS),-I$(includedir))
 LDFLAGS += $(foreach librarydir,$(program_LIBRARY_DIRS),-L$(librarydir))
 LDFLAGS += $(foreach library,$(program_LIBRARIES),-l$(library))
@@ -22,11 +22,10 @@ LDFLAGS += $(foreach library,$(program_LIBRARIES),-l$(library))
 all: $(program_NAME)
 
 $(program_NAME): $(program_OBJS)
-	$(LINK.cc) $(program_OBJS) -o $(program_NAME)
+	$(LINK.cc) $(program_OBJS) -o $(program_NAME) -lz
 
 clean:
 	@- $(RM) $(program_NAME)
 	@- $(RM) $(program_OBJS)
 
 distclean: clean
-
