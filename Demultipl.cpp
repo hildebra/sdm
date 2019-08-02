@@ -43,7 +43,7 @@ int main(int argc, char* argv[])
 		exit(0);
 	}
 #ifdef DEBUG
-	cout << "DEBUG mode"<<endl;
+	cerr << "DEBUG mode"<<endl;
 #endif
 
 	ini_DNAconstants();
@@ -58,24 +58,24 @@ int main(int argc, char* argv[])
 
 	//reads the sdm_options file
 #ifdef DEBUG
-	cout << "Setting up Filter" << endl;
+	cerr << "Setting up Filter" << endl;
 #endif
-	Filters* fil = new Filters(cmdArgs);
+	shared_ptr<Filters> fil = make_shared<Filters>(cmdArgs);
 	bool bReads = fil->readMap(cmdArgs);
 #ifdef DEBUG
-	cout << "filter setup & map is read" << endl;
+	cerr << "filter setup & map is read" << endl;
 #endif
 	if (!bReads){cerr<<"Failed to read Map.\n";exit(3);}
-	//cout<<SAqualP[0]<<" "<<SAqualP[50];
+	//cerr<<SAqualP[0]<<" "<<SAqualP[50];
 	fil->setcmdArgsFiles(cmdArgs);
 	
 	clock_t tStart = clock();
 	//main function
 	separateByFile(fil,cmdArgs);
 	//cerr << "\nXXXX\n\n";
-	delete fil;
+//	delete fil;
 
-	printf("Time taken: %.2fs\n", (double)(clock() - tStart) / CLOCKS_PER_SEC);
+	fprintf(stderr,"Time taken: %.2fs\n", (double)(clock() - tStart) / CLOCKS_PER_SEC);
 
 	return 0;
 }

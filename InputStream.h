@@ -58,17 +58,56 @@ void reverseTS(std::string & Seq);
 
 bool any_lowered(const string& is);
 //this function changes input string (file location) to have consistent file names
-string applyFileIT(string x, int it);
+string applyFileIT(string x, int it, const string xtr = "");
 bool fileExists(const std::string& name, int i=-1,bool extiffail=true);
 //vector<int> orderOfVec(vector<int>&);
+
+
+
+
+class ofbufstream {
+public:
+	ofbufstream(const string IF, int mif) :file(IF), modeIO(mif), used(0) {
+		if (modeIO == ios::out) {
+			remove(file.c_str());
+		}
+		keeper = new char[bufS];
+	}
+	~ofbufstream() {
+		writeStream();
+		delete[] keeper;
+	}
+	void operator<< (const string& X) {
+		size_t lX(X.length());
+		if (lX + used > bufS) {
+			writeStream();
+		}
+		memcpy(keeper + used, X.c_str(), lX);
+		used += lX;
+	}
+private:
+	void writeStream() {
+		if (used == 0) { return; }
+		ofstream of(file.c_str(), ios::app);
+		of.write(keeper, used);
+		of.close();
+		used = 0;
+	}
+	string file;
+	char *keeper;
+	int modeIO;
+	size_t used;
+	static const size_t bufS = 500000;
+};
+
 
 
 inline vector<string> splitByComma(const string& fileS,bool requireTwo, char SrchStr=','){
 	string::size_type pos = fileS.find(SrchStr);
 	if (pos == string::npos){
 		if (requireTwo){
-			cout<<fileS<<endl;
-			cout << "Could not find \"" << SrchStr<<"\" in input file (required for paired end sequences, as these are two files separated by \",\")\n";
+			cerr<<fileS<<endl;
+			cerr << "Could not find \"" << SrchStr<<"\" in input file (required for paired end sequences, as these are two files separated by \",\")\n";
 			exit(14);
 		}else {
 			return vector<string> (1,fileS);
@@ -124,11 +163,27 @@ public:
 		FtsDetected(),
 		IDfixed(false), tempFloat(0.f) {
 	}
+	bool operator==(DNA i) {
+		if (i.getSeqPseudo() == this->getSeqPseudo()) {
+			return true;
+		}	else {
+			return false;
+		}
+	}
+	bool operator==(shared_ptr<DNA> i) {
+		if (i->getSeqPseudo() == this->getSeqPseudo()) {
+			return true;
+		} else {
+			return false;
+		}
+	}
+	
 	//~DNA(){}
 	void append(const string &s) { Seq += s; SeqLength = Seq.length(); }
 	void Qappend(const vector<qual_score> &q);
 	void setSeq(string & s) { Seq = s; SeqLength = Seq.length();/*DN = Seq.c_str();*/ }
 	string &getSeq() { return Seq; }
+	string getSeq_c() { return Seq; }
 	string getSeqPseudo() { return Seq.substr(0, SeqLength); }
 	void setQual(vector<qual_score>& Q) { Qual = Q; avgQual = -1.f; }
 	const string& getID() { if (IDfixed) { return NewID; }return ID; }
@@ -153,6 +208,9 @@ public:
 	int qualAccumulate(double d);
 	double getAccumError(){
 		if (AccumError == 0.f) { for (uint i = 0; i < Qual.size(); i++) { if (Qual[i] >= 0) { AccumError += SAqualP[Qual[i]]; } } }
+		if (std::isinf((double)AccumError)) {
+			AccumError = 5.f;
+		}
 		return AccumError;}
 	int minQual(){int mq=50; for (uint i=0;i<Qual.size();i++){if (Qual[i]<mq){mq=Qual[i];}}return mq;}
 	void NTspecQualScores(vector<long>&, vector<long>&);
@@ -168,7 +226,8 @@ public:
 	int matchSeq_tot(string, int, int, int&);
 	void writeSeq(ostream&,bool singleLine=false);
 	void writeQual(ostream&, bool singleLine = false);
-	void writeFastQ(ostream&);
+	void writeFastQ(ostream&,bool=true);
+	void writeFastQ(ofbufstream&, bool = true);
 	void writeFastQEmpty(ostream&);
 	void setNewID(string x) { NewID = x; }
 	void newHEad(string x){NewID=x;ID=x;}
@@ -177,30 +236,31 @@ public:
 	bool getTA_cut() { return FtsDetected.TA_cut; }
 	void setBarcodeCut() { FtsDetected.Barcode_cut = true; FtsDetected.Barcode_detected = true; }
 	bool getBarcodeCut() { return FtsDetected.Barcode_cut; }
+	void setBarcodeDetected(bool x){ FtsDetected.Barcode_detected = x; }
 	bool getBarcodeDetected() { return FtsDetected.Barcode_detected; }
 	bool isMIDseq() { if (Read_position == 3) { return true; } return false; }
 	void setMIDseq(bool b){ if (b){ Read_position = 3; } }
 	void setpairFWD(){ Read_position = 0; }
 	void setpairREV(){ Read_position = 1; }
 	int getReadMatePos() { return (int) Read_position; }
-	bool sameHead(DNA*);
+	bool sameHead(shared_ptr<DNA>);
 	bool sameHead(const string&);
 	//inline void reverseTranscribe();
 	void setTempFloat(float i){tempFloat = i;}
 	float getTempFloat(){return tempFloat;}
-	void adaptHead(DNA*,const int,const int);
+	void adaptHead(shared_ptr<DNA>,const int,const int);
 	void failed(){goodQual=false;midQual=false;}
 	bool control(){ if (Qual.size()==0){return false;}return true;}
-	void setBCnumber(int i) { Sample = i; FtsDetected.Barcode_detected = true; }
-	int getBCnumber();
+	void setBCnumber(int i, int BCoff) { if (i < 0) { Sample = i ; FtsDetected.Barcode_detected = false; } else { Sample = i + BCoff; FtsDetected.Barcode_detected = true; } }
+	int getBCnumber();//always return BC tag IDX global (no local filter idx accounted for, use getBCoffset() to correct)
 
 	void prepareWrite(int fastQver);
 	void reset();
 	void resetTruncation() { SeqLength = Seq.length(); }
 	void setPassed(bool b);
+	void setMidQual(bool b) { midQual = b; }
 	bool isPassed(void){return goodQual;}
 	bool isMidQual(void){return midQual;}
-	void setMidQual(bool b){midQual = b;}
 	string getSubSeq(int sta, int sto){return Seq.substr(sta,sto);}
 	void resetQualOffset(int off, bool solexaFmt);
 	
@@ -213,6 +273,29 @@ public:
 	//only used in pre best seed step
 	//float getSeedScore() { return tempFloat; }
 	//void setSeedScore(float i) { tempFloat = (float)i; }
+
+	struct QualStats {
+		bool maxL; bool PrimerFail; bool AvgQual; //sAvgQual
+			bool HomoNT; bool PrimerRevFail; bool minL; 
+			bool minLqualTrim; //<-sMinQTrim trimmed due to quality
+			bool TagFail; bool MaxAmb; bool QualWin;//sQualWin 
+			bool AccErrTrimmed; bool QWinTrimmed;  // either of these makes bool Trimmed; 
+			bool fail_correct_BC; bool suc_correct_BC; bool
+			failedDNAread; 
+			//bool adapterRem; -> setTA_cut
+			bool RevPrimFound; 
+			bool BinomialErr; bool dblTagFail;
+		QualStats() :
+			maxL(false), PrimerFail(false), AvgQual(false), HomoNT(false),
+			PrimerRevFail(true), minL(false), minLqualTrim(false),
+			TagFail(false), MaxAmb(false), QualWin(false),
+			AccErrTrimmed(false), QWinTrimmed(false),
+			fail_correct_BC(false), suc_correct_BC(false),
+			failedDNAread(false), RevPrimFound(false),
+			BinomialErr(false),
+			dblTagFail(false)
+		{}
+	} QualCtrl;
 
 protected:
 	size_t getShorterHeadPos(const string & x, int fastQheadVer=-1) {
@@ -275,17 +358,31 @@ protected:
 		void reset() { forward = false; reverse = false; TA_cut = false; Barcode_detected = false; Barcode_cut = false; }
 	} FtsDetected;
 
+
+
 	bool IDfixed;
 	float tempFloat;
 };
 
+struct DNAHasher
+{
+	size_t operator()(shared_ptr<DNA> k) const
+	{
+		// Compute individual hash values for two data members and combine them using XOR and bit shifting
+		return ((hash<string>()(k->getSeqPseudo())) >> 1);
+	}
+};
+
+
+
+
 
 class DNAunique : public DNA{//used for dereplication
 public:
-	DNAunique() : DNA(), Count(0), pair(NULL) {}//chimeraCnt((matrixUnit) 1), 
-	DNAunique(string s, string x) :DNA(s, x), Count(1),pair(NULL) {}
-	DNAunique(DNA*d, int BC) : DNA(*d), Count(0), BestSeedLength( (uint)Seq.size()),pair(NULL){ addSmpl(BC);  }
-	~DNAunique() { if (pair != NULL) { delete pair; } }
+	DNAunique() : DNA(), Count(0), pair(0){}//chimeraCnt((matrixUnit) 1), 
+	DNAunique(string s, string x) :DNA(s, x), Count(1) {}
+	DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), Count(0), BestSeedLength( (uint)Seq.size()),pair(0){ addSmpl(BC);  }
+	~DNAunique() { ; }// if (pair != NULL) { delete pair; }
 	//string Seq;	string ID;
 	void Count2Head(bool);
 	void addSmpl(int k);
@@ -294,14 +391,14 @@ public:
 	uint getBestSeedLength() { return BestSeedLength; }
 	void setBestSeedLength(uint i) { BestSeedLength = i; }
 	void setOccurence(int smpl, int N);
-	void transferOccurence(DNAunique*);
+	void transferOccurence(shared_ptr<DNAunique>);
 	const unordered_map<int, int> & getDerepMap() { return occurence; }
 	vector<int> getDerepMapSort(size_t);
 	//vector<pair<int, int>> getDerepMapSort2(size_t wh);
 	void getDerepMapSort(vector<int>&, vector<int>&);
 	void saveMem() { QualTraf = ""; NewID = ID.substr(0, getSpaceHeadPos(ID)); ID = ""; }
-	void attachPair(DNAunique* d) { pair = d; pair->saveMem(); }
-	DNAunique* getPair(void) { return pair; }
+	void attachPair(shared_ptr<DNAunique> d) { pair = d; pair->saveMem(); }
+	shared_ptr<DNAunique> getPair(void) { return pair; }
 	//estimates if one sample occurence covers the unique counts required for sample specific derep min counts
 	bool pass_deprep_smplSpc( const vector<int>&);
 
@@ -314,7 +411,7 @@ private:
 	//matrixUnit chimeraCnt;
 	int BestSeedLength;
 	unordered_map<int, int> occurence;
-	DNAunique* pair;
+	shared_ptr<DNAunique> pair;
 
 };
 
@@ -355,10 +452,10 @@ public:
 	//path, fastq, fastqVer, pairNum
 	bool setupFastq(string,string, int&,string,bool = false);
 	//0=pair 1; 1=pair 2; 2=midSeq; sync=synchronize read pairs (ie only first pair read so far, jump to same DNA reads with second pair)
-	DNA* getDNA(bool&,int,bool& sync);
+	shared_ptr<DNA> getDNA(bool&,int,bool& sync);
 	void jumpToNextDNA(bool&, int);
-	//DNA* getDNA2(bool&);
-	//DNA* getDNA_MID(bool&);
+	//shared_ptr<DNA> getDNA2(bool&);
+	//shared_ptr<DNA> getDNA_MID(bool&);
 	bool hasMIDseqs(){return hasMIDs;}
 	void allStreamClose();
 	void allStreamReset();
@@ -374,11 +471,11 @@ private:
 	int parseInt(const char** p1);// , int &pos);// , const char ** &curPos);
 	bool setupFastq_2(string, string, string);
 	bool setupFastaQual2(string, string, string = "fasta file");
-	DNA* read_fastq_entry(istream & fna, int &minQScore,
+	shared_ptr<DNA> read_fastq_entry(istream & fna, int &minQScore,
 		int&,bool&,bool);
-	DNA* read_fastq_entry_fast(istream & fna, int&,bool&);
+	shared_ptr<DNA> read_fastq_entry_fast(istream & fna, int&,bool&);
 	void jmp_fastq(istream &, int&);
-	bool read_fasta_entry(istream&fna,istream&qual,DNA* in,DNA*,int&);
+	bool read_fasta_entry(istream&fna,istream&qual,shared_ptr<DNA> in,shared_ptr<DNA>,int&);
 	bool getFastaQualLine(istream&fna,  string&);
 	void maxminQualWarns_fq();
 	int auto_fq_version();
@@ -406,9 +503,9 @@ private:
 		//fna3, qual3, fastq3;
 
 	//required for Fasta in term storage
-	vector<DNA*> tdn1; vector<DNA*> tdn2;
-	//DNA* tdn21; DNA* tdn22;
-	//DNA* tdn31; DNA* tdn32;
+	vector<shared_ptr<DNA>> tdn1; vector<shared_ptr<DNA>> tdn2;
+	//shared_ptr<DNA> tdn21; shared_ptr<DNA> tdn22;
+	//shared_ptr<DNA> tdn31; shared_ptr<DNA> tdn32;
 	bool fnaRead, hasMIDs;
 	vector<int> lnCnt;// , lnCnt2, lnCnt3;//line count
 	int fastQver,minQScore,maxQScore;//which version of Fastq? minima encountered Qscore
@@ -429,6 +526,10 @@ private:
 	vector<string> ErrorLog;
 	bool DieOnError;
 };
+
+
+
+
 
 
 #ifdef _gzipread2

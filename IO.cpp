@@ -19,7 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "IO.h"
 //#include <map>
-void threadAnalyzeDNA(DNA* tdn,MultiDNA* MD,int thrCnt){
+void threadAnalyzeDNA(shared_ptr<DNA> tdn, shared_ptr<MultiDNA> MD,int thrCnt){
 	//if (threadActive){
 	//	threads[thrCnt].join();
 	//}
@@ -30,8 +30,8 @@ void threadAnalyzeDNA(DNA* tdn,MultiDNA* MD,int thrCnt){
 	MD->analyzeDNA(tdn,thrCnt,-1,tagIdx);
 	MD->saveForWrite(tdn);
 }
-void trippleThreadAnalyzeDNA(MultiDNA* MD, DNA* tdn,DNA *tdn2,
-							 DNA* MIDseq,bool changePHead){//,int thrCnt){
+/*void trippleThreadAnalyzeDNA(shared_ptr<MultiDNA> MD, shared_ptr<DNA> tdn,shared_ptr<DNA> tdn2,
+							 shared_ptr<DNA> MIDseq,bool changePHead){//,int thrCnt){
 
 
 	int thrCnt = 0;
@@ -48,158 +48,9 @@ void trippleThreadAnalyzeDNA(MultiDNA* MD, DNA* tdn,DNA *tdn2,
 		MD->getFilters(thrCnt)->colStats[1].singleton++;
 	}
 
-}
-/*
-bool read_tripple(OptContainer& cmdArgs, MultiDNA* MD,InputStreamer* IS ){
-	cerr << "read_tripple deprecated\n"; exit(198);
-	bool syncedMID = false;
-	if ( MD->isPEseq() != 2 ) {
-		cerr << "In order to use mid sequences for barcodes, paired end sequences have to be provided\n";
-		exit(102);
-	}
-	int pairs = MD->isPEseq();
-	bool forcePair = MD->getFilters()->consistentPairs();
-	if (!IS->checkInFileStatus()) {
-		cerr << "Input File stream is closed!\n"; exit(55);
-	}
+}*/
 
-	DNAmap oldMIDs;
-
-	bool fqHeadVer(true),changePHead(false);
-	DNA* tdn(NULL); DNA* tdn2(NULL); DNA* MIDseq(NULL);
-#ifdef _THREADED
-	int Nthrds = atoi(cmdArgs["-threads"].c_str()) -1 ;
-	int thrCnt = 0;
-	vector<std::thread> threads( Nthrds );
-	MD->setSubfilters(Nthrds);
-	bool threadActive(false);
-	int DNAinMem(0);
-#endif
-#ifdef DEBUG
-	cout << "Read triple routine" << endl;
-#endif
-	bool cont(true), cont2(true), cont3(true);
-	while(cont || cont2){
-		if (pairs >1){
-			if (forcePair && cont2){
-				cerr<<"Second provided file has not the same number of entries as first file.\n";			exit(5);		
-			} else {
-				tdn2 = IS->getDNA(cont2,1);
-			}
-			if (forcePair&& cont){			cerr<<"First provided file has not the same number of entries as first file.\n";			exit(5);		} else {
-				tdn = IS->getDNA(cont,0);
-			}
-		} else {
-			tdn = IS->getDNA(cont,0);
-			cont2 = cont;
-		}
-		if (tdn == NULL) { break; }
-
-		string tdnSh = tdn->getIDshort();
-#ifdef DEBUG
-		cout << tdnSh << " " ;
-#endif
-		//1st try to find in old heap
-		if (!syncedMID  &&(cont || cont2)){
-			auto search = oldMIDs.find(tdnSh);
-			if (search != oldMIDs.end()){
-				//it's in old.. give it to MIDseq, other rountines will del it
-				MIDseq = (*search).second;
-				oldMIDs.erase(search);
-			} else {
-				//read some new lines, maybe here?
-				MIDseq = IS->getDNA(cont3,2);
-				bool SameMIDHead( tdn->sameHead(MIDseq) );
-				while (!SameMIDHead && cont3){
-					//current MID not matching.. stove away
-					oldMIDs[MIDseq->getIDshort()] = MIDseq;
-
-					MIDseq = IS->getDNA(cont3,2);
-					SameMIDHead = tdn->sameHead(MIDseq);
-				}
-			}
-		} else {
-			MIDseq = IS->getDNA(cont3,2);
-		}
-		//FQ header version changes have to occur, before the MID tag is labelled
-		if (fqHeadVer){	
-			changePHead=MD->checkFastqHeadVersion(tdn,true); fqHeadVer=false;
-		}
-
-#ifdef _THREADED
-		if (Nthrds>0){//multi-Core
-			if (threadActive){
-				threads[thrCnt].join();
-			}
-
-			//threadAnalyzeDNA(MD,tdn);
-			threads[thrCnt] = std::thread(trippleThreadAnalyzeDNA,
-				MD,tdn,tdn2,MIDseq,changePHead);//,thrCnt);
-			thrCnt++;DNAinMem++;
-			if (thrCnt >= Nthrds){
-				thrCnt=0;
-				threadActive=true;
-				if (DNAinMem>DNAinMemory){
-					MD->writeAllStoredDNA();
-					DNAinMem=0;
-				}
-			}
-		} else { //single Core
-#endif
-		//all reads in memory, check their contents
-			vector<bool> chs = MD->analyzeDNA(tdn,tdn2,MIDseq,changePHead);
-			delete MIDseq;
-			if (pairs==1){
-				if( chs[0]){
-					MD->depPrep(tdn,NULL);
-					MD->saveForWrite(tdn, 1);
-				} else { delete tdn;}
-			} else {
-				if (chs[0] && chs[1]){
-					MD->depPrep(tdn,tdn2);
-					MD->saveForWrite(tdn, 1);
-					MD->saveForWrite(tdn2,2);
-				} else if (chs[0]){
-					MD->depPrep(tdn,tdn2);
-					MD->saveForWrite(tdn, 3);
-					MD->getFilters()->colStats[0].singleton++;
-					delete tdn2;
-				} else if (chs[1]){
-					MD->saveForWrite(tdn2,4);
-					MD->getFilters()->colStats[1].singleton++;
-					delete tdn;
-				}
-			}
-#ifdef _THREADED
-		}
-#endif
-		if (MD->haveToRestartSet()){
-			IS->allStreamReset();
-#ifdef DEBUG
-			cout << " Done\n";
-#endif
-			//return false, so controler knows to restart routine
-			return false;
-		}
-	}
-#ifdef _THREADED
-	if (threadActive){
-		for (uint i=0; i<threads.size();i++){
-			threads[i].join();
-		}
-	}
-#endif
-	if ( !MD->getFilters()->eval_reversingBC(true) || !MD->getFilters()->eval_reversingBC(false) ) {
-		//because out of BC find rountine, I have to reset this explicitly to not check agian
-		MD->getFilters()->restartFileSet(false);
-		IS->allStreamReset();
-		return false;
-	} 
-	MD->closeOutStreams();
-	return true;
-}
-*/
-void read_single(OptContainer& cmdArgs, MultiDNA* MD,InputStreamer* IS){
+void read_single(OptContainer& cmdArgs, shared_ptr<MultiDNA> MD, shared_ptr<InputStreamer> IS){
 	//output files
 #ifdef _THREADED
 	int Nthrds = atoi(cmdArgs["-threads"].c_str()) -2 ;
@@ -213,13 +64,13 @@ void read_single(OptContainer& cmdArgs, MultiDNA* MD,InputStreamer* IS){
 		threads.resize(Nthrds);
 	}
 #endif
-	Filters* curFil = MD->getFilters();
+	shared_ptr<Filters> curFil = MD->getFilters();
 	bool cont(true); bool sync(false);
 	while (cont){
-		DNA* tdn1 = IS->getDNA(cont,0,sync);
+		shared_ptr<DNA> tdn1 = IS->getDNA(cont,0,sync);
 		if (tdn1 == NULL) { 
 #ifdef DEBUG
-			cout << "NULL read returned" << endl;
+			cerr << "NULL read returned" << endl;
 #endif
 			break; 
 		}
@@ -247,14 +98,21 @@ void read_single(OptContainer& cmdArgs, MultiDNA* MD,InputStreamer* IS){
 			MD->saveForWrite(tdn);
 		}
 #else
+		curFil->sTotalPlus(0); 
 		int tagIdx(-2);
 		MD->analyzeDNA(tdn1,-1,-1,tagIdx);
-		MD->depPrep(tdn1,NULL);
-		if (curFil->Demulti2Fls()) {
-			curFil->write2Demulti(tdn1, 0, tagIdx,MD->getfastQoutVer());
+		//here BC has to be correctly set within DNA object
+		if (tagIdx == -1 ) {
+			tdn1->setBarcodeDetected(false); 
 		}
-		MD->saveForWrite(tdn1);
+		MD->depPrep(tdn1,NULL);
+		curFil->write2Demulti(tdn1, 0,MD->getfastQoutVer());
 
+		if (!MD->saveForWrite(tdn1)) {
+			cont = false;
+			break;
+		}
+		
 #endif
 		//if (tdn!=NULL && ch1 != tdn->isPassed()){cerr<<"isPassed is != ch1! Aborting..\n";exit(12);}
 	}
@@ -270,12 +128,14 @@ void read_single(OptContainer& cmdArgs, MultiDNA* MD,InputStreamer* IS){
 
 
 //is called from a while loop, that reads the DNA pairs
-void read_paired_DNAready(DNA* tdn, DNA* tdn2, DNA* MIDseq, bool MIDuse, MultiDNA* MD, int& revConstellation) {
+bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<DNA> MIDseq, bool MIDuse, shared_ptr<MultiDNA> MD, int& revConstellation) {
 	
-	if (tdn == NULL ) { return; } //|| tdn->length()==0
+	if (tdn == NULL) { return true; } //|| tdn->length()==0
 
-	Filters* curFil = MD->getFilters();
+	shared_ptr<Filters> curFil = MD->getFilters();
 
+	//register read at all with stat counter:
+	curFil->sTotalPlus(0); curFil->sTotalPlus(1);
 
 	//prep some variables
 	int BCoffs = curFil->getBCoffset();
@@ -284,14 +144,44 @@ void read_paired_DNAready(DNA* tdn, DNA* tdn2, DNA* MIDseq, bool MIDuse, MultiDN
 	bool doBCsAtAll = curFil->doBarcodes();
 	bool checkReversedRead = curFil->checkRevRd();
 
+
 	int tagIdx(-2); int tagIdx2(-2);
 	string presentBC(""); int c_err(0);
 	bool isReversed(false);//was a reversion detected?
 
 	if (MIDuse && MIDseq!= 0) { 
 		tagIdx = curFil->cutTag(MIDseq, presentBC, c_err, true); 
-		delete MIDseq; 
-		tdn->setBCnumber(tagIdx + BCoffs);
+//		delete MIDseq; 
+		tdn->setBCnumber(tagIdx, BCoffs);
+	}
+	if (checkBC2ndRd ) {
+		if (!dualBCs) {
+			bool revT = false;
+			bool Pr1 = curFil->findPrimer(tdn, 0, false, 0);
+			bool Pr2 = curFil->findPrimer(tdn2, 0, false, 0);
+			tagIdx = curFil->findTag(tdn, presentBC, c_err, true);
+			tagIdx2 = curFil->findTag(tdn2, presentBC, c_err, true);
+			if ( true &&checkReversedRead && (tagIdx2 < 0 && tagIdx < 0) ) {
+				tdn->reverse_transcribe(); tdn2->reverse_transcribe();
+				Pr1 = curFil->findPrimer(tdn, 0, false, 0);
+				Pr2 = curFil->findPrimer(tdn2, 0, false, 0);
+				tagIdx = curFil->findTag(tdn, presentBC, c_err, true);
+				tagIdx2 = curFil->findTag(tdn2, presentBC, c_err, true);
+				revT = true;
+			}
+			if ((tagIdx2 >= 0 && tagIdx < 0 && !Pr1) || (Pr2 && !Pr1)) { //swap first & second read
+				swap(tdn, tdn2);
+				revConstellation++;
+			}
+			/*else if (tagIdx2 < 0 && tagIdx < 0) {
+				int x = 0;
+			}*/
+			if (revT) {
+				tdn->reverse_transcribe(); tdn2->reverse_transcribe();
+			}
+		}
+		tagIdx2 = -2; tagIdx = -2;
+		tdn2->setpairREV();		tdn->setpairFWD();
 	}
 
 	//tdn->reverse_transcribe();
@@ -299,28 +189,35 @@ void read_paired_DNAready(DNA* tdn, DNA* tdn2, DNA* MIDseq, bool MIDuse, MultiDN
 	//tdn->matchSeqRev
 	bool ch1(false); if (tdn != NULL) { ch1 = tdn->isPassed(); }
 	bool ch2(false); bool ch2n(false);
-	if (checkReversedRead && !ch1 && tdn != NULL) {
+
+	//this is all about barcodes..
+	if (checkReversedRead  && tdn != NULL && tagIdx < 0) {
 		if (!MIDuse) { tagIdx = -2; }
-		curFil->sTotalMinus(0);
+//		curFil->sTotalMinus(0);
 		tdn->reverse_transcribe();
 		MD->analyzeDNA(tdn, -1, 0, tagIdx);
 		ch1 = tdn->isPassed();
 		isReversed = ch1;
+		if (!isReversed) {//reset
+			tdn->reverse_transcribe();
+		}
 	}
 
 	//test for reverse complemented reads (mohammad samples), when BC not found (NOT dual BC)
-	if (checkBC2ndRd && !ch1 && tdn2 != NULL) {// && !tdn->getBarcodeDetected() ) {
+	//in that case, this is the first read
+	if (false &&checkBC2ndRd && tagIdx < 0 && tdn2 != NULL) {// && !tdn->getBarcodeDetected() ) {
 											   //tdn2->reverse_transcribe();
 		if (!MIDuse) { tagIdx = -2; }
-		curFil->sTotalMinus(0);
+//		curFil->sTotalMinus(0);
 		MD->analyzeDNA(tdn2, -1, 0, tagIdx);
 		ch2n = tdn2->isPassed();
-		if (!ch2n) {
+		if (!ch2n && checkReversedRead) {
 			if (!MIDuse) { tagIdx = -2; }
-			curFil->sTotalMinus(0);
+//			curFil->sTotalMinus(0);
 			tdn2->reverse_transcribe();
 			MD->analyzeDNA(tdn2, -1, 0, tagIdx);
 			ch2n = tdn2->isPassed();
+			isReversed = ch2n;
 			if (!ch2n) { tdn2->reverse_transcribe(); }//reset to ori
 		}
 		if (ch2n) {//passed ch2 through BC filter, now really reverse
@@ -342,26 +239,16 @@ void read_paired_DNAready(DNA* tdn, DNA* tdn2, DNA* MIDseq, bool MIDuse, MultiDN
 	}
 
 
-//demultiplex write? do this first before DNA is deleted..
-	if (curFil->Demulti2Fls()) {
-		if (ch1) {
-			curFil->write2Demulti(tdn, 0, tagIdx,  MD->getfastQoutVer());
-		}
-		if (ch2) {
-			curFil->write2Demulti(tdn, 1, tagIdx, MD->getfastQoutVer());
-		}
-	}
 
-	//if ( ch1 ) {	cout << cnt << " \n";	}
+	//if ( ch1 ) {	cerr << cnt << " \n";	}
 	//normal case for check 2nd read
 	if (!ch2 && tdn2 != NULL) { //ch1&&
 								//tdn2->setBCnumber(tdn->getBCnumber());
-		if (doBCsAtAll && !dualBCs) {
+		if (doBCsAtAll && !dualBCs) { //only check in read1 for BC, if not dual BCing!!
 			tagIdx2 = tdn->getBCnumber();  // no 2nd BC, thus no BC search in 2nd read
 			if (tagIdx2 >= 0) {
 				tagIdx2 -= BCoffs;
-			}
-			if (tagIdx2 < -1) {//something wrong with BCoffs
+			}else if (tagIdx2 < -1) {//something wrong with BCoffs
 				cerr << "tagidx2 wrongly truncated to " << tagIdx2 << endl;
 			}
 		}
@@ -376,6 +263,13 @@ void read_paired_DNAready(DNA* tdn, DNA* tdn2, DNA* MIDseq, bool MIDuse, MultiDN
 		//tagIdx2 = -2; //reset just to be sure
 		curFil->dblBCeval(tagIdx, tagIdx2, presentBC, tdn, tdn2);
 		c_err = -1;
+
+		//check a second time that barcode was correctly identified, just to be double sure...
+		if (tagIdx != tagIdx2 || tdn->getBCnumber() != tdn2->getBCnumber()) {
+			cerr << "Unequal BC numbers:" << tagIdx << " : " << tagIdx2 << "; in object: " << tdn->getBCnumber() << " : " << tdn2->getBCnumber() << endl;
+			cerr << "In read:" << tdn->getID() << endl;
+			exit(835);
+		}
 	}
 	else if (tagIdx >= 0) {
 		if (MIDuse&&ch1) { curFil->BCintoHead(tagIdx, tdn, presentBC, c_err, true); }
@@ -383,34 +277,55 @@ void read_paired_DNAready(DNA* tdn, DNA* tdn2, DNA* MIDseq, bool MIDuse, MultiDN
 		if (ch2) { curFil->BCintoHead(tagIdx, tdn2, presentBC, c_err, true); }
 	}
 
+	if (tagIdx == -1 || tagIdx2 == -1) {
+		if (ch1) {
+			tdn->setBarcodeDetected(false);
+		}
+		if (ch2) {
+			tdn2->setBarcodeDetected(false);
+		}
+	}
 
-	//at this point the tagIDX *MUST* be correctly set (in the DNA object, tagIDX doesn;t matter)
+	//demultiplex write? do this first before DNA is deleted..
+	if (curFil->Demulti2Fls()) {
+		curFil->write2Demulti(tdn, 0, MD->getfastQoutVer());
+		curFil->write2Demulti(tdn2, 1, MD->getfastQoutVer());
+	}
+
+
+	//at this point the tagIDX *MUST* be correctly set + BCoffset (in the DNA object, tagIDX doesn;t matter)
 	MD->depPrep(tdn, tdn2);
+	MD->writeNonBCReads(tdn, tdn2);
 
+	int idx1 = 1; int idx2 = 2;
+	if (ch1 && !ch2) {
+		idx1 = 3; idx2 = 4;
+		if (tdn2 != NULL) { tdn2->failed(); }
+//		delete tdn2;
+	}
+	else if (ch2 && !ch1) {
+		idx2 = 4; idx1 = 3;
+		if (tdn != NULL) { tdn->failed(); }
+//		delete tdn;
+	}
+	else if (!ch1 && !ch2){ //nothing passes
+		if (tdn != NULL) { tdn->failed(); }
+		if (tdn2 != NULL) { tdn2->failed(); }
+//		delete tdn; delete tdn2;
+	}
 
-	if (ch1 && ch2) {
-		MD->saveForWrite(tdn, 1);
-		MD->saveForWrite(tdn2, 2);
+	//save for later .. and collect stats
+	if (!MD->saveForWrite(tdn, idx1) ||
+		!MD->saveForWrite(tdn2, idx2)) {
+		return false;
 	}
-	else if (ch1) {
-		MD->saveForWrite(tdn, 3);
-		curFil->colStats[0].singleton++;
-		delete tdn2;
-	}
-	else if (ch2) {
-		MD->saveForWrite(tdn2, 4);
-		curFil->colStats[1].singleton++;
-		delete tdn;
-	}
-	else { //nothing passes
-		delete tdn; delete tdn2;
-	}
+	return true;
 }
 
-bool read_paired(OptContainer& cmdArgs, MultiDNA* MD, InputStreamer* IS, bool MIDuse) {
+bool read_paired(OptContainer& cmdArgs, shared_ptr<MultiDNA> MD, shared_ptr<InputStreamer> IS, bool MIDuse) {
 	DNAmap oldMIDs;
 	bool fqHeadVer(true);
-	DNA* MIDseq(NULL);
+	shared_ptr<DNA> MIDseq(NULL);
 	bool syncedMID(MD->getFilters()->synRdPairs());
 
 	bool sync2pair(true);
@@ -423,7 +338,7 @@ bool read_paired(OptContainer& cmdArgs, MultiDNA* MD, InputStreamer* IS, bool MI
 
 	//bool syncedMID = false;
 #ifdef DEBUG
-	cout << "Read paired routine" << endl;
+	cerr << "Read paired routine" << endl;
 #endif	
 #ifdef _THREADED
 	vector<std::thread> threads( Nthrds );
@@ -443,12 +358,12 @@ bool read_paired(OptContainer& cmdArgs, MultiDNA* MD, InputStreamer* IS, bool MI
 		
 		
 		bool settdnSh(false);
-		DNA* tdn = IS->getDNA(cont, 0, sync2pair);
+		shared_ptr<DNA> tdn = IS->getDNA(cont, 0, sync2pair);
 
 		cnt++;
 		if ( tdn == NULL && !cont) { break; }
 		//tagIdx = -2; tagIdx2 = -2;
-		DNA* tdn2 = IS->getDNA(cont2, 1, sync2pair);//read_fastq_entry(fna2,fastQver,minQScore,lnCnt);
+		shared_ptr<DNA> tdn2 = IS->getDNA(cont2, 1, sync2pair);//read_fastq_entry(fna2,fastQver,minQScore,lnCnt);
 		if (!sync2pair &&  !cont2 && cont ) {
 			cerr << "Second provided file has not the same number of entries as first file.\n";
 			exit(5);
@@ -522,32 +437,32 @@ bool read_paired(OptContainer& cmdArgs, MultiDNA* MD, InputStreamer* IS, bool MI
 		//check if the PE format is right
 		if ( fqHeadVer ) { MD->checkFastqHeadVersion(tdn); fqHeadVer = false; }
 
-		read_paired_DNAready(tdn,tdn2, MIDseq, MIDuse, MD, revConstellation);
+		cont = read_paired_DNAready(tdn,tdn2, MIDseq, MIDuse, MD, revConstellation);
 	}
 
 	//check on remainders in pair2rem / pair1rem
 	if (sync2pair) {
 		if (pair1rem.size() > 0 && pair2rem.size() > 0) {
-			cout << "Trying to match " << pair1rem.size() << " / " << pair2rem.size() << " out-of-sync read pairs..\n";
+			cerr << "Trying to match " << pair1rem.size() << " / " << pair2rem.size() << " out-of-sync read pairs..\n";
 			DNAmap::iterator search;
 			for (DNAmap::iterator sr = pair1rem.begin(); sr != pair1rem.end(); sr++) {
 				search = pair2rem.find(sr->first);
 				if (search != pair2rem.end()) {
-					read_paired_DNAready(sr->second, search->second, MIDseq, MIDuse, MD, revConstellation);
+					cont = read_paired_DNAready(sr->second, search->second, MIDseq, MIDuse, MD, revConstellation);
 					pair2rem[search->first] = NULL; pair1rem[sr->first] = NULL;
 					pair2rem.erase(search); pair1rem.erase(  sr  );
 				}
 			}
-			cout << "Writing remaining " << pair1rem.size() << " / " << pair2rem.size() << " out-of-sync reads as singletons.\n";
+			cerr << "Writing remaining " << pair1rem.size() << " / " << pair2rem.size() << " out-of-sync reads as singletons.\n";
 		} else if (pair1rem.size() > 0 || pair2rem.size() > 0) {
-			cout << "Found " << pair1rem.size() << " / " << pair2rem.size() << " out-of-sync read pairs.\n";
+			cerr << "Found " << pair1rem.size() << " / " << pair2rem.size() << " out-of-sync read pairs.\n";
 		}
 		for (DNAmap::iterator sr = pair1rem.begin(); sr != pair1rem.end(); sr++) {
-			read_paired_DNAready(sr->second, NULL, MIDseq, MIDuse, MD, revConstellation);
+			cont = read_paired_DNAready(sr->second, NULL, MIDseq, MIDuse, MD, revConstellation);
 			pair1rem[sr->first] = NULL;//object needs to remain in mem
 		}
 		for (DNAmap::iterator sr = pair2rem.begin(); sr != pair2rem.end(); sr++) {
-			read_paired_DNAready(NULL, sr->second, MIDseq, MIDuse, MD, revConstellation);
+			cont = read_paired_DNAready(NULL, sr->second, MIDseq, MIDuse, MD, revConstellation);
 			pair2rem[sr->first] = NULL;
 //			pair2rem.erase(sr);
 		}
@@ -572,7 +487,7 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 			cmdArgs[string(argv[i])] = "T";
 		}
 	}
-	if (cmdArgs.find("-i_MID_fastq")  == cmdArgs.end()){
+	if (cmdArgs.find("-i_MID_fastq") == cmdArgs.end()) {
 		cmdArgs["-i_MID_fastq"] = "";
 	}
 	//set to default (empty)
@@ -594,11 +509,18 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 	if (cmdArgs.find("-optimalRead2Cluster_ref") == cmdArgs.end()) {//.ADDREF
 		cmdArgs["-optimalRead2Cluster_ref"] = "";
 	}
+	//just for debuggin purposes: write out all seqs, where no BC can be detected..
+	if (cmdArgs.find("-o_fastq_noBC") == cmdArgs.end()) {
+		cmdArgs["-o_fastq_noBC"] = "";
+	}
 	if (cmdArgs.find("-ucAdditionalCounts_refclust1") == cmdArgs.end()) {//.RESTREF
 		cmdArgs["-ucAdditionalCounts_refclust1"] = "";
 	}
-	if (cmdArgs.find("-OTU_fallback_refclust") == cmdArgs.end()) {
-		cmdArgs["-OTU_fallback_refclust"] = "";
+	if (cmdArgs.find("-ucAdditionalCounts_refclust1") == cmdArgs.end()) {//.RESTREF
+		cmdArgs["-ucAdditionalCounts_refclust1"] = "";
+	}
+	if (cmdArgs.find("-XfirstReads") == cmdArgs.end()) {
+		cmdArgs["-XfirstReads"] = "";
 	}
 			//filter sequence file for a specific subset of sequences
 	//these arguments can only occur together
@@ -617,7 +539,7 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 			string fmt = detectSeqFmt(cmdArgs["-i"]);
 			if (fmt == "empty") {
 				//exit(0);
-				cout << "Only empty input files\n";
+				cerr << "Only empty input files\n";
 			}
 			cmdArgs[fmt] = cmdArgs["-i"];
 		}
@@ -634,7 +556,7 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 				fstream fin;
 				fin.open(newQ.c_str(),ios::in);
 				if( fin.is_open() )	{
-					cout<<"Using quality file: "<<newQ <<endl;
+					cerr<<"Using quality file: "<<newQ <<endl;
 				} else if ((cmdArgs.find("-number")!=  cmdArgs.end() && cmdArgs["-number"] =="T")||
 					(cmdArgs["-specificReads"] != "")) {
 					cmdArgs["-i_qual"] = "";
@@ -651,8 +573,8 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 		if (cmdArgs.find("-o_fna")  == cmdArgs.end()){
 			if (cmdArgs.find("-o_fastq")  == cmdArgs.end()){
 				//cmdArgs["-o_fna"] = cmdArgs["-i_fna"]+string(".sdm");
-				//cout<<"Writing output fasta into "<<cmdArgs["-o_fna"]<<endl;
-				cout << "No output file will be written\n";
+				//cerr<<"Writing output fasta into "<<cmdArgs["-o_fna"]<<endl;
+				cerr << "No output file will be written\n";
 			}
 		} else {
 			if (cmdArgs.find("-o_fastq")  != cmdArgs.end()){
@@ -832,9 +754,9 @@ void prepareOutFiles(OptContainer& cmdArgs){
 */
 
 //manages read in of several input files and associated primers / tags to each file
-void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
+void separateByFile(shared_ptr<Filters> mainFil,OptContainer& cmdArgs){
 #ifdef DEBUG
-	cout << "separateByFile"<<endl;
+	cerr << "separateByFile"<<endl;
 #endif
 	vector<string> FastaF = mainFil->getFastaFiles();
 	vector<string> QualF = mainFil->getQualFiles();
@@ -880,17 +802,19 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 	}
 
 	//unique Fas files set up.. check for their existence
-	InputStreamer* testFiles = new InputStreamer(!bFASTQ, mainFil->getuserReqFastqVer(), "1");
+	shared_ptr<InputStreamer> testFiles = 
+		make_shared<InputStreamer>(!bFASTQ, mainFil->getuserReqFastqVer(), "1");
 	for (unsigned int i = 0; i < uniqueFas.size(); i++) {
 		int tarID = idx[i][0]; string tmp;
 		string x = testFiles->setupInput(path, i, tarID, uniqueFas, FastqF, FastaF, QualF, MIDfq, mainFil->isPaired(), cmdArgs["-onlyPair"], tmp, true);
 	}
-	delete testFiles;
+//	delete testFiles;
 	
 	string mainFile = "", outFile = cmdArgs["-o_fna"];
 	
 	//prepare for Seed extension or Read subselection, if requested
-	UClinks *ucl = NULL; ReadSubset* RDSset = NULL; Dereplicate* Dere = NULL;
+	UClinks *ucl = NULL; shared_ptr<ReadSubset> RDSset; 
+	shared_ptr<Dereplicate> Dere ;
 	if (mainFil->doOptimalClusterSeq()){
 		ucl = new UClinks(cmdArgs);
 		if (cmdArgs.find("-mergedPairs") != cmdArgs.end() && cmdArgs["-mergedPairs"] == "1"){
@@ -901,16 +825,16 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 		}
 		//are fallback fasta sequences available?
 		if (cmdArgs["-OTU_fallback"] != ""){
-			InputStreamer FALL = InputStreamer(true, mainFil->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"]);
-			FALL.setupFna(cmdArgs["-OTU_fallback"]);
-			ucl->setupDefSeeds(&FALL,mainFil);
+			shared_ptr<InputStreamer> FALL = make_shared<InputStreamer>(true, mainFil->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"]);
+			FALL->setupFna(cmdArgs["-OTU_fallback"]);
+			ucl->setupDefSeeds(FALL,mainFil);
 		}
 	}
 	else if (mainFil->doSubselReads()){
 		//this will select a list of reads and distribute these into multiple files
-		RDSset = new ReadSubset(cmdArgs["-specificReads"],"");
+		RDSset = make_shared<ReadSubset>(cmdArgs["-specificReads"],"");
 	} else if (mainFil->doDereplicate()) {
-		Dere = new Dereplicate(cmdArgs);
+		Dere = make_shared<Dereplicate>(cmdArgs);
 	}
 	//needs to attach to existing file sometimes
 	std::ios_base::openmode writeStatus = ios_base::out;
@@ -919,58 +843,63 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 
 
 			// main loop that goes over different files
+	int maxRds = mainFil->getXreads();
+	int totReadsRead(0);
 	for (unsigned int i=0; i<uniqueFas.size();i++ ){
-
-
 #ifdef DEBUG
-		cout << "new filter in round "<<i << endl;
+		cerr << "new filter in round "<<i << endl;
 #endif
-		
-		Filters fil = Filters(mainFil, idx[i][0]);
+		if (maxRds>0 && maxRds - totReadsRead <= 0) { break; }
+		shared_ptr<Filters> fil = make_shared<Filters>(mainFil, idx[i][0]);
 		unsigned int tarSi = (unsigned int) idx[i].size();
-		fil.allResize(tarSi);
+		fil->allResize(tarSi);
 		int tarID=-1;
 		bool BC2mode = mainFil->doubleBarcodes();
-
+		//int readsRead(0);
+		
+		
 		for (unsigned int j=0; j<tarSi;j++){ //fill in filter
 			tarID = idx[i][j];
 			if (mainFil->PrimerIdx[tarID]>-1) {
-				fil.addPrimerL(mainFil->PrimerL[mainFil->PrimerIdx[tarID]], j);
+				fil->addPrimerL(mainFil->PrimerL[mainFil->PrimerIdx[tarID]], j);
 			}
 			if (mainFil->doReversePrimers() && mainFil->PrimerIdxRev[tarID]>-1) {
-				fil.addPrimerR(mainFil->PrimerR[mainFil->PrimerIdxRev[tarID]], j);
+				fil->addPrimerR(mainFil->PrimerR[mainFil->PrimerIdxRev[tarID]], j);
 			}
-			fil.Barcode[j] = mainFil->Barcode[tarID];
+			fil->Barcode[j] = mainFil->Barcode[tarID];
 			if ( BC2mode ) {
-				fil.Barcode2[j] = mainFil->Barcode2[tarID];
+				fil->Barcode2[j] = mainFil->Barcode2[tarID];
 			}
-			fil.SampleID[j] = mainFil->SampleID[tarID];
-			fil.SampleID_Combi[j] = mainFil->SampleID_Combi[tarID];
-			fil.HeadSmplID[j] = mainFil->HeadSmplID[tarID];
-			if (fil.Demulti2Fls()) {
-				fil.demultiSinglFiles[j] = mainFil->demultiSinglFiles[tarID];
-				mainFil->demultiSinglFiles[tarID] = vector<ofstream*> (2,NULL);
+			fil->SampleID[j] = mainFil->SampleID[tarID];
+			fil->SampleID_Combi[j] = mainFil->SampleID_Combi[tarID];
+			fil->HeadSmplID[j] = mainFil->HeadSmplID[tarID];
+			if (fil->Demulti2Fls()) {
+				fil->demultiSinglFiles[j] = mainFil->demultiSinglFiles[tarID];
+				fil->demultiSinglFilesF[j] = mainFil->demultiSinglFilesF[tarID];
+				
+				//closing of ofstreams is only handled on the main object
+				//mainFil->demultiSinglFiles[tarID] = vector<ofstream*> (2,NULL);
 			}
 		}
-		fil.checkDoubleBarcode();
+		fil->checkDoubleBarcode();
 
 		if (tarID==-1){cerr<<"tar == -1. abort.\n";exit(10);}
 
 		//initialize object to handle all input file combinations
 		
-		InputStreamer* IS = new InputStreamer(!bFASTQ, mainFil->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"]);
+		shared_ptr<InputStreamer> IS = make_shared<InputStreamer>(!bFASTQ, mainFil->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"]);
 		if (tarSi < 2 && uniqueFas.size() > 1) {
 			IS->atFileYofX(i + 1, (uint)uniqueFas.size(), tarSi);
 		}
 		string mainFileShort = "";
-		mainFile = IS->setupInput(path, i, tarID, uniqueFas, FastqF, FastaF, QualF, MIDfq, fil.isPaired(), cmdArgs["-onlyPair"], mainFileShort, false);
+		mainFile = IS->setupInput(path, i, tarID, uniqueFas, FastqF, FastaF, QualF, MIDfq, fil->isPaired(), cmdArgs["-onlyPair"], mainFileShort, false);
 		if (!IS->qualityPresent()) {
-			fil.deactivateQualFilter();
-			cout << "\n*********\nWarning:: Quality file is not present.\nRecommended to abort demultiplexing.\n*********\n\n";
+			fil->deactivateQualFilter();
+			cerr << "\n*********\nWarning:: Quality file is not present.\nRecommended to abort demultiplexing.\n*********\n\n";
 		}
-		fil.BarcodePreStats();
-		fil.checkDoubleBarcode();
-		fil.checkDoubleSampleIDHead();
+		fil->BarcodePreStats();
+		fil->checkDoubleBarcode();
+		fil->checkDoubleSampleIDHead();
 
 
 		if (mainFil->doOptimalClusterSeq()){
@@ -980,13 +909,15 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 
 
 #ifdef DEBUG
-		cout << "Setting up output" << endl;
+		cerr << "Setting up output" << endl;
 #endif
 		//MultiDNA MD = MultiDNA(&fil, cmdArgs, writeStatus, RDSset);
-		MultiDNA* MD = new MultiDNA(&fil, cmdArgs, writeStatus, RDSset);
+		shared_ptr<MultiDNA> MD = make_shared<MultiDNA>(fil, cmdArgs, writeStatus, RDSset);
+		fil->setMultiDNA(MD);
+		if (maxRds > 0) { MD->setReadLimit(maxRds - totReadsRead); }
 		writeStatus = ofstream::app;
 		//prepare for BC checking (rev/fwd)
-		if (fil.doDemultiplex()){
+		if (fil->doDemultiplex()){
 			MD->setBCfixed(false, true);  
 			if (MD->isPEseq() == 2) { MD->setBCfixed(false, false); }
 		}
@@ -998,18 +929,18 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 		//only pull out a subset of sequences
 		if (mainFil->doSubselReads()) {
 			if (cmdArgs.find("-mocatFix") != cmdArgs.end()) {
-				cout << "MOCAT fix appplies\n";
+				cerr << "MOCAT fix appplies\n";
 				RDSset->findMatches(IS, MD, true);
 			}else{
 				RDSset->findMatches(IS, MD, false);
 			}
-			delete MD;
+			//delete MD;
 			continue;
 		}
 
 
 #ifdef DEBUG
-		cout << "Processing reads" << endl;
+		cerr << "Processing reads" << endl;
 #endif
 
 
@@ -1019,14 +950,6 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 		//**********************
 		//heavy reading routine
 		//**********************
-		/*if (false && IS->hasMIDseqs()){
-			//deactivated, done by read_paired since 1.17
-			while(!read_tripple(cmdArgs,MD,IS)){
-				//reset output files to previous state
-				MD->resetOutFilesAndFilter();
-			}
-		}
-		else*/ 
 		if (MD->isPEseq() == 2){
 			//read_paired(cmdArgs,MD,IS);
 			while ( !read_paired(cmdArgs, MD, IS, IS->hasMIDseqs()) ) {
@@ -1044,34 +967,38 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 		cerr << "All read processed" << endl;
 #endif
 		outFile = MD->leadOutFile();
-		delete MD;
+//		delete MD;
 #ifdef DEBUG
 			cerr << "MD deleted" << endl;
 #endif
 
 		//stats
-		fil.prepStats();
+		fil->prepStats();
 		if (IS->getCurFileN() == 0) {
-			fil.printStats(cout, mainFile, outFile, true);
+			fil->printStats(cerr, mainFile, outFile, true);
 		} else {
-			cout<<fil.shortStats(""); shortStats = true;
+			cerr<<fil->shortStats(""); shortStats = true;
 		}
-		shrtLog += fil.shortStats( mainFileShort);
-		delete IS;
+
+		totReadsRead += fil->totalAccepts();
+		
+		shrtLog += fil->shortStats( mainFileShort);
+//		delete IS;
 		//write log file
 		if (uniqueFas.size() > 1){//only print sub log if neccessary
 			ofstream log;
 			string logF = cmdArgs["-log"] + string("0") + itos(i);
 			log.open (logF.c_str() ,ios_base::out);
-			fil.printStats(log,mainFile,outFile,true);
+			fil->printStats(log,mainFile,outFile,true);
 			log.close();
 		}
-		mainFil->addStats(&fil,idx[i]);
+		mainFil->addStats(fil,idx[i]);
 #ifdef DEBUG
 		cerr << "Delete tmp filter" << endl;
 #endif
 		//and cleanup
-		//delete fil;
+		//
+		//fil;
 	}
 #ifdef DEBUG
 	cerr << "Prep final logging" << endl;
@@ -1095,11 +1022,11 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 		}
 		if (cmdArgs["-ucAdditionalCounts_refclust"] != ""){
 			//reference based clustering has some high qual seqs (no replacement with reads..)
-			InputStreamer FALL = InputStreamer(true, mainFil->getuserReqFastqVer());
+			shared_ptr<InputStreamer> FALL = make_shared<InputStreamer>(true, mainFil->getuserReqFastqVer());
 			//this reads in the SLV fna's & creates matrix entries for these
-			FALL.setupFna(cmdArgs["-OTU_fallback_refclust"]);
+			FALL->setupFna(cmdArgs["-OTU_fallback_refclust"]);
 			ucl->setRefMode();
-			ucl->addDefSeeds(&FALL, mainFil);
+			ucl->addDefSeeds(FALL, mainFil);
 			ucl->set2UC();
 			//mapping from ref OTU clustering
 			ucl->finishUCfile(mainFil, cmdArgs["-optimalRead2Cluster_ref"], false);
@@ -1110,7 +1037,7 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 		}
 		if (cmdArgs["-log"] != "nolog") {
 			log.open(logF.c_str(), ios_base::out);
-			ucl->printStats(cout);
+			ucl->printStats(cerr);
 			ucl->printStats(log);
 			log.close();
 		}
@@ -1120,13 +1047,15 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 			ucl->writeOTUmatrix(cmdArgs["-otu_matrix"], mainFil);
 		}
 		//needs to be written after OTU matrix (renaming scheme)
-		MultiDNA* MD = new MultiDNA(mainFil, cmdArgs, ios::out, NULL);
+		shared_ptr<MultiDNA> MD = make_shared<MultiDNA>(mainFil, cmdArgs, ios::out, RDSset);
+		mainFil->setMultiDNA(MD);
 		ucl->writeNewSeeds(MD, mainFil,false);
-		delete MD;
+		//delete MD;
 		//new fastas also need to be written..
-		MD = new MultiDNA(mainFil, cmdArgs, ios::out, NULL, ".ref",1);//force fna output
+		MD.reset(new MultiDNA(mainFil, cmdArgs, ios::out, RDSset, ".ref", 1));//force fna output
+		mainFil->setMultiDNA( MD );
 		ucl->writeNewSeeds(MD, mainFil,true,true);
-		delete MD;
+		//delete MD;
 
 
 		return;
@@ -1144,26 +1073,26 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 #endif
 
 	if (cmdArgs["-log"] == "nolog") {
-		delete Dere;
+//		delete Dere;
 		return;
 	}
 #ifdef DEBUG
-	cout << "DereLog start" << endl;
+	cerr << "DereLog start" << endl;
 #endif
 	if (mainFil->doDereplicate()) {
 		string dereLog = logF.substr(0,logF.length()-3) + "dere";
 		Dere->writeLog(dereLog, deLog);
-		delete Dere;
+//		delete Dere;
 	}
 	
 #ifdef DEBUG
-	cout << "DereLog end" << endl;
+	cerr << "DereLog end" << endl;
 #endif
 	if (shortStats) {
-		mainFil->printStats(std::cout, mainFile, outFile, true);
+		mainFil->printStats(std::cerr, mainFile, outFile, true);
 	}
 #ifdef DEBUG
-	cout << "other logs start" << endl;
+	cerr << "other logs start" << endl;
 #endif
 	//per sample success rate
 	string logPS = logF.substr(0, logF.length() - 3) + "acceptsPerSample.log";
@@ -1184,7 +1113,7 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 	mainFil->printGC(log, mainFil->isPaired());
 	log.close();
 #ifdef DEBUG
-	cout << "other logs end" << endl;
+	cerr << "other logs end" << endl;
 #endif
 
 
@@ -1206,8 +1135,9 @@ void separateByFile(Filters* mainFil,OptContainer& cmdArgs){
 	log.open (logF.c_str() ,ios_base::out);
 	mainFil->printHisto(log,1);
 	log.close();
+	mainFil->close_outFiles_demulti();
 #ifdef DEBUG
-	cout << "separateByFile finished" << endl;
+	cerr << "separateByFile finished" << endl;
 #endif
 
 }
@@ -1256,7 +1186,7 @@ void rewriteNumbers(OptContainer& cmdArgs){
 }
 
 void Announce_sdm(){
-	cout << endl << "This is sdm (simple demultiplexer) " << sdm_version << " " << sdm_status << "." << endl << endl;
+	cerr << endl << "This is sdm (simple demultiplexer) " << sdm_version << " " << sdm_status << "." << endl << endl;
 }
 void help_head(){
 	cout <<"------------------------------\nThis is sdm version "<<sdm_version <<" "<< sdm_status <<" help print\n------------------------------\n"<<endl;

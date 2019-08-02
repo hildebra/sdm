@@ -23,23 +23,23 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "containers.h"
 
 
-typedef std::map<std::string, DNA*> DNAmap;
+typedef std::map<std::string, shared_ptr<DNA>> DNAmap;
 
 
 //void openOutFiles(string files, string fmt,string );
 //void prepareOutFiles(OptContainer& cmdArgs);
 //void read_fastq(OptContainer& cmdArgs, MultiDNA* MD,string fileS);
-bool read_paired(OptContainer& cmdArgs, MultiDNA* MD, InputStreamer*,bool );
-void read_paired_DNAready(DNA* tdn, DNA* tdn2, DNA* MIDseq, bool MIDuse, MultiDNA* MD, int& revConstellation);
+bool read_paired(OptContainer& cmdArgs, shared_ptr<MultiDNA> MD, shared_ptr<InputStreamer>,bool );
+bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<DNA> MIDseq, bool MIDuse, MultiDNA* MD, int& revConstellation);
 
 //bool read_tripple(OptContainer& cmdArgs, MultiDNA* MD, InputStreamer*);
 
-void separateByFile(Filters* mainFil,OptContainer& cmdArgs);
+void separateByFile(shared_ptr<Filters> mainFil,OptContainer& cmdArgs);
 
-void threadAnalyzeDNA(DNA* tdn,MultiDNA* MD,int thrCnt);
-void trippleThreadAnalyzeDNA(MultiDNA* MD, DNA* tdn,DNA *tdn2,DNA* MIDseq,bool changePHead);//,int thrCnt=0);
+void threadAnalyzeDNA(shared_ptr<DNA> tdn, shared_ptr<MultiDNA> MD,int thrCnt);
+//void trippleThreadAnalyzeDNA(shared_ptr<MultiDNA> MD, shared_ptr<DNA> tdn,shared_ptr<DNA>tdn2,shared_ptr<DNA> MIDseq,bool changePHead);//,int thrCnt=0);
 
-void read_single(OptContainer& cmdArgs, MultiDNA* MD,InputStreamer*);
+void read_single(OptContainer& cmdArgs, shared_ptr<MultiDNA> MD, shared_ptr<InputStreamer> IS);
 
 bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs);
 
