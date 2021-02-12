@@ -24,8 +24,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "include/robin_set.h"
 #include "include/robin_hood.h"
 
-//#include <math.h>
-
 
 //fwd declaration
 class UClinks;
