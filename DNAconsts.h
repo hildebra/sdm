@@ -69,7 +69,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <assert.h>
 #include <time.h>
 #include <list>
-#include <math.h>
+#include <cmath>
 #include <unordered_map>
 #include <unordered_set>
 #include <fcntl.h>
