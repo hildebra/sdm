@@ -31,7 +31,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //match barcodes based on maps
 #define _fastBCmatch
 
-//keep a map of dereplicated file
+//keep a base_map of dereplicated file
 #define _MAPDEREPLICATE
 
 //KHASH for faster / lower mem access
@@ -41,15 +41,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define _CRT_SECURE_NO_WARNINGS 
 
 
+
+//#define ZSTR
+
 //read gzip'd files using zlib.h
 #if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
-#define _gziprea//d
 #else
+//#define _notgzip
 #define _gzipread
 #endif
 
 //DEBUG mode: more output
-#define DEB//UG
+#define DE//BUG
 
 
 #include <string>
@@ -81,6 +84,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #ifdef _gzipread
 #include "gzstream.h"
+#include "zstr.h"
 #endif
 
 
@@ -95,7 +99,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif // _WIN32
 
 
-static const float sdm_version = 1.47f;
+static const float sdm_version = 1.73f;
 static const char* sdm_status = "beta";
 
 
@@ -114,13 +118,13 @@ static const double SAqualP[110] = {1.000000e+00,7.943282e-01,6.309573e-01,5.011
 , 1.000000e-07, 1.000000e-07, 1.000000e-07, 1.000000e-07, 1.000000e-07, 1.000000e-07, 1.000000e-07, 1.000000e-07, 1.000000e-07, 1.000000e-07 };
 
 static const char DNA_SPACE[15] = {'A','C','G','T','N','R','Y','M','K','W','S','B','D','H','V'};
-static const int DNAinMemory = 5000;
-static const unsigned int maxFileStreams = 500;
+static const int DNA_MAX_IN_MEM = 5000;
+static const unsigned int MAX_FILE_STREAMS = 500;
 static const int RDBUFFER = 4096;
 
 typedef unsigned int uint;
 typedef unsigned long ulong;
-typedef int qual_score; //used for quality scores in vectors
+typedef signed char qual_score; //used for quality scores in vectors
 
 //seeding
 static const float BestLengthRatio = 0.83f;
@@ -128,6 +132,7 @@ static const float RefLengthRatio = 0.9f;
 static const qual_score MinQualDiff = 5;
 
 
+bool canonicalDNA(char x);
 
 void ini_DNAconstants();
 

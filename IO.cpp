@@ -16,126 +16,96 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-
+#include <queue>
+#include <mutex>
+#include <thread>
 #include "IO.h"
-//#include <map>
-void threadAnalyzeDNA(shared_ptr<DNA> tdn, shared_ptr<MultiDNA> MD,int thrCnt){
-	//if (threadActive){
-	//	threads[thrCnt].join();
-	//}
-	//threads[thrdsCnt] = 
-
-	//auto f1 = std::async(&MultiDNA::analyzeDNA,this,tdn);
-	int tagIdx(-2);
-	MD->analyzeDNA(tdn,thrCnt,-1,tagIdx);
-	MD->saveForWrite(tdn);
-}
-/*void trippleThreadAnalyzeDNA(shared_ptr<MultiDNA> MD, shared_ptr<DNA> tdn,shared_ptr<DNA> tdn2,
-							 shared_ptr<DNA> MIDseq,bool changePHead){//,int thrCnt){
+#include "Benchmark.h"
+#include <future>
+#include "IOMultithreaded.h"
 
 
-	int thrCnt = 0;
-	vector<bool> chs = MD->analyzeDNA(tdn,tdn2,MIDseq,changePHead,thrCnt);
-
-	if (chs[0] && chs[1]){
-		MD->saveForWrite(tdn,1);
-		MD->saveForWrite(tdn2,2);
-	} else if (chs[0]){
-		MD->saveForWrite(tdn,3);
-		MD->getFilters(thrCnt)->colStats[0].singleton++;
-	} else if (chs[1]){
-		MD->saveForWrite(tdn2,4);
-		MD->getFilters(thrCnt)->colStats[1].singleton++;
-	}
-
-}*/
-
-void read_single(OptContainer& cmdArgs, shared_ptr<MultiDNA> MD, shared_ptr<InputStreamer> IS){
-	//output files
-#ifdef _THREADED
-	int Nthrds = atoi(cmdArgs["-threads"].c_str()) -2 ;
-	int thrCnt = 0;
-	MD->setSubfilters(Nthrds);
-	bool threadActive(false);
-	bool writeThread(false);
-	vector<std::thread> threads( 0 );
-	if (Nthrds>=0){
-		MD->createWriteThread();writeThread=true;
-		threads.resize(Nthrds);
-	}
-#endif
+void read_single(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, shared_ptr<InputStreamer> IS){
 	shared_ptr<Filters> curFil = MD->getFilters();
-	bool cont(true); bool sync(false);
-	while (cont){
-		shared_ptr<DNA> tdn1 = IS->getDNA(cont,0,sync);
-		if (tdn1 == NULL) { 
+    curFil->singReadBC2();
+    int chkDerep(0);
+    bool checkReversedRead = curFil->checkRevRd();
+    bool cont(true); bool sync(false);
+    
+    while (cont){
+        shared_ptr<DNA> tdn1 = IS->getDNA(cont,0,sync);
+        
+        if (tdn1 == nullptr) {
 #ifdef DEBUG
-			cerr << "NULL read returned" << endl;
+            cerr << "NULL read returned" << endl;
 #endif
-			break; 
+            break;
+        }
+
+
+        //collect some info on general run parameters
+        curFil->preFilterSeqStat(tdn1, 0); // statistics preFilter
+        curFil->sTotalPlus(0);//mutex update total counts
+
+    
+        //thread starts here
+        int tagIdx(-2);
+        if (true && checkReversedRead ) {
+            string presentBC(""); int c_err(0);
+            int chkRev(1);
+            tagIdx = curFil->findTag(tdn1, presentBC, c_err, true, chkRev);
+/*			if (tagIdx < 0) { //check if on reversed_ read
+				dnaTemp1->reverse_transcribe();
+				tagIdx = curFil->findTag(dnaTemp1, presentBC, c_err, true);
+			}*/
+            
+            if (chkRev==0) {//no? undo revTranscr
+                tdn1->reverse_transcribe();
+            }
+        }
+        tagIdx = -2;
+
+        MD->analyzeDNA(tdn1, -1, -1, tagIdx);
+    
+    
+        //thread ends here
+        //here BC has to be correctly set within DNA object
+        MD->dereplicateDNA(tdn1, nullptr);//run in extra thread?
+		MD->write2Demulti(tdn1, 0, curFil->getBCoffset());
+    
+        
+        //first save read in mem, then write if enough reads accumulate in mem
+        //extra thread for multithreading??
+
+        // This is a quality collecting step
+        if (!MD->saveForWrite(tdn1)) {
+            cont = false;
+            break;
+		}
+		if (tdn1->isGreenQual()) {
+			chkDerep++;
 		}
 
-		/*if (!tdn1->isPassed()){
-		MD->addNoHeadDNA(tdn1);
-		tdn1 = tdn2; tdn2 = new DNA("","");
-		continue;
-		}*/
-#ifdef _THREADED
-		if (Nthrds>0){
-			if (threadActive){
-				threads[thrCnt].join();
-			}
-
-			//threadAnalyzeDNA(MD,tdn);
-			threads[thrCnt] = std::thread(threadAnalyzeDNA,tdn,MD,thrCnt);
-			thrCnt++;
-			if (thrCnt >= Nthrds){
-				thrCnt=0;
-				threadActive=true;
-			}
-		} else { //single Core
-			MD->analyzeDNA(tdn);
-			MD->saveForWrite(tdn);
-		}
-#else
-		curFil->sTotalPlus(0); 
-		int tagIdx(-2);
-		MD->analyzeDNA(tdn1,-1,-1,tagIdx);
-		//here BC has to be correctly set within DNA object
-		if (tagIdx == -1 ) {
-			tdn1->setBarcodeDetected(false); 
-		}
-		MD->depPrep(tdn1,NULL);
-		curFil->write2Demulti(tdn1, 0,MD->getfastQoutVer());
-
-		if (!MD->saveForWrite(tdn1)) {
-			cont = false;
-			break;
-		}
-		
-#endif
-		//if (tdn!=NULL && ch1 != tdn->isPassed()){cerr<<"isPassed is != ch1! Aborting..\n";exit(12);}
+		//if (tdn!=NULL && ch1 != tdn->isGreenQual()){cerr<<"isGreenQual is != ch1! Aborting..\n";exit(12);}
 	}
-#ifdef _THREADED
-	if (threadActive){
-		for (uint i=0; i<threads.size();i++){
-			threads[i].join();
-		}
-	}
-#endif
 	MD->closeOutStreams();
 }
 
 
 //is called from a while loop, that reads the DNA pairs
-bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<DNA> MIDseq, bool MIDuse, shared_ptr<MultiDNA> MD, int& revConstellation) {
-	
-	if (tdn == NULL) { return true; } //|| tdn->length()==0
+bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<DNA> MIDseq, 
+	bool MIDuse, shared_ptr<OutputStreamer> MD, int& revConstellation) {
+
+	if (tdn == nullptr) {
+	    return true;
+	} //|| tdn->length()==0
 
 	shared_ptr<Filters> curFil = MD->getFilters();
-
 	//register read at all with stat counter:
 	curFil->sTotalPlus(0); curFil->sTotalPlus(1);
+	//collect some info on general run parameters
+	curFil->preFilterSeqStat(tdn, 0);
+	curFil->preFilterSeqStat(tdn2, 1);
 
 	//prep some variables
 	int BCoffs = curFil->getBCoffset();
@@ -144,29 +114,30 @@ bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<
 	bool doBCsAtAll = curFil->doBarcodes();
 	bool checkReversedRead = curFil->checkRevRd();
 
-
 	int tagIdx(-2); int tagIdx2(-2);
 	string presentBC(""); int c_err(0);
 	bool isReversed(false);//was a reversion detected?
 
-	if (MIDuse && MIDseq!= 0) { 
+	if (MIDuse && MIDseq != nullptr) {
 		tagIdx = curFil->cutTag(MIDseq, presentBC, c_err, true); 
 //		delete MIDseq; 
 		tdn->setBCnumber(tagIdx, BCoffs);
 	}
-	if (checkBC2ndRd ) {
+
+    if (checkBC2ndRd ) {
 		if (!dualBCs) {
 			bool revT = false;
 			bool Pr1 = curFil->findPrimer(tdn, 0, false, 0);
 			bool Pr2 = curFil->findPrimer(tdn2, 0, false, 0);
-			tagIdx = curFil->findTag(tdn, presentBC, c_err, true);
-			tagIdx2 = curFil->findTag(tdn2, presentBC, c_err, true);
+			int chkRev1(-1), chkRev2(-1);
+			tagIdx = curFil->findTag(tdn, presentBC, c_err, true, chkRev1);
+			tagIdx2 = curFil->findTag(tdn2, presentBC, c_err, true, chkRev2);
 			if ( true &&checkReversedRead && (tagIdx2 < 0 && tagIdx < 0) ) {
 				tdn->reverse_transcribe(); tdn2->reverse_transcribe();
 				Pr1 = curFil->findPrimer(tdn, 0, false, 0);
 				Pr2 = curFil->findPrimer(tdn2, 0, false, 0);
-				tagIdx = curFil->findTag(tdn, presentBC, c_err, true);
-				tagIdx2 = curFil->findTag(tdn2, presentBC, c_err, true);
+				tagIdx = curFil->findTag(tdn, presentBC, c_err, true, chkRev1);
+				tagIdx2 = curFil->findTag(tdn2, presentBC, c_err, true, chkRev2);
 				revT = true;
 			}
 			if ((tagIdx2 >= 0 && tagIdx < 0 && !Pr1) || (Pr2 && !Pr1)) { //swap first & second read
@@ -184,10 +155,11 @@ bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<
 		tdn2->setpairREV();		tdn->setpairFWD();
 	}
 
+    
 	//tdn->reverse_transcribe();
 	MD->analyzeDNA(tdn, -1, 0, tagIdx);
 	//tdn->matchSeqRev
-	bool ch1(false); if (tdn != NULL) { ch1 = tdn->isPassed(); }
+	bool ch1(false); if (tdn != NULL) { ch1 = tdn->isGreenQual(); }
 	bool ch2(false); bool ch2n(false);
 
 	//this is all about barcodes..
@@ -196,7 +168,7 @@ bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<
 //		curFil->sTotalMinus(0);
 		tdn->reverse_transcribe();
 		MD->analyzeDNA(tdn, -1, 0, tagIdx);
-		ch1 = tdn->isPassed();
+		ch1 = tdn->isGreenQual();
 		isReversed = ch1;
 		if (!isReversed) {//reset
 			tdn->reverse_transcribe();
@@ -206,31 +178,31 @@ bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<
 	//test for reverse complemented reads (mohammad samples), when BC not found (NOT dual BC)
 	//in that case, this is the first read
 	if (false &&checkBC2ndRd && tagIdx < 0 && tdn2 != NULL) {// && !tdn->getBarcodeDetected() ) {
-											   //tdn2->reverse_transcribe();
+											   //dnaTemp2->reverse_transcribe();
 		if (!MIDuse) { tagIdx = -2; }
 //		curFil->sTotalMinus(0);
 		MD->analyzeDNA(tdn2, -1, 0, tagIdx);
-		ch2n = tdn2->isPassed();
+		ch2n = tdn2->isGreenQual();
 		if (!ch2n && checkReversedRead) {
 			if (!MIDuse) { tagIdx = -2; }
 //			curFil->sTotalMinus(0);
 			tdn2->reverse_transcribe();
 			MD->analyzeDNA(tdn2, -1, 0, tagIdx);
-			ch2n = tdn2->isPassed();
+			ch2n = tdn2->isGreenQual();
 			isReversed = ch2n;
 			if (!ch2n) { tdn2->reverse_transcribe(); }//reset to ori
 		}
 		if (ch2n) {//passed ch2 through BC filter, now really reverse
-				   //1st, now 2nd pair
+				   //1st, now 2nd pair_
 			tdn2->setpairFWD();
 			ch1 = ch2n;
 			if (tdn != NULL) {
 				//tdn->reverse_transcribe(); 
 				tdn->setpairREV();
 				tdn->reset();
-				if (!dualBCs) { tagIdx2 = tdn->getBCnumber(); } // no 2nd BC, thus no BC search in 2nd read
+				if (!dualBCs) { tagIdx2 = tdn->getBarcodeNumber(); } // no 2nd BC, thus no BC search in 2nd read
 				MD->analyzeDNA(tdn, -1, 1, tagIdx2);
-				ch2 = tdn->isPassed();
+				ch2 = tdn->isGreenQual();
 			}
 			swap(tdn, tdn2);
 			revConstellation++;
@@ -238,14 +210,12 @@ bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<
 
 	}
 
-
-
 	//if ( ch1 ) {	cerr << cnt << " \n";	}
 	//normal case for check 2nd read
 	if (!ch2 && tdn2 != NULL) { //ch1&&
-								//tdn2->setBCnumber(tdn->getBCnumber());
+								//dnaTemp2->setBCnumber(tdn->getBarcodeNumber());
 		if (doBCsAtAll && !dualBCs) { //only check in read1 for BC, if not dual BCing!!
-			tagIdx2 = tdn->getBCnumber();  // no 2nd BC, thus no BC search in 2nd read
+			tagIdx2 = tdn->getBarcodeNumber();  // no 2nd BC, thus no BC search in 2nd read
 			if (tagIdx2 >= 0) {
 				tagIdx2 -= BCoffs;
 			}else if (tagIdx2 < -1) {//something wrong with BCoffs
@@ -254,7 +224,7 @@ bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<
 		}
 		if (isReversed) { tdn2->reverse_transcribe(); }
 		MD->analyzeDNA(tdn2, -1, 1, tagIdx2);
-		ch2 = tdn2->isPassed();
+		ch2 = tdn2->isGreenQual();
 	}
 
 	//set up BC in DNA header
@@ -265,9 +235,9 @@ bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<
 		c_err = -1;
 
 		//check a second time that barcode was correctly identified, just to be double sure...
-		if (tagIdx != tagIdx2 || tdn->getBCnumber() != tdn2->getBCnumber()) {
-			cerr << "Unequal BC numbers:" << tagIdx << " : " << tagIdx2 << "; in object: " << tdn->getBCnumber() << " : " << tdn2->getBCnumber() << endl;
-			cerr << "In read:" << tdn->getID() << endl;
+		if (tagIdx != tagIdx2 || tdn->getBarcodeNumber() != tdn2->getBarcodeNumber()) {
+			cerr << "Unequal BC numbers:" << tagIdx << " : " << tagIdx2 << "; in object: " << tdn->getBarcodeNumber() << " : " << tdn2->getBarcodeNumber() << endl;
+			cerr << "In read:" << tdn->getId() << endl;
 			exit(835);
 		}
 	}
@@ -277,6 +247,7 @@ bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<
 		if (ch2) { curFil->BCintoHead(tagIdx, tdn2, presentBC, c_err, true); }
 	}
 
+	
 	if (tagIdx == -1 || tagIdx2 == -1) {
 		if (ch1) {
 			tdn->setBarcodeDetected(false);
@@ -286,33 +257,40 @@ bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<
 		}
 	}
 
-	//demultiplex write? do this first before DNA is deleted..
-	if (curFil->Demulti2Fls()) {
-		curFil->write2Demulti(tdn, 0, MD->getfastQoutVer());
-		curFil->write2Demulti(tdn2, 1, MD->getfastQoutVer());
-	}
 
-
-	//at this point the tagIDX *MUST* be correctly set + BCoffset (in the DNA object, tagIDX doesn;t matter)
-	MD->depPrep(tdn, tdn2);
-	MD->writeNonBCReads(tdn, tdn2);
 
 	int idx1 = 1; int idx2 = 2;
 	if (ch1 && !ch2) {
 		idx1 = 3; idx2 = 4;
 		if (tdn2 != NULL) { tdn2->failed(); }
-//		delete tdn2;
+		//		delete dnaTemp2;
 	}
 	else if (ch2 && !ch1) {
 		idx2 = 4; idx1 = 3;
 		if (tdn != NULL) { tdn->failed(); }
-//		delete tdn;
+		//		delete tdn;
 	}
-	else if (!ch1 && !ch2){ //nothing passes
+	else if (!ch1 && !ch2) { //nothing passes
 		if (tdn != NULL) { tdn->failed(); }
 		if (tdn2 != NULL) { tdn2->failed(); }
-//		delete tdn; delete tdn2;
+		//		delete tdn; delete dnaTemp2;
 	}
+
+	//pre-merge step
+	if (MD->mergeReads()) {
+		MD->findSeedForMerge(tdn, tdn2);
+	}
+
+	//demultiplex write? do this first before DNA is deleted..
+	//at this point the tagIDX *MUST* be correctly set + BCoffset (in the DNA object, tagIDX doesn;t matter)
+	MD->write2Demulti(tdn, tdn2, curFil->getBCoffset());
+	MD->dereplicateDNA(tdn, tdn2);
+	MD->writeNonBCReads(tdn, tdn2);
+
+    // Test
+    /*if (OutStreamer->b_merge_pairs_derep_ && tdn->merge_seed_pos_ > 0) {
+        auto dna_merged = ReadMerger::merge(tdn, tdn2);
+    }*/
 
 	//save for later .. and collect stats
 	if (!MD->saveForWrite(tdn, idx1) ||
@@ -322,14 +300,13 @@ bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, shared_ptr<
 	return true;
 }
 
-bool read_paired(OptContainer& cmdArgs, shared_ptr<MultiDNA> MD, shared_ptr<InputStreamer> IS, bool MIDuse) {
+
+bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, 
+	shared_ptr<InputStreamer> IS, bool MIDuse) {
 	DNAmap oldMIDs;
 	bool fqHeadVer(true);
 	shared_ptr<DNA> MIDseq(NULL);
-	bool syncedMID(MD->getFilters()->synRdPairs());
 
-	bool sync2pair(true);
-	DNAmap pair1rem,pair2rem,MIDrem;
 
 	/*if (sync2pair && MIDuse) {
 		cout << "Can not sync read pairs, while explicit MID sequences are being used! (not supported, sorry)\n";
@@ -345,134 +322,43 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<MultiDNA> MD, shared_ptr<Inpu
 	int Nthrds = atoi(cmdArgs["-threads"].c_str()) -1 ;
 	int thrCnt = 0;
 	bool threadActive(false);
-	MD->setSubfilters(Nthrds);
+	OutStreamer->setSubfilters(Nthrds);
 	int DNAinMem(0);
 #endif
 	bool cont(true),cont2(true),cont3(true);
 	int revConstellation(0);
 	int cnt(0); 
-	string tdnSh(""), tdnSh2("");
 	bool switching(true); // important to keep track of this, to fix swapped read pairs
 
 	while ( cont ) {
-		
-		
-		bool settdnSh(false);
-		shared_ptr<DNA> tdn = IS->getDNA(cont, 0, sync2pair);
-
+		bool sync = false;
+		shared_ptr<DNA> tdn = IS->getDNA(cont, 0, sync);//takeOver
 		cnt++;
-		if ( tdn == NULL && !cont) { break; }
+		if ( tdn == nullptr && !cont) { break; }
 		//tagIdx = -2; tagIdx2 = -2;
-		shared_ptr<DNA> tdn2 = IS->getDNA(cont2, 1, sync2pair);//read_fastq_entry(fna2,fastQver,minQScore,lnCnt);
-		if (!sync2pair &&  !cont2 && cont ) {
+		shared_ptr<DNA> tdn2 = IS->getDNA(cont2, 1, sync);//takeOver
+		if (!sync &&  !cont2 && cont ) {
 			cerr << "Second provided file has not the same number of entries as first file.\n";
 			exit(5);
 		}
-		//syn 2nd pair
-		if (sync2pair) {
-			if (!settdnSh) { tdnSh = tdn->getIDshort(); settdnSh = true; }
-			if (tdn2 != NULL) { tdnSh2 = tdn2->getIDshort(); }else { tdnSh2 = ""; }
-			DNAmap::iterator search;
-			if (tdnSh2 != tdnSh) {//something wrong at all? ini search on old pair2
-				if (switching) {
-					search = pair2rem.find(tdnSh);
-					if (search != pair2rem.end()) { pair2rem[tdnSh2] = tdn2; tdn2 = search->second; pair2rem.erase(search); tdnSh2 = tdn2->getIDshort(); switching = !switching;}
-				}	else {
-					search = pair1rem.find(tdnSh2);
-					if (search != pair1rem.end()) { pair1rem[tdnSh] = tdn; tdn = search->second; pair1rem.erase(search); tdnSh = tdn->getIDshort();  switching = !switching;}
-				}
-			}
-			while (tdnSh2 != tdnSh) {// still wrong? search in old unmatched reads, switching between 1/2
-				if (switching) {
-					search = pair1rem.find(tdnSh2); pair1rem[tdnSh] = tdn;
-					if (search != pair1rem.end()) {  
-						tdn = search->second; pair1rem.erase(search);
-					}else {//nothing? try getting new reads, maybe there is a match here
-						tdn = IS->getDNA(cont, 0, sync2pair);
-					}
-					if (tdn != NULL) { tdnSh = tdn->getIDshort(); } else {tdnSh = "";}
-				} else {
-					search = pair2rem.find(tdnSh); pair2rem[tdnSh2] = tdn2;
-					if (search != pair2rem.end()) {  tdn2 = search->second; pair2rem.erase(search); 
-					} else {
-						tdn2 = IS->getDNA(cont2, 1, sync2pair);
-					}
-					if (tdn2 != NULL) { tdnSh2 = tdn2->getIDshort(); }	else { tdnSh2 = ""; }
-				}
-				
-				//read 1 / read 2
-				switching = !switching;
-			}
-		}
-		if (cnt % 50 == 0) { switching = !switching; } //add some randomness to the process.
-		//security check that pairs are in sync
-		if (!sync2pair && cnt % 1000 == 0) {//default check for synced reads, no matter what
-			if (!settdnSh) { tdnSh = tdn->getIDshort(); settdnSh = true; }
-			if (!tdn2->sameHead(tdnSh) ) { cerr << "WARNING: read pairs out of sync (" << cnt << "): " << tdnSh << " " << tdnSh2 << endl; }
-		}
-		//sync mid sequence header
+		// is a MID sequence file given as input option? read & get barcode
 		if (MIDuse) {
-			if (!settdnSh) {tdnSh = tdn->getIDshort(); settdnSh = true;	}
-			//1st try to find in old heap
-			if ( !syncedMID && (cont || cont2) ) {
-				auto search = oldMIDs.find(tdnSh);
-				if ( search != oldMIDs.end() ) {
-					//it's in old.. give it to MIDseq, other rountines will del it
-					MIDseq = (*search).second;	oldMIDs.erase(search);
-				} else {
-					//read some new lines, maybe here?
-					MIDseq = IS->getDNA(cont3, 2, sync2pair);
-					bool SameMIDHead(MIDseq->sameHead(tdnSh));
-					while ( !SameMIDHead && cont3 ) {
-						//current MID not matching.. stove away
-						oldMIDs[MIDseq->getIDshort()] = MIDseq;	MIDseq = IS->getDNA(cont3, 2, sync2pair);
-						SameMIDHead = MIDseq->sameHead(tdnSh);
-					}
-				}
-			} else {MIDseq = IS->getDNA(cont3, 2, sync2pair);}
-			MIDseq->setMIDseq(true);
+			string tdnSh(""), tdnSh2("");tdnSh = tdn->getShortId();
+		    MIDseq = IS->getDNA(cont3, 2, sync);MIDseq->setMIDseq(true);
 			//FQ header version changes have to occur, before the MID tag is labelled
-			
 		}
 		//check if the PE format is right
 		if ( fqHeadVer ) { MD->checkFastqHeadVersion(tdn); fqHeadVer = false; }
-
 		cont = read_paired_DNAready(tdn,tdn2, MIDseq, MIDuse, MD, revConstellation);
 	}
 
-	//check on remainders in pair2rem / pair1rem
-	if (sync2pair) {
-		if (pair1rem.size() > 0 && pair2rem.size() > 0) {
-			cerr << "Trying to match " << pair1rem.size() << " / " << pair2rem.size() << " out-of-sync read pairs..\n";
-			DNAmap::iterator search;
-			for (DNAmap::iterator sr = pair1rem.begin(); sr != pair1rem.end(); sr++) {
-				search = pair2rem.find(sr->first);
-				if (search != pair2rem.end()) {
-					cont = read_paired_DNAready(sr->second, search->second, MIDseq, MIDuse, MD, revConstellation);
-					pair2rem[search->first] = NULL; pair1rem[sr->first] = NULL;
-					pair2rem.erase(search); pair1rem.erase(  sr  );
-				}
-			}
-			cerr << "Writing remaining " << pair1rem.size() << " / " << pair2rem.size() << " out-of-sync reads as singletons.\n";
-		} else if (pair1rem.size() > 0 || pair2rem.size() > 0) {
-			cerr << "Found " << pair1rem.size() << " / " << pair2rem.size() << " out-of-sync read pairs.\n";
-		}
-		for (DNAmap::iterator sr = pair1rem.begin(); sr != pair1rem.end(); sr++) {
-			cont = read_paired_DNAready(sr->second, NULL, MIDseq, MIDuse, MD, revConstellation);
-			pair1rem[sr->first] = NULL;//object needs to remain in mem
-		}
-		for (DNAmap::iterator sr = pair2rem.begin(); sr != pair2rem.end(); sr++) {
-			cont = read_paired_DNAready(NULL, sr->second, MIDseq, MIDuse, MD, revConstellation);
-			pair2rem[sr->first] = NULL;
-//			pair2rem.erase(sr);
-		}
-
-	}
+	
 	//close shop
 	MD->revConstellationCnts(revConstellation);
 	MD->closeOutStreams();
 	return true;
 }
+
 
 bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 	if (argc%2!=1){
@@ -496,6 +382,9 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 	}
 	if (cmdArgs.find("-otu_matrix") == cmdArgs.end()) {
 		cmdArgs["-otu_matrix"] = "";
+	}
+	if (cmdArgs.find("-derepPerSR") == cmdArgs.end()) {
+		cmdArgs["-derepPerSR"] = "0";
 	}
 	if (cmdArgs.find("-ucAdditionalCounts") == cmdArgs.end()) {//.ADD
 		cmdArgs["-ucAdditionalCounts"] = "";
@@ -532,9 +421,17 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 	if (cmdArgs.find("-onlyPair") == cmdArgs.end()) {
 		cmdArgs["-onlyPair"] = "";
 	}
+	if (cmdArgs.find("-pairedDemulti") == cmdArgs.end()) {
+		cmdArgs["-pairedDemulti"] = "0"; // by default: do not only report proper pairs
+	}
+	
+	if (cmdArgs.find("-uparseVer") == cmdArgs.end()) {
+		cmdArgs["-uparseVer"] = "";
+	}
+
 
 	if (cmdArgs.find("-i_path")  == cmdArgs.end()){ //ok files are not given in mapping file
-		//check if dna and qual are passed
+		//check if dna and qual_ are passed
 		if (cmdArgs.find("-i") != cmdArgs.end()) {
 			string fmt = detectSeqFmt(cmdArgs["-i"]);
 			if (fmt == "empty") {
@@ -552,7 +449,7 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 				string newQ = cmdArgs["-i_fna"];
 				int pos = (int)newQ.find_last_of(".");
 				newQ = newQ.substr(0,pos);
-				newQ += string(".qual");
+				newQ += string(".qual_");
 				fstream fin;
 				fin.open(newQ.c_str(),ios::in);
 				if( fin.is_open() )	{
@@ -589,8 +486,8 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 		}
 	}
 
-	/*	if (cmdArgs.find("-map")  == cmdArgs.end()){
-	cerr<<"You did not supply a mapping file. \nPlease give the path to your mapping file as command line argument:\n  -map <PathToMappingFile>\n";
+	/*	if (cmdArgs.find("-base_map")  == cmdArgs.end()){
+	cerr<<"You did not supply a mapping file. \nPlease give the path to your mapping file as command line argument:\n  -base_map <PathToMappingFile>\n";
 	exit(2);
 	}  */
 	if (cmdArgs.find("-o_qual")  == cmdArgs.end()){
@@ -613,17 +510,17 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 		vector<string> tvec = splitByComma(ofile1,false); 
 		ofile1 = tvec[0];
 		//remove file ending
-		unsigned int pos = (unsigned int) ofile1.find_last_of(".");
+		size_t pos = ofile1.find_last_of(".");
 		if (pos != string::npos){ofile1 = ofile1.substr(0,pos);	}
 		if (tvec.size()==2){
 			ofile1+= "_" + getFileNoPath(tvec[1]);
-			pos = (unsigned int) ofile1.find_last_of(".");
+			pos =  ofile1.find_last_of(".");
 			if (pos != string::npos){ofile1 = ofile1.substr(0,pos);	}
 		}
 		cmdArgs["-log"] = ofile1 + string(".log");
 	}
 	string ofile1 = cmdArgs["-log"];
-	ofile1.find_last_of(".log");
+	//ofile1.find_last_of(".log");
 	size_t logPos = ofile1.find_last_of(".");
 	if (logPos != std::string::npos){
 		ofile1 = ofile1.substr(0,logPos);
@@ -631,10 +528,17 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 	if (cmdArgs.find("-length_hist")  == cmdArgs.end()){
 		cmdArgs["-length_hist"]  = ofile1 + string("_lenHist.txt");
 	}
-	if (cmdArgs.find("-qual_hist")  == cmdArgs.end()){
-		cmdArgs["-qual_hist"]  = ofile1 + string("_qualHist.txt");
+	if (cmdArgs.find("-qual_hist") == cmdArgs.end()) {
+		cmdArgs["-qual_hist"] = ofile1 + string("_qualHist.txt");
 	}
-	//-length_hist   -qual_hist
+	if (cmdArgs.find("-merg_readpos") == cmdArgs.end()) {
+		cmdArgs["-merg_readpos"] = ofile1 + string("_mergRpos.txt");
+	}
+	if (cmdArgs.find("-	qual_readpos") == cmdArgs.end()) {
+		cmdArgs["-qual_readpos"] = ofile1 + string("_qualRpos.txt");
+	}
+
+		//-length_hist   -qual_hist
 
 	if (cmdArgs.find("-sample_sep")  == cmdArgs.end()){
 		cmdArgs["-sample_sep"] = DEFAULT_BarcodeNameSep;
@@ -646,7 +550,10 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 	if (cmdArgs.find("-o_qual_offset") == cmdArgs.end()) {
 		cmdArgs["-o_qual_offset"] = DEFAULT_output_qual_offset;
 	}
-	
+	if (cmdArgs.find("-pairedRD_HD_out") == cmdArgs.end()) {
+		cmdArgs["-pairedRD_HD_out"] = DEFAULT_pairedRD_HD_out;
+	}
+
 	if (cmdArgs.find("-ignore_IO_errors") == cmdArgs.end()) {
 		cmdArgs["-ignore_IO_errors"] = DEFAULT_ignore_IO_errors;
 	} else if (cmdArgs["-ignore_IO_errors"] != "0" && cmdArgs["-ignore_IO_errors"] != "1") {
@@ -754,525 +661,1017 @@ void prepareOutFiles(OptContainer& cmdArgs){
 */
 
 //manages read in of several input files and associated primers / tags to each file
-void separateByFile(shared_ptr<Filters> mainFil,OptContainer& cmdArgs){
+void separateByFile(shared_ptr<Filters> mainFilter, OptContainer& cmdArgs){
 #ifdef DEBUG
 	cerr << "separateByFile"<<endl;
 #endif
-	vector<string> FastaF = mainFil->getFastaFiles();
-	vector<string> QualF = mainFil->getQualFiles();
-	vector<string> FastqF = mainFil->getFastqFiles();
-	vector<string> MIDfq = mainFil->getMIDfqFiles();
-	vector<string> tar;
-	vector < vector<int> > idx(0);
-	bool bFASTQ = true;
+
+//	mainFilter->ini_filestruct(cmdArgs);
+	
+	vector<string> FastaF = mainFilter->getFastaFiles();
+	vector<string> QualF = mainFilter->getQualFiles();
+	vector<string> FastqF = mainFilter->getFastqFiles();
+	vector<string> MIDfq = mainFilter->getMIDfqFiles();
+	vector<string> fastXtar;
+	
+	// Indicates if FASTQ files were submitted
+	bool isFastq = true;
+	//setup once at start
+	ReadMerger* merger = new ReadMerger(true);
+
+	
 	//prepareOutFiles(cmdArgs);
 	string path="";
+
+	//set up some log structures
+	string deLog("");//dereplication main log
+	string logF = cmdArgs["-log"], logFA = cmdArgs["-log"].substr(0, cmdArgs["-log"].length() - 3) + "add.log";
+
+	
+	// Set folder path
 	if (cmdArgs.find("-i_path")  != cmdArgs.end() && cmdArgs["-i_path"].length() > 2){
 		path=cmdArgs["-i_path"] + string("/");
 	}
 
-
-	if (FastaF.size()>0){ //fasta way
-		tar = FastaF;
-		bFASTQ = false;
-	} else { // fastq way
-		tar = FastqF;
-		if (FastqF.size()==0){
+    // Set up b_derep_as_fasta_ or fastq way and save file vector in tar in case it is zipped
+	if (FastaF.size() > 0) { // If b_derep_as_fasta_ vector contains elements
+		fastXtar = FastaF;
+        isFastq = false; // Set boolean Fastq to false
+	} else { // If no FastaF present assume there are Fastq files
+		fastXtar = FastqF;
+		if (FastqF.size()==0){ // no Fasta and no Fastq files -> abort
 			cerr<<"No FastQ or Fasta file given.\n  Aborting..\n";
 			exit(12);
 		}
 	}
 
-	vector<string> uniqueFas(1,tar[0]);
-	idx.push_back(vector<int> (1,0));
+	// Unique Fas initialized with first element of tar (can be b_derep_as_fasta_ and fastq)
+	// Contains all unique b_derep_as_fasta_ or fastq files from the mapping file
+	//vector<string> uniqueFastxFiles(1, fastXtar[0]);
+	unordered_map<string, int> uniqueFastxFiles;
 
-	for (unsigned int i=1; i<tar.size(); i++){
+	// idx content: [ [0] ]
+	// idx contains one row (vector) for each unique string in tar
+	// This vector then contains the indices at which this string occurs in tar
+	vector < vector<int> > idx(0);
+	//idx.push_back(vector<int> (1,0));
+
+
+	// We dont know if it is a tar yet, but we call it tar
+	//this routine is important for managing the blocks of files to be read together
+	for (unsigned int i=0; i<fastXtar.size(); i++){
 		bool suc = false;
-		for (unsigned int j=0; j<uniqueFas.size(); j++){
-			if (tar[i] == uniqueFas[j]){ //the same
+		auto XX = uniqueFastxFiles.find(fastXtar[i]);
+		if (XX == uniqueFastxFiles.end()) {//no entry for this fastq yet
+			uniqueFastxFiles[fastXtar[i]] = (int) uniqueFastxFiles.size();
+			idx.push_back(vector<int>(1, i));
+		} else {//exists already..
+			idx[XX->second].push_back(i);
+		}
+
+		/*for (unsigned int j=0; j < uniqueFastxFiles.size(); j++){
+			if (fastXtar[i] == uniqueFastxFiles[j]){ //the same
 				idx[j].push_back(i);
 				suc=true;
 				break;
 			}
 		}
 		if (!suc){
-			uniqueFas.push_back(tar[i]);
+			uniqueFastxFiles.push_back(fastXtar[i]);
 			idx.push_back(vector<int> (1,i));
-		}
+		}*/
 	}
+	
 
 	//unique Fas files set up.. check for their existence
 	shared_ptr<InputStreamer> testFiles = 
-		make_shared<InputStreamer>(!bFASTQ, mainFil->getuserReqFastqVer(), "1");
-	for (unsigned int i = 0; i < uniqueFas.size(); i++) {
-		int tarID = idx[i][0]; string tmp;
-		string x = testFiles->setupInput(path, i, tarID, uniqueFas, FastqF, FastaF, QualF, MIDfq, mainFil->isPaired(), cmdArgs["-onlyPair"], tmp, true);
+		make_shared<InputStreamer>(!isFastq,mainFilter->getuserReqFastqVer(),"1","1");
+	// For each unique Fa file
+//	for (unsigned int i = 0; i < uniqueFastxFiles.size(); i++) {
+	for (auto uFX: uniqueFastxFiles) {
+			int tarID = idx[uFX.second][0]; string tmp;
+		string x = testFiles->setupInput(path, tarID, uFX.first, FastqF, FastaF,
+			QualF, MIDfq, mainFilter->isPaired(), cmdArgs["-onlyPair"], tmp, true);
 	}
+	mainFilter->SRessentials(uniqueFastxFiles.size());
 //	delete testFiles;
+
+    // mainFile for processing
+	string mainFile = "";
+	string outFile = cmdArgs["-o_fna"];
 	
-	string mainFile = "", outFile = cmdArgs["-o_fna"];
-	
-	//prepare for Seed extension or Read subselection, if requested
-	UClinks *ucl = NULL; shared_ptr<ReadSubset> RDSset; 
-	shared_ptr<Dereplicate> Dere ;
-	if (mainFil->doOptimalClusterSeq()){
-		ucl = new UClinks(cmdArgs);
-		if (cmdArgs.find("-mergedPairs") != cmdArgs.end() && cmdArgs["-mergedPairs"] == "1"){
-			ucl->pairedSeqsMerged(mainFil);
-		}
-		else {
-			mainFil->setFloatingEWin(10, 25);
-		}
-		//are fallback fasta sequences available?
-		if (cmdArgs["-OTU_fallback"] != ""){
-			shared_ptr<InputStreamer> FALL = make_shared<InputStreamer>(true, mainFil->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"]);
-			FALL->setupFna(cmdArgs["-OTU_fallback"]);
-			ucl->setupDefSeeds(FALL,mainFil);
-		}
-	}
-	else if (mainFil->doSubselReads()){
-		//this will select a list of reads and distribute these into multiple files
-		RDSset = make_shared<ReadSubset>(cmdArgs["-specificReads"],"");
-	} else if (mainFil->doDereplicate()) {
-		Dere = make_shared<Dereplicate>(cmdArgs);
-	}
+	//special sdm functions ini
+	UClinks *ucl = nullptr; // Seed extension ?
+	shared_ptr<ReadSubset> RDSset;  //read subset filtered out?
+	shared_ptr<Dereplicate> dereplicator ; //dereplication of b_derep_as_fasta_ input?
+	ucl = mainFilter->ini_SeedsReadsDerep(ucl, RDSset, dereplicator); // actual prep
 	//needs to attach to existing file sometimes
 	std::ios_base::openmode writeStatus = ios_base::out;
 	bool shortStats = false;
 	string shrtLog = "";
 
+	// main loop that goes over different files
+	int maxReads = mainFilter->getXreads(); // should program stop after having written a certain amount of reads?
+	int totalReadsRead(0);
+	uint accumBPwrite(0), accumBPwriteMerg(0);
+	string lastSRblock ("");  //set up SequencingRun blocks to track
 
-			// main loop that goes over different files
-	int maxRds = mainFil->getXreads();
-	int totReadsRead(0);
-	for (unsigned int i=0; i<uniqueFas.size();i++ ){
-#ifdef DEBUG
-		cerr << "new filter in round "<<i << endl;
-#endif
-		if (maxRds>0 && maxRds - totReadsRead <= 0) { break; }
-		shared_ptr<Filters> fil = make_shared<Filters>(mainFil, idx[i][0]);
-		unsigned int tarSi = (unsigned int) idx[i].size();
-		fil->allResize(tarSi);
-		int tarID=-1;
-		bool BC2mode = mainFil->doubleBarcodes();
-		//int readsRead(0);
-		
-		
-		for (unsigned int j=0; j<tarSi;j++){ //fill in filter
-			tarID = idx[i][j];
-			if (mainFil->PrimerIdx[tarID]>-1) {
-				fil->addPrimerL(mainFil->PrimerL[mainFil->PrimerIdx[tarID]], j);
-			}
-			if (mainFil->doReversePrimers() && mainFil->PrimerIdxRev[tarID]>-1) {
-				fil->addPrimerR(mainFil->PrimerR[mainFil->PrimerIdxRev[tarID]], j);
-			}
-			fil->Barcode[j] = mainFil->Barcode[tarID];
-			if ( BC2mode ) {
-				fil->Barcode2[j] = mainFil->Barcode2[tarID];
-			}
-			fil->SampleID[j] = mainFil->SampleID[tarID];
-			fil->SampleID_Combi[j] = mainFil->SampleID_Combi[tarID];
-			fil->HeadSmplID[j] = mainFil->HeadSmplID[tarID];
-			if (fil->Demulti2Fls()) {
-				fil->demultiSinglFiles[j] = mainFil->demultiSinglFiles[tarID];
-				fil->demultiSinglFilesF[j] = mainFil->demultiSinglFilesF[tarID];
-				
-				//closing of ofstreams is only handled on the main object
-				//mainFil->demultiSinglFiles[tarID] = vector<ofstream*> (2,NULL);
-			}
+    //---------------------------------
+    // Multithreading setup
+    //------------------------------------
+    bool multithreading = true;
+    ThreadPool *pool = nullptr;
+    int threads = 1;
+    if (multithreading) {
+        if (cmdArgs.find("-threads") != cmdArgs.end()) {
+            threads = stoi(cmdArgs["-threads"]);
+        }
+		if (threads > 1) {
+			pool = new ThreadPool(threads);
 		}
-		fil->checkDoubleBarcode();
+    }
 
-		if (tarID==-1){cerr<<"tar == -1. abort.\n";exit(10);}
+
+    //---------------------------------
+	//uniqueFastxFiles: unique input fastx's, can be demultiplexed fastas, or un-demultiplexed (several) fastx
+	//loop that goes over several input fxs
+	//------------------------------------
+//	for (unsigned int i = 0; i < uniqueFastxFiles.size(); i++ ) {
+	for (auto uFX : uniqueFastxFiles) {
+		cdbg("Unique file " + uFX.first + "\n");
+		uint i = uFX.second;
+		if (maxReads > 0 && maxReads - totalReadsRead <= 0) { break; }
+		if (idx[i].size() == 0) {	cerr << "fastXtar vector for " << uFX.first << " is empty" << endl;	exit(10);		}
+
+		//create subset of BCs for the currently processed fastq's (only relevant BCs)
+		cdbg("new filter in round " + itos(i) + "\n");
+		shared_ptr<Filters> filter = mainFilter->filterPerBCgroup(idx[i]);
+		cdbg("Setting up threads\n");
+		filter->setThreads(threads);
+		int tarID = idx[i][0];//just points to one file in uFX group..
+
 
 		//initialize object to handle all input file combinations
-		
-		shared_ptr<InputStreamer> IS = make_shared<InputStreamer>(!bFASTQ, mainFil->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"]);
-		if (tarSi < 2 && uniqueFas.size() > 1) {
-			IS->atFileYofX(i + 1, (uint)uniqueFas.size(), tarSi);
+		//main input of fastx, handles input IO
+		cdbg("Ini InputStream");
+		shared_ptr<InputStreamer> IS = make_shared<InputStreamer>(
+			!isFastq, mainFilter->getuserReqFastqVer(),cmdArgs["-ignore_IO_errors"],
+			cmdArgs["-pairedRD_HD_out"]);
+
+		// there is an entry in tar for each barcode for this file. If idx[i].size() is 1 there is only one barcode
+		if (idx[i].size() == 1 && uniqueFastxFiles.size() > 1) {
+			IS->atFileYofX(i + 1, (unsigned int)uniqueFastxFiles.size(), 1);
 		}
-		string mainFileShort = "";
-		mainFile = IS->setupInput(path, i, tarID, uniqueFas, FastqF, FastaF, QualF, MIDfq, fil->isPaired(), cmdArgs["-onlyPair"], mainFileShort, false);
+
+		// check first if derep block will change
+		if (totalReadsRead>0 && mainFilter->doDereplicate() && dereplicator->DerepPerSR() 
+			&& lastSRblock != mainFilter->SequencingRun[tarID]) {
+				string deLogLocal = dereplicator->writeDereplDNA(mainFilter, lastSRblock);
+				if (dereplicator->DerepPerSR()) {
+					deLog += "Dereplication of SamplingRun " + lastSRblock + ":\n";
+				}
+				deLog += deLogLocal;
+				if (cmdArgs["-log"] != "nolog") {
+					dereplicator->writeLog(logF.substr(0, logF.length() - 3) + "dere", deLogLocal);
+				}
+				//in this case also needs to recheck merger prob
+				if (merger != NULL) {
+					merger->printMergeHisto(subfile(cmdArgs["-merg_readpos"], lastSRblock));
+					merger->printQualHisto(subfile(cmdArgs["-qual_readpos"], lastSRblock));
+					merger->restStats();
+				}
+
+
+			//continue?
+
+				dereplicator->reset();//and reset..
+				accumBPwrite = 0; accumBPwriteMerg = 0;
+				//OutStreamer->resetDemultiBPperSR();
+		}
+		lastSRblock = mainFilter->SequencingRun[tarID];
+
+		string mainFileShort;
+		mainFile = IS->setupInput(path, tarID, uFX.first, FastqF, FastaF, QualF, MIDfq, filter->isPaired(),
+			cmdArgs["-onlyPair"], mainFileShort, false);
 		if (!IS->qualityPresent()) {
-			fil->deactivateQualFilter();
+			filter->deactivateQualFilter();
 			cerr << "\n*********\nWarning:: Quality file is not present.\nRecommended to abort demultiplexing.\n*********\n\n";
 		}
-		fil->BarcodePreStats();
-		fil->checkDoubleBarcode();
-		fil->checkDoubleSampleIDHead();
+
+		filter->BarcodePreStats();filter->checkDoubleBarcode();filter->checkDoubleSampleIDHead();
 
 
-		if (mainFil->doOptimalClusterSeq()){
-			ucl->findSeq2UCinstruction(IS,bFASTQ,mainFil);
-			continue;
-		} 
+		if (mainFilter->doOptimalClusterSeq()) {
+			ucl->findSeq2UCinstruction(IS, isFastq, mainFilter);
+			continue;// after this is only qual_ filter, not required from this point on
+		}
+		cdbg("Setting up output\n");
 
 
-#ifdef DEBUG
-		cerr << "Setting up output" << endl;
-#endif
-		//MultiDNA MD = MultiDNA(&fil, cmdArgs, writeStatus, RDSset);
-		shared_ptr<MultiDNA> MD = make_shared<MultiDNA>(fil, cmdArgs, writeStatus, RDSset);
-		fil->setMultiDNA(MD);
-		if (maxRds > 0) { MD->setReadLimit(maxRds - totReadsRead); }
+
+		//OutputStreamer OutStreamer = OutputStreamer(&filter, cmdArgs, writeStatus, RDSset);
+
+		shared_ptr<OutputStreamer> OutStreamer = make_shared<OutputStreamer>(filter, cmdArgs, 
+			writeStatus, RDSset, "", pool);
+		OutStreamer->attachDereplicator(dereplicator);
+		OutStreamer->attachReadMerger(merger);
+		OutStreamer->setBPwrittenInSR(accumBPwrite);
+		OutStreamer->setBPwrittenInSRmerg(accumBPwriteMerg);	
+		filter->setMultiDNA(OutStreamer);
+		if (maxReads > 0) {
+			OutStreamer->setReadLimit(maxReads - totalReadsRead);
+		}
 		writeStatus = ofstream::app;
 		//prepare for BC checking (rev/fwd)
-		if (fil->doDemultiplex()){
-			MD->setBCfixed(false, true);  
-			if (MD->isPEseq() == 2) { MD->setBCfixed(false, false); }
+		if (filter->doDemultiplex()) {
+			OutStreamer->setBCfixed(false, true);
+			if (OutStreamer->isPEseq() == 2) {
+				OutStreamer->setBCfixed(false, false);
+			}
 		}
-		if (cmdArgs.find("-oneLineFastaFormat") != cmdArgs.end() && cmdArgs["-oneLineFastaFormat"] == "1") {
-			MD->setOneLinerFastaFmt(true);
-		}
-		//cout << Dere->Nms_size() << " DEBCs\n";
-		MD->attachDereplicator(Dere);
+
 		//only pull out a subset of sequences
-		if (mainFil->doSubselReads()) {
+		if (mainFilter->doSubselReads()) {
 			if (cmdArgs.find("-mocatFix") != cmdArgs.end()) {
 				cerr << "MOCAT fix appplies\n";
-				RDSset->findMatches(IS, MD, true);
-			}else{
-				RDSset->findMatches(IS, MD, false);
+				RDSset->findMatches(IS, OutStreamer, true);
 			}
-			//delete MD;
+			else {
+				RDSset->findMatches(IS, OutStreamer, false);
+			}
+			//delete OutStreamer;
 			continue;
 		}
 
+		cdbg("Processing reads");
 
-#ifdef DEBUG
-		cerr << "Processing reads" << endl;
-#endif
-
-
-
-
-
+		// If multhreading is switched on and thread count is > 1  call multihtreaded functions.
+		// if multithreading = false ignore thread option
+		multithreading &= threads > 1;
 		//**********************
 		//heavy reading routine
 		//**********************
-		if (MD->isPEseq() == 2){
-			//read_paired(cmdArgs,MD,IS);
-			while ( !read_paired(cmdArgs, MD, IS, IS->hasMIDseqs()) ) {
-				//reset output files to previous state
-				MD->resetOutFilesAndFilter();
+		if (!multithreading) {
+			if (OutStreamer->isPEseq() == 2) {
+				read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs());
+			}else {
+				if (threads == 1) {
+					read_single(cmdArgs, OutStreamer, IS);
+				}	else if (threads >= 2) {
+					readSingleTp(cmdArgs, OutStreamer, IS, pool);
+				}
 			}
 		} else {
-			read_single(cmdArgs,MD,IS);
+			cerr << "Run with " << threads << " cores.";
+			if (OutStreamer->isPEseq() == 2) {
+				// Paired end reads
+				read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs());
+			}else {
+				// Single end reads
+				readSingleTp(cmdArgs, OutStreamer, IS, pool);
+			}
 		}
+		//debug
+		//std::cout << "asdlkjsdlkjsad> " << filter->statistics_[0].main_read_stats_[0]->total << std::endl;
 
 
 
-
-#ifdef DEBUG
-		cerr << "All read processed" << endl;
-#endif
-		outFile = MD->leadOutFile();
-//		delete MD;
-#ifdef DEBUG
-			cerr << "MD deleted" << endl;
-#endif
+		cdbg("All reads processed in uFX");
+		outFile = OutStreamer->leadOutFile();
+		OutStreamer->closeOutStreams(true);
+		OutStreamer->closeOutFilesDemulti();
+		accumBPwrite = OutStreamer->getBPwrittenInSR();
+		accumBPwriteMerg = OutStreamer->getBPwrittenInSRmerg();
+		cdbg("OutStreamer deleted for current uFX");
 
 		//stats
-		fil->prepStats();
+		// at this point subfilters have already been merged in clouseOutStreams
+		filter->prepStats();
 		if (IS->getCurFileN() == 0) {
-			fil->printStats(cerr, mainFile, outFile, true);
-		} else {
-			cerr<<fil->shortStats(""); shortStats = true;
+			filter->printStats(cerr, mainFile, outFile, true);
+		}
+		else {
+			cerr << filter->shortStats(""); shortStats = true;
 		}
 
-		totReadsRead += fil->totalAccepts();
-		
-		shrtLog += fil->shortStats( mainFileShort);
-//		delete IS;
-		//write log file
-		if (uniqueFas.size() > 1){//only print sub log if neccessary
+		totalReadsRead += filter->totalAccepts();
+
+		shrtLog += filter->shortStats(mainFileShort);
+		//		delete IS;
+				//write log file
+		if (uniqueFastxFiles.size() > 1) {//only print sub log if neccessary
 			ofstream log;
 			string logF = cmdArgs["-log"] + string("0") + itos(i);
-			log.open (logF.c_str() ,ios_base::out);
-			fil->printStats(log,mainFile,outFile,true);
-			log.close();
-		}
-		mainFil->addStats(fil,idx[i]);
-#ifdef DEBUG
-		cerr << "Delete tmp filter" << endl;
-#endif
-		//and cleanup
-		//
-		//fil;
-	}
-#ifdef DEBUG
-	cerr << "Prep final logging" << endl;
-#endif
-//write log files
-	if (uniqueFas.size() > 1){
-		mainFile = "several";
-	}
-	
-	ofstream log; string deLog("");
-	string logF = cmdArgs["-log"], logFA = cmdArgs["-log"].substr(0, cmdArgs["-log"].length()-3) + "add.log";
-
-	//different logfile for SEED extension
-	if (mainFil->doOptimalClusterSeq()){
-		//finish up dereplication file (creating pseudo seeds with counts)
-		ucl->finishMAPfile();
-		if (cmdArgs["-ucAdditionalCounts"] != ""){
-			ucl->set2UC();
-			ucl->finishUCfile(mainFil, cmdArgs["-ucAdditionalCounts"], true);//with smplHead (.mid)
-			ucl->finishUCfile(mainFil, cmdArgs["-ucAdditionalCounts1"], false);//without smplHead (.rest)
-		}
-		if (cmdArgs["-ucAdditionalCounts_refclust"] != ""){
-			//reference based clustering has some high qual seqs (no replacement with reads..)
-			shared_ptr<InputStreamer> FALL = make_shared<InputStreamer>(true, mainFil->getuserReqFastqVer());
-			//this reads in the SLV fna's & creates matrix entries for these
-			FALL->setupFna(cmdArgs["-OTU_fallback_refclust"]);
-			ucl->setRefMode();
-			ucl->addDefSeeds(FALL, mainFil);
-			ucl->set2UC();
-			//mapping from ref OTU clustering
-			ucl->finishUCfile(mainFil, cmdArgs["-optimalRead2Cluster_ref"], false);
-			//mid / rest mappings
-			ucl->finishUCfile(mainFil, cmdArgs["-ucAdditionalCounts_refclust"], true);//with smplHead (.rest)
-			ucl->finishUCfile(mainFil, cmdArgs["-ucAdditionalCounts_refclust1"], false);//without smplHead (.rest)
-
-		}
-		if (cmdArgs["-log"] != "nolog") {
 			log.open(logF.c_str(), ios_base::out);
-			ucl->printStats(cerr);
-			ucl->printStats(log);
+			filter->printStats(log, mainFile, outFile, true);
 			log.close();
 		}
-		
-		//everything done on DNA? Then write & delete
-		if (cmdArgs["-otu_matrix"] != "") {
-			ucl->writeOTUmatrix(cmdArgs["-otu_matrix"], mainFil);
+
+        mainFilter->addStats(filter, idx[i]);
+
+        // Print out merged read count (move to stort stats)
+		if (OutStreamer->total_read_counter_) {
+			std::cerr << "merged reads: " << OutStreamer->merged_counter_ << "/" << OutStreamer->total_read_counter_ << " (" << (double)OutStreamer->merged_counter_ / OutStreamer->total_read_counter_ << ")" << std::endl;
 		}
-		//needs to be written after OTU matrix (renaming scheme)
-		shared_ptr<MultiDNA> MD = make_shared<MultiDNA>(mainFil, cmdArgs, ios::out, RDSset);
-		mainFil->setMultiDNA(MD);
-		ucl->writeNewSeeds(MD, mainFil,false);
-		//delete MD;
-		//new fastas also need to be written..
-		MD.reset(new MultiDNA(mainFil, cmdArgs, ios::out, RDSset, ".ref", 1));//force fna output
-		mainFil->setMultiDNA( MD );
-		ucl->writeNewSeeds(MD, mainFil,true,true);
-		//delete MD;
 
 
-		return;
-	} else if (mainFil->doDereplicate()) {
+    }//uFX
+	cdbg("End of UFx loop");
+
+
+    //-------------------------------------------------
+    //reading of input fq's is done
+    //postprocessing, write reads, dereplicates etc
+    // ------------------------------------------------
+
+//write log files
+	cdbg("Prep final logging");
+    if (uniqueFastxFiles.size() > 1){ mainFile = "several";}
+    ofstream log; 
+    //different logfile for SEED extension
+    if (mainFilter->doOptimalClusterSeq()){
+        //finish up dereplication file (creating pseudo seeds with counts)
+        ucl->finishMAPfile();
+        if (cmdArgs["-ucAdditionalCounts"] != ""){
+            ucl->set2UC();
+            ucl->finishUCfile(mainFilter, cmdArgs["-ucAdditionalCounts"], true);//with smplHead (.mid)
+            ucl->finishUCfile(mainFilter, cmdArgs["-ucAdditionalCounts1"], false);//without smplHead (.rest)
+        }
+        if (cmdArgs["-ucAdditionalCounts_refclust"] != ""){
+            //reference based clustering has some high qual_ seqs (no replacement with reads..)
+            //takeOver even found high qual_ hits with these default seeds..
+            shared_ptr<InputStreamer> FALL = make_shared<InputStreamer>(true,
+                                                                        mainFilter->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"], cmdArgs["-pairedRD_HD_out"]);
+            //this reads in the SLV fna's & creates matrix entries for these
+            FALL->setupFna(cmdArgs["-OTU_fallback_refclust"]);
+            ucl->setRefMode();
+            ucl->addDefSeeds(FALL, mainFilter);
+            ucl->set2UC();
+            //mapping from ref OTU clustering
+            ucl->finishUCfile(mainFilter, cmdArgs["-optimalRead2Cluster_ref"], false);
+            //mid / rest mappings
+            ucl->finishUCfile(mainFilter, cmdArgs["-ucAdditionalCounts_refclust"], true);//with smplHead (.rest)
+            ucl->finishUCfile(mainFilter, cmdArgs["-ucAdditionalCounts_refclust1"], false);//without smplHead (.rest)
+
+        }
+        if (cmdArgs["-log"] != "nolog") {
+            log.open(logF.c_str(), ios_base::out);
+            ucl->printStats(cerr);
+            ucl->printStats(log);
+            log.close();
+        }
+
+        //everything done on DNA? Then write & delete
+        if (cmdArgs["-otu_matrix"] != "") {
+            ucl->writeOTUmatrix(cmdArgs["-otu_matrix"]);
+        }
+        //polished OTU seeds need to be written after OTU matrix (renaming scheme)
+        shared_ptr<OutputStreamer> MDx = make_shared<OutputStreamer>(mainFilter, cmdArgs, 
+			ios::app, RDSset);
+		ReadMerger* DerepM = new ReadMerger(false);
+		MDx->attachReadMerger(DerepM);
+        mainFilter->setMultiDNA(MDx);
+        ucl->writeNewSeeds(MDx, mainFilter, false);
+        //new fastas also need to be written..
+        MDx.reset(new OutputStreamer(mainFilter, cmdArgs, 
+			ios::app, RDSset, ".ref", pool, 1));//force fna output
+        mainFilter->setMultiDNA(MDx );
+        ucl->writeNewSeeds(MDx, mainFilter, true, true);
+        //delete MDx;
+		delete DerepM;
+        return;
+    } else if (mainFilter->doDereplicate()) {
+		//this is either the last time dereplicate is written (SRblocks),
+		//or the main point at which to write the dereplicator for good
 #ifdef DEBUG
-		cerr << "write Dereplicated DNA" << endl;
+        cerr << "write Dereplicated DNA" << endl;
 #endif
-		deLog = Dere->writeDereplDNA(mainFil);
+		
+        string deLogLocal = dereplicator->writeDereplDNA(mainFilter,lastSRblock);
+		if (dereplicator->DerepPerSR()) {
+			deLog += "Dereplication of SamplingRun " + lastSRblock + ":\n";
+		}
+		deLog += deLogLocal;
+		if (cmdArgs["-log"] != "nolog") {
+			dereplicator->writeLog(logF.substr(0, logF.length() - 3) + "dere" , deLogLocal);
+		}
+		dereplicator->finishMap();
+
+		//last time merger stats to write
+		if (merger != nullptr) {
+			merger->printMergeHisto(subfile(cmdArgs["-merg_readpos"], lastSRblock));
+			merger->printQualHisto(subfile(cmdArgs["-qual_readpos"], lastSRblock));
+		}
+
+
 #ifdef DEBUG
-		cerr << "done write Dere" << endl;
+        cerr << "done write dereplicator" << endl;
 #endif
-	}
+    }
 #ifdef DEBUG
-	cerr << "Logging almost finished" << endl;
+    cerr << "Logging almost finished" << endl;
 #endif
 
-	if (cmdArgs["-log"] == "nolog") {
-//		delete Dere;
-		return;
-	}
+    if (cmdArgs["-log"] == "nolog") {
+        return;
+    }
+    if (shortStats) {
+        mainFilter->printStats(std::cerr, mainFile, outFile, true);
+    }
 #ifdef DEBUG
-	cerr << "DereLog start" << endl;
+    cerr << "other logs start" << endl;
 #endif
-	if (mainFil->doDereplicate()) {
-		string dereLog = logF.substr(0,logF.length()-3) + "dere";
-		Dere->writeLog(dereLog, deLog);
-//		delete Dere;
-	}
-	
-#ifdef DEBUG
-	cerr << "DereLog end" << endl;
-#endif
-	if (shortStats) {
-		mainFil->printStats(std::cerr, mainFile, outFile, true);
-	}
-#ifdef DEBUG
-	cerr << "other logs start" << endl;
-#endif
-	//per sample success rate
-	string logPS = logF.substr(0, logF.length() - 3) + "acceptsPerSample.log";
-	log.open(logPS.c_str(), ios_base::out);
-	mainFil->SmplSpecStats(log);
-	log.close();
-	log.open(logF.c_str(), ios_base::out);
-	mainFil->printStats(log,mainFile,outFile,true);
-	log.close();
+    //per sample success rate
+    string logPS = logF.substr(0, logF.length() - 3) + "acceptsPerSample.log";
+    log.open(logPS.c_str(), ios_base::out);
+    mainFilter->SmplSpecStats(log);
+    log.close();
+    log.open(logF.c_str(), ios_base::out);
+    mainFilter->printStats(log, mainFile, outFile, true);
+    log.close();
 
-	string logFs = logF.substr(0, logF.length() - 3) + "acceptsPerFile.log";
-	log.open(logFs.c_str(), ios_base::out);
-	log << shrtLog;
-	log.close();
-	
-	string logFGC = logF.substr(0, logF.length() - 3) + "GC.txt";
-	log.open(logFGC.c_str(), ios_base::out);
-	mainFil->printGC(log, mainFil->isPaired());
-	log.close();
+    string logFs = logF.substr(0, logF.length() - 3) + "acceptsPerFile.log";
+    log.open(logFs.c_str(), ios_base::out);
+    log << shrtLog;
+    log.close();
+
+    string logFGC = logF.substr(0, logF.length() - 3) + "GC.txt";
+    log.open(logFGC.c_str(), ios_base::out);
+    mainFilter->printGC(log, mainFilter->isPaired());
+    log.close();
 #ifdef DEBUG
-	cerr << "other logs end" << endl;
+    cerr << "other logs end" << endl;
 #endif
 
 
 //for additional files
-	if (mainFil->secondaryOutput()){
-		log.open (logFA.c_str() ,ios_base::out);
-		mainFil->printStats(log,mainFile,outFile,false);
-		log.close();
-	}
+    if (mainFilter->secondaryOutput()){
+        log.open (logFA.c_str() ,ios_base::out);
+        mainFilter->printStats(log, mainFile, outFile, false);
+        log.close();
+    }
 
 
-	//length histogram
-	logF = cmdArgs["-length_hist"];
-	log.open (logF.c_str() ,ios_base::out);
-	mainFil->printHisto(log,0);
-	log.close();
-	//quality histogram
-	logF = cmdArgs["-qual_hist"];
-	log.open (logF.c_str() ,ios_base::out);
-	mainFil->printHisto(log,1);
-	log.close();
-	mainFil->close_outFiles_demulti();
+    //length histogram
+    logF = cmdArgs["-length_hist"];
+    log.open (logF.c_str() ,ios_base::out);
+    mainFilter->printHisto(log, 0);
+    log.close();
+    //quality histogram
+    logF = cmdArgs["-qual_hist"];
+    log.open (logF.c_str() ,ios_base::out);
+    mainFilter->printHisto(log, 1);
+    log.close();
+
 #ifdef DEBUG
-	cerr << "separateByFile finished" << endl;
+    cerr << "separateByFile finished" << endl;
 #endif
+
+    // multithreading
+    delete pool;
+	//ReadMerger no longer needed
+	delete merger;
 
 }
 
 void rewriteNumbers(OptContainer& cmdArgs){
-	//no renumbering asked for
-	if (!(cmdArgs.find("-number")  != cmdArgs.end() && cmdArgs["-number"]=="T")){
-		return;
-	}
-	string prefix="";
-	if (cmdArgs.find("-prefix")  != cmdArgs.end()){
-		prefix = cmdArgs["-prefix"];
-	}
-	//read fasta & write with new headers
-	int cnt=0;
+    //no renumbering asked for
+    if (!(cmdArgs.find("-number")  != cmdArgs.end() && cmdArgs["-number"]=="T")){
+        return;
+    }
+    string prefix="";
+    if (cmdArgs.find("-prefix")  != cmdArgs.end()){
+        prefix = cmdArgs["-prefix"];
+    }
+    //read fasta & write with new headers
+    int cnt=0;
 
-	string line;
-	//ofstream qualOut,fnaOut;
-	ifstream fna;
-	ofstream ofna;
+    string line;
+    //ofstream qualOut,fnaOut;
+    ifstream fna;
+    ofstream ofna;
 
-	//        rerwite input fasta file
-	string tname="",tseq="";
-	fna.open(cmdArgs["-i_fna"].c_str(),ios::in);
-	ofna.open(cmdArgs["-o_fna"].c_str(),ios::out);
-	while (getline(fna,line,'\n')){
+    //        rerwite input fasta file
+    string tname="",tseq="";
+    fna.open(cmdArgs["-i_fna"].c_str(),ios::in);
+    ofna.open(cmdArgs["-o_fna"].c_str(),ios::out);
+    while (getline(fna,line,'\n')){
 
-		if (line[0]=='$'){ //$ marks comment
-			continue;
-		}
-		if(line[0] == '>'){ //fasta description
-			if (cnt!=0){
-				tname = ">"+prefix+itos(cnt)+"\n";
-				ofna << tname << tseq;
-			}
-			cnt++;tseq="";
-			continue;
-		}
-		tseq += line+"\n";
-	}
-	tname = ">"+prefix+itos(cnt)+"\n";
-	ofna << tname << tseq;
-	ofna.close(); fna.close();
+        if (line[0]=='$'){ //$ marks comment
+            continue;
+        }
+        if(line[0] == '>'){ //fasta description
+            if (cnt!=0){
+                tname = ">"+prefix+itos(cnt)+"\n";
+                ofna << tname << tseq;
+            }
+            cnt++;tseq="";
+            continue;
+        }
+        tseq += line+"\n";
+    }
+    tname = ">"+prefix+itos(cnt)+"\n";
+    ofna << tname << tseq;
+    ofna.close(); fna.close();
 
-	exit(0);
+    exit(0);
 }
 
 void Announce_sdm(){
-	cerr << endl << "This is sdm (simple demultiplexer) " << sdm_version << " " << sdm_status << "." << endl << endl;
+    cerr << endl << "This is sdm (simple demultiplexer) " << sdm_version << " " << sdm_status << ".\n" << endl ;
 }
 void help_head(){
-	cout <<"------------------------------\nThis is sdm version "<<sdm_version <<" "<< sdm_status <<" help print\n------------------------------\n"<<endl;
+    cout <<"------------------------------\nThis is sdm version "<<sdm_version <<" "<< sdm_status <<" help print\n------------------------------\n"<<endl;
 }
 void general_help(){
-	help_head();
-	cout<<"sdm (simple demultiplexer) is a fast, memory efficient program to demultiplex fasta and fastq files or simply do quality filterings on these.\n";
+    help_head();
+    cout<<"sdm (simple demultiplexer) is a fast, memory efficient program to demultiplex fasta and fastq files or simply do quality filterings on these.\n";
 #ifdef _gzipread
-	cout<<"Compiled with gzip support\n";
+    cout<<"Compiled with gzip support\n";
 #else
-	cout << "No gzip support compiled\n";
+    cout << "No gzip support compiled\n";
 #endif
 #ifdef _THREADED
-	cout<<"Multithreading not supported"
+    cout<<"Multithreading not supported"
 #else
-	cout << "The compiled version does not support multithreading\n";
+    cout << "The compiled version does not support multithreading\n";
 #endif
-	cout<<"Select further help topics by typing:\nsdm -help_options : print help on configuring options files\nsdm -help_commands : help on command arguments for sdm\nsdm -help_map : map files and the keywords for barcodes etc.\n------------------------------\n";
-	cout<<"Author: falk.hildebrand@gmail.com"<<endl;
+    cout<<"Select further help topics by typing:\nsdm -help_options : print help on configuring options files\nsdm -help_commands : help on command arguments for sdm\nsdm -help_map : base_map files and the keywords for barcodes etc.\n------------------------------\n";
+    cout<<"Author: falk.hildebrand@gmail.com"<<endl;
 
 }
 void printCmdsHelp(){
-	help_head();
-	string def_sep = DEFAULT_BarcodeNameSep;
-	cout << "Usage:\n./sdm\n  -i_path <path to several fastq / fasta files>\n------OR------\n -i <input sequence file, will autodetect fna/fastq>\n------OR------\n -i_fastq <fastQ file>\n------OR------\n -i_fna <your fasta input file> (required)\n -i_qual <corresponding quality file> (required, unless quality file is \"xx1.qual\" and fasta is \"xx1.yy\")\n\n -map <mapping file in Qiime format> (optional)\n -o_fna <file to write output fasta> (optional)\n -o_qual <file to write corresponding quality values> (optional)\n -o_fastq <fastQ output file (overrides -o_qual & -o_fna)\n";
-	cout << " -options <sdm option file>(optional)\n -log <file to save demultiplex log in>(optional). Set to \"nolog\" to deactivate alltogether.\n \n-sample_sep \"X\" string X is used to delimit samples and ID (optional, default:\"" << def_sep << "\")\n -paired 1/2/3 (input is paired end sequenced(2), assumes two input files delimited by \',\'. 1=singleton (default); 3=paired end (R1,R3) + one file with MID (R2))\n";
-	cout << " -o_demultiplex [path] write input into single, demultiplexed files\n";
-	cout << " -onlyPair [1/2] consider only read pair 1 or 2. Useful when streamlining inputs (LotuS) or considering double barcoding.\n -i_MID_fastq fastq file with only MID sequences; if paired reads are supplied with -i_fna/-i_fastq and the MID identifier via -i_MID_fastq, paired has to be set to 2. If e.g. merged reads are supplied + mids, paired has to be set to 1.\n";
-	cout << " -oneLineFastaFormat [0/1] write Fasta and Quality file sequence string in one line, opposed to default 80 characters per line.\n -o_dereplicate <output fasta file> of dereplicated DNA reads (with size in header)\n -dere_size_fmt [0/1] either (0) usearch format \"size=X;\" or (1) \"_X\"\n -min_derep_copies only print seq if at least X copies present. Can be complex terms like \"10:1,3:3\" -> meaning at least 10x in 1 sample or 3x in 3 different samples.\n";
-	cout << " -SyncReadPairs [T/F] sdm can check, if read pairs occur in the same (correct) order in the input files, and correct this in case not (T).\n";
-	cout << " -maxReadsPerOutput number of filtered reads in output files. If more reads, a new file is created. Only works with -o_fna\n -mergedPairs <1/0> 1: paired sequences were merged externally, important for assumption that read quality is detoriating.\n -OTU_fallback <file>: Fallback fasta sequences for OTU's, only used in SEED extension mode\n";
-	cout << " -i_qual_offset [0-64] fastq offset for quality values. Set this to \'0\' or \'auto\' if you are unsure which fastq version is being used (default: read from sdm option file)\n -o_qual_offset [0-64] set quality offset for fastq outfile. Default: 33\n";
-	cout << " -ignore_IO_errors [0/1]: 1=Errors in fastq reads are ignored, with sdm trying to sync reads pairs after corrupted single reads (default: 0)\n";
-	//-binomialFilterBothPairs [1/0]
-	//-count_chimeras [T/F]
-	// ucAdditionalCounts_refclust -OTU_fallback_refclust -optimalRead2Cluster_ref
-	cout<<"\nMinimal Example:\n./sdm -i test.fna -map mapping.txt (assuming quality file is \"test.qual\")\n";
-	// further options (undocumented) : 
-	//-length_hist   -qual_hist
-	//-suppressOutput[0/1]
-	//
+    help_head();
+    string def_sep = DEFAULT_BarcodeNameSep;
+    cout << "Usage:\n./sdm\n  -i_path <path to several fastq / fasta files>\n------OR------\n -i <input sequence file, will autodetect fna/fastq>\n------OR------\n -i_fastq <fastQ file>\n------OR------\n -i_fna <your fasta input file> (required)\n -i_qual <corresponding quality file> (required, unless quality file is \"xx1.qual_\" and fasta is \"xx1.yy\")\n\n -base_map <mapping file in Qiime format> (optional)\n -o_fna <file to write output fasta> (optional)\n -o_qual <file to write corresponding quality values> (optional)\n -o_fastq <fastQ output file (overrides -o_qual & -o_fna)\n";
+    cout << " -options <sdm option file>(optional)\n -log <file to save demultiplex log in>(optional). Set to \"nolog\" to deactivate alltogether.\n \n-sample_sep \"X\" string X is used to delimit samples and id_ (optional, default:\"" << def_sep << "\")\n -paired 1/2/3 (input is paired end sequenced(2), assumes two input files delimited by \',\'. 1=singleton (default); 3=paired end (R1,R3) + one file with MID (R2))\n";
+    cout << " -o_demultiplex [path] write input into single, demultiplexed files\n";
+    cout << " -onlyPair [1/2] consider only read pair_ 1 or 2. Useful when streamlining inputs (LotuS) or considering double barcoding.\n -i_MID_fastq fastq file with only MID sequences; if paired reads are supplied with -i_fna/-i_fastq and the MID identifier via -i_MID_fastq, paired has to be set to 2. If e.g. merged reads are supplied + mids, paired has to be set to 1.\n";
+    cout << " -pairedDemulti [0/1] Only write complete pairs in demultiplexing paired input.\n";
+    cout << " -oneLineFastaFormat [0/1] write Fasta and Quality file sequence string in one line, opposed to default 80 characters per line.\n -o_dereplicate <output fasta file> of dereplicated DNA reads (with size in header)\n -dere_size_fmt [0/1] either (0) usearch format \"size=X;\" or (1) \"_X\"\n -min_derep_copies only print seq if at least X copies present. Can be complex terms like \"10:1,3:3\" -> meaning at least 10x in 1 sample or 3x in 3 different samples.\n";
+    cout << " -SyncReadPairs [T/F] sdm can check, if read pairs occur in the same (correct) order in the input files, and correct this in case not (T).\n";
+    cout << " -maxReadsPerOutput number of filtered reads in output files. If more reads, a new file is created. Only works with -o_fna\n -mergedPairs <1/0> 1: paired sequences were merged externally, important for assumption that read quality is detoriating.\n -OTU_fallback <file>: Fallback fasta sequences for OTU's, only used in SEED extension mode\n";
+    cout << " -i_qual_offset [0-64] fastq offset for quality values. Set this to \'0\' or \'auto\' if you are unsure which fastq version is being used (default: read from sdm option file)\n -o_qual_offset [0-64] set quality offset for fastq outfile. Default: 33\n";
+    cout << " -ignore_IO_errors [0/1]: 1=Errors in fastq reads are ignored, with sdm trying to sync reads pairs after corrupted single reads (default: 0)\n";
+    //-binomialFilterBothPairs [1/0]
+    //-count_chimeras [T/F]
+    // ucAdditionalCounts_refclust -OTU_fallback_refclust -optimalRead2Cluster_ref
+    cout<<"\nMinimal Example:\n./sdm -i test.fna -base_map mapping.txt (assuming quality file is \"test.qual_\")\n";
+    // further options (undocumented) :
+    //-length_hist   -qual_hist
+    //-suppressOutput[0/1]
+    //
 }
 void printOptionHelp(){
-	help_head();
-	cout<<"The option file, specified via the \"-options\" argument, provides more specific control over filtering, barcode handling, and sequencing technologies, among others. A reference option file is printed below.\n\n";
-	string helpOptionFile="";
-	/*helpOptionFile += "minSeqLength - minimal accepted Sequence Length\nmaxSeqLength - maximal Length of Sequence\nminAvgQuality - minimal average Quality\nmaxAmbiguousNT - max number of Ambigous nt's in sequence\nQualWindowThreshhold - Q threshold where seq is rejected\nQualWindowWidth - average quality in this windows is used for QualWindowThreshhold\n";
-	helpOptionFile += string("TrimWindowThreshhold - Q value below which sequence is 3' trimmed\nTrimWindowWidth - window size used for TrimWindowThreshhold\nmaxBarcodeErrs - max accepted barcode errors\nmaxPrimerErrs - max accepted Primer errors\nkeepBarcodeSeq - leave Barcode Seq on read? (0/1)\n");
-	helpOptionFile += "keepPrimerSeq - keep Primer attached to seq? (0/1)\nmaxHomonucleotide - sequences with a homonucleotide run longer will be rejected\nmaxAccumulatedError - if P is surpassed, sequence is trimmed at that point\nTechnicalAdapter - sequence of the technical adapter (will be removed, if found 5')\nPEheaderPairFmt - ?\nTrimStartNTs - trim X nucleotides from the start of the sequence ";
-	helpOptionFile += "fastqVersion - 1 = ";*/
+    help_head();
+    cout<<"The option file, specified via the \"-options\" argument, provides more specific control over filtering, barcode handling, and sequencing technologies, among others. A reference option file is printed below.\n\n";
+    string helpOptionFile="";
+    /*helpOptionFile += "minSeqLength - minimal accepted Sequence Length\nmaxSeqLength - maximal Length of Sequence\nminAvgQuality - minimal average Quality\nmaxAmbiguousNT - max number of Ambigous nt's in sequence\nQualWindowThreshhold - Q threshold where seq is rejected\nQualWindowWidth - average quality in this windows is used for QualWindowThreshhold\n";
+    helpOptionFile += string("TrimWindowThreshhold - Q value below which sequence is 3' trimmed\nTrimWindowWidth - window size used for TrimWindowThreshhold\nmaxBarcodeErrs - max accepted barcode errors\nmaxPrimerErrs - max accepted Primer errors\nkeepBarcodeSeq - leave Barcode sequence_ on read? (0/1)\n");
+    helpOptionFile += "keepPrimerSeq - keep Primer attached to seq? (0/1)\nmaxHomonucleotide - sequences with a homonucleotide run longer will be rejected\nmaxAccumulatedError - if P is surpassed, sequence is trimmed at that point\nTechnicalAdapter - sequence of the technical adapter (will be removed, if found 5')\nPEheaderPairFmt - ?\nTrimStartNTs - trim X nucleotides from the start of the sequence ";
+    helpOptionFile += "fastqVersion - 1 = ";*/
 
-	helpOptionFile += "#--- Example ---\n#copy into new file\n#sequence length refers to sequence length AFTER removal of Primers, Barcodes and trimming. this ensures that downstream analyis tools will have appropiate sequence information\nminSeqLength	250\nmaxSeqLength	1000\nminAvgQuality	25\n\n";
-	helpOptionFile += "#Ambiguous bases in Sequence - uclust only supports 0 ambiguous nucleotides\nmaxAmbiguousNT	0\n\n#Homonucleotide Runs.. this should normally be filtered by sequencer software\nmaxHomonucleotide	8\n\n";
-	helpOptionFile += "#Filter whole sequence if one window of quality scores is below average\nQualWindowWidth	50\nQualWindowThreshhold	25\n\n#Trim the end of a sequence if a window falls below quality threshhold. Useful for removing low qulaity trailing ends of sequence\n\nTrimWindowWidth	20\nTrimWindowThreshhold	25\n\n#Max number of accumulated P for a mismatch. After this length, the rest of the sequence will be deleted. Complimentary to TrimWindowThreshhold. (-1) deactivates this option.\nmaxAccumulatedError	1\n\n";
-	helpOptionFile += "#Barcode Errors - currently this can only be 0; \nmaxBarcodeErrs	0\nmaxPrimerErrs	0\n\n#keep Barcode / Primer Sequence in the output fasta file - in a normal 16S analysis this should be deactivated (0) for Barcode and de-activated (0) for primer\nkeepBarcodeSeq	0\nkeepPrimerSeq	0\n\n";
-	helpOptionFile += "#set fastqVersion to 1 if you use Sanger, Illumina 1.8+ or NCBI SRA files. Set fastqVersion to 2, if you use Illumina 1.3+ - 1.7+ or Solexa fastq files.\n\nfastqVersion	1\n\n#if one or more files have a technical adapter still included (e.g. TCAG 454) this can be removed by setting this option\n\nTechnicalAdapter	TCAG\n\n#delete X NTs (e.g. if the first 5 bases are known to have strange biases)\n\nTrimStartNTs	0\n";
-	helpOptionFile += "#truncate total Sequence length to X (length after Barcode, Adapter and Primer removals)\nTruncateSequenceLength	200\n";
-	helpOptionFile += "#correct PE header format (1/2) this is to accomodate the illumina miSeq paired end annotations 2=\"@XXX 1:0:4\" instead of 1=\"@XXX/1\". Note that the format will be automatically detected\nPEheaderPairFmt	1\n\n#sets if sequences without match to reverse primer will be accepted (T=reject ; F=accept all); default=F\nRejectSeqWithoutRevPrim	F\n";
-	helpOptionFile += "#sets if sequences without a forward (LinkerPrimerSequence) primer will be accepted (T=reject ; F=accept all); default=T\nRejectSeqWithoutFwdPrim	T\n\n";
-	helpOptionFile += "#checks if the whole amplicon was reverse-transcribed sequenced (Default = F)\nCheckForReversedSeqs	F\n\n";
-	helpOptionFile += "#this option should be \"T\" if your amplicons are possibly shorter than a read in a paired end sequencing run (e.g. amplicon of 300 in 250x2 miSeq is \"T\")\nAmpliconShortPE	T\n\n";
-	//CheckForMixedPairs CheckForReversedSeqs
-	cout<<helpOptionFile<<endl;
+    helpOptionFile += "#--- Example ---\n#copy into new file\n#sequence length refers to sequence length AFTER removal of Primers, Barcodes and trimming. this ensures that downstream analyis tools will have appropiate sequence information\nminSeqLength	250\nmaxSeqLength	1000\nminAvgQuality	25\n\n";
+    helpOptionFile += "#Ambiguous bases in Sequence - uclust only supports 0 ambiguous nucleotides\nmaxAmbiguousNT	0\n\n#Homonucleotide Runs.. this should normally be filtered by sequencer software\nmaxHomonucleotide	8\n\n";
+    helpOptionFile += "#Filter whole sequence if one window of quality scores is below average\nQualWindowWidth	50\nQualWindowThreshhold	25\n\n#Trim the end of a sequence if a window falls below quality threshhold. Useful for removing low qulaity trailing ends of sequence\n\nTrimWindowWidth	20\nTrimWindowThreshhold	25\n\n#Max number of accumulated P for a mismatch. After this length, the rest of the sequence will be deleted. Complimentary to TrimWindowThreshhold. (-1) deactivates this option.\nmaxAccumulatedError	1\n\n";
+    helpOptionFile += "#Barcode Errors - currently this can only be 0; \nmaxBarcodeErrs	0\nmaxPrimerErrs	0\n\n#keep Barcode / Primer Sequence in the output fasta file - in a normal 16S analysis this should be deactivated (0) for Barcode and de-activated (0) for primer\nkeepBarcodeSeq	0\nkeepPrimerSeq	0\n\n";
+    helpOptionFile += "#set fastqVersion to 1 if you use Sanger, Illumina 1.8+ or NCBI SRA files. Set fastqVersion to 2, if you use Illumina 1.3+ - 1.7+ or Solexa fastq files.\n\nfastqVersion	1\n\n#if one or more files have a technical adapter still included (e.g. TCAG 454) this can be removed by setting this option\n\nTechnicalAdapter	TCAG\n\n#delete X NTs (e.g. if the first 5 bases are known to have strange biases)\n\nTrimStartNTs	0\n";
+    helpOptionFile += "#truncate total Sequence length to X (length after Barcode, Adapter and Primer removals)\nTruncateSequenceLength	200\n";
+    helpOptionFile += "#correct PE header format (1/2) this is to accomodate the illumina miSeq paired end annotations 2=\"@XXX 1:0:4\" instead of 1=\"@XXX/1\". Note that the format will be automatically detected\nPEheaderPairFmt	1\n\n#sets if sequences without match to reverse primer will be accepted (T=reject ; F=accept all); default=F\nRejectSeqWithoutRevPrim	F\n";
+    helpOptionFile += "#sets if sequences without a forward (LinkerPrimerSequence) primer will be accepted (T=reject ; F=accept all); default=T\nRejectSeqWithoutFwdPrim	T\n\n";
+    helpOptionFile += "#checks if the whole amplicon was reverse-transcribed sequenced (Default = F)\nCheckForReversedSeqs	F\n\n";
+    helpOptionFile += "#this option should be \"T\" if your amplicons are possibly shorter than a read in a paired end sequencing run (e.g. amplicon of 300 in 250x2 miSeq is \"T\")\nAmpliconShortPE	T\n\n";
+    //CheckForMixedPairs CheckForReversedSeqs
+    cout<<helpOptionFile<<endl;
 }
 void printMapHelp(){
-	help_head();
-	cout<<"The mapping file, specified via the \"-map\" argument, contains all information neccessary to demultiplex a sequencer fasta or fastq output file. If left out, the sequences are only quality checked.\n";
-	cout<<"The Mapping file can contain comments, specified by \"#\" at the start of the comment line. Similarly, the header (required) has to start with \"#\"\n. Processed header fields are:\n";
-	cout << "SampleID - Sample Identifier, has to be unique for each Barcode\n";
-	cout << "CombineSamples - combines Sample Identifiers into one sample\n";
-	cout << "BarcodeSequence - The Barcode (MID) tag assigned to each sample. Can contain IUPAC redundant nucleotides\n";
-	cout << "Barcode2ndPair - in case of dual indexed reads, use this column to specify the BC on the 2nd read pair\n";
-	cout<<"ForwardPrimer (previously LinkerPrimerSequence) - Sequence used for 16S amplification, usually (unless paired end mode) is after the Barcode\n";
-	cout<< "ReversePrimer - Reverse Primer Sequence (IUPAC code).\n"; 
-	cout<< "fastqFile - if used in -i_path mode, gives relative location of fastq file, such that [-i_path][fastqFile] gives the absolute path to fastq file.\n";
-	cout<<"fnaFile - see fastqFile. However, fasta formated file instead of fastq format.\n";
-	cout<< "qualFile - see fastqFile. However, quality file corresponding to fasta file instead of fastq format.\n";
-	cout<< "MIDfqFile - fastq file containing ONLY the MID sequence, corresponding fastq input file(s)\n";
-	cout<< "SampleIDinHead - ID in header of fasta/fastq file, that identifies Sample - replaces Barcode (MID) scanning.\n";
-	cout << "derepMin - this column can contain a single number X, only accepting reads in specific sample that have more than X dereplicated copies. Useful if a subset of samples was e.g. sampled 100x as deep as other samples.\nCombined Sample WILL NOT be taken into account.\n";
-	cout<<"\n";
+    help_head();
+    cout<<"The mapping file, specified via the \"-base_map\" argument, contains all information neccessary to demultiplex a sequencer fasta or fastq output file. If left out, the sequences are only quality checked.\n";
+    cout<<"The Mapping file can contain comments, specified by \"#\" at the start of the comment line. Similarly, the header (required) has to start with \"#\"\n. Processed header fields are:\n";
+    cout << "SampleID - sample_id_ Identifier, has to be unique for each Barcode\n";
+    cout << "CombineSamples - combines sample_id_ Identifiers into one sample\n";
+    cout << "BarcodeSequence - The Barcode (MID) tag assigned to each sample. Can contain IUPAC redundant nucleotides\n";
+    cout << "Barcode2ndPair - in case of dual indexed reads, use this column to specify the BC on the 2nd read pair_\n";
+    cout<<"ForwardPrimer (previously LinkerPrimerSequence) - Sequence used for 16S amplification, usually (unless paired end mode) is after the Barcode\n";
+    cout<< "ReversePrimer - Reverse Primer Sequence (IUPAC code).\n";
+    cout<< "fastqFile - if used in -i_path mode, gives relative location of fastq file, such that [-i_path][fastqFile] gives the absolute path to fastq file.\n";
+    cout<<"fnaFile - see fastqFile. However, fasta formated file instead of fastq format.\n";
+    cout<< "qualFile - see fastqFile. However, quality file corresponding to fasta file instead of fastq format.\n";
+    cout<< "MIDfqFile - fastq file containing ONLY the MID sequence, corresponding fastq input file(s)\n";
+    cout<< "SampleIDinHead - id_ in header of fasta/fastq file, that identifies sample_id_ - replaces Barcode (MID) scanning.\n";
+    cout << "derepMin - this column can contain a single number X, only accepting reads in specific sample that have more than X dereplicated copies. Useful if a subset of samples was e.g. sampled 100x as deep as other samples.\nCombined sample_id_ WILL NOT be taken into account.\n";
+    cout<<"\n";
 
 }
 void printVersion(){
-	cout << "sdm " << sdm_version << " " << sdm_status << endl;
+    cout << "sdm " << sdm_version << " " << sdm_status << endl;
 }
 
 
-//bool readCmdArgs(int argc, char* argv[],map<char*, char*, lstr>& cmdArgs);
+//////////////////////
+
+/*
+//manages read in of several input files and associated primers / tags to each file
+void separateByFile(shared_ptr<Filters> mainFil,OptContainer& cmdArgs){
+//void separateByFile(shared_ptr<Filters> mainFil,OptContainer& cmdArgs){
+#ifdef DEBUG
+    cerr << "separateByFile"<<endl;
+#endif
+
+//	mainFil->ini_filestruct(cmdArgs);
+    
+    vector<string> FastaF = mainFil->getFastaFiles();
+    vector<string> QualF = mainFil->getQualFiles();
+    vector<string> FastqF = mainFil->getFastqFiles();
+    vector<string> MIDfq = mainFil->getMIDfqFiles();
+    vector<string> tar;
+    vector < vector<int> > idx(0);
+    bool bFASTQ = true;
+    //prepareOutFiles(cmdArgs);
+    string path="";
+    if (cmdArgs.find("-i_path")  != cmdArgs.end() && cmdArgs["-i_path"].length() > 2){
+        path=cmdArgs["-i_path"] + string("/");
+    }
+    
+    
+    if (FastaF.size()>0){ //fasta way
+        tar = FastaF;
+        bFASTQ = false;
+    } else { // fastq way
+        tar = FastqF;
+        if (FastqF.size()==0){
+            cerr<<"No FastQ or Fasta file given.\n  Aborting..\n";
+            exit(12);
+        }
+    }
+    
+    vector<string> uniqueFas(1,tar[0]);
+    idx.push_back(vector<int> (1,0));
+    
+    for (unsigned int i=1; i<tar.size(); i++){
+        bool suc = false;
+        for (unsigned int j=0; j<uniqueFas.size(); j++){
+            if (tar[i] == uniqueFas[j]){ //the same
+                idx[j].push_back(i);
+                suc=true;
+                break;
+            }
+        }
+        if (!suc){
+            uniqueFas.push_back(tar[i]);
+            idx.push_back(vector<int> (1,i));
+        }
+    }
+    
+    //unique Fas files set up.. check for their existence
+    shared_ptr<InputStreamer> testFiles =
+            make_shared<InputStreamer>(!bFASTQ, mainFil->getuserReqFastqVer(), "1","1");
+    for (unsigned int i = 0; i < uniqueFas.size(); i++) {
+        int tarID = idx[i][0]; string tmp;
+        string x = testFiles->setupInput(path, i, tarID, uniqueFas, FastqF, FastaF, QualF, MIDfq, mainFil->isPaired(), cmdArgs["-onlyPair"], tmp, true);
+    }
+//	delete testFiles;
+    
+    string mainFile = "", outFile = cmdArgs["-o_fna"];
+    
+    //special sdm functions ini
+    UClinks *ucl = NULL; // Seed extension ?
+    shared_ptr<ReadSubset> RDSset;  //read subset filtered out?
+    shared_ptr<Dereplicate> Dere ; //dereplication of fasta input?
+    mainFil->ini_SeedsReadsDerep(ucl, RDSset, Dere); // actual prep
+    
+    
+    //needs to attach to existing file sometimes
+    std::ios_base::openmode writeStatus = ios_base::out;
+    bool shortStats = false;
+    string shrtLog = "";
+    // main loop that goes over different files
+    int maxRds = mainFil->getXreads();
+    int totReadsRead(0);
+    //---------------------------------
+    //uniqueFas: unique input fastx's, can be demultiplexed fastas, or un-demultiplexed (several) fastx
+    //loop that goes over several input fq's
+    //------------------------------------
+    for (uint i=0; i<uniqueFas.size();i++ ){
+#ifdef DEBUG
+        cerr << "new filter in round "<<i << endl;
+#endif
+        if (maxRds>0 && maxRds - totReadsRead <= 0) { break; }
+        shared_ptr<Filters> fil = make_shared<Filters>(mainFil, idx[i][0]);
+        unsigned int tarSi = (unsigned int) idx[i].size();
+        fil->allResize(tarSi);
+        int tarID=-1;
+        bool BC2mode = mainFil->doubleBarcodes();
+        //int readsRead(0);
+        
+        
+        for (unsigned int j=0; j<tarSi;j++){ //fill in filter
+            tarID = idx[i][j];
+            if (mainFil->PrimerIdx[tarID]>-1) {
+                fil->addPrimerL(mainFil->PrimerL[mainFil->PrimerIdx[tarID]], j);
+            }
+            if (mainFil->doReversePrimers() && mainFil->PrimerIdxRev[tarID]>-1) {
+                fil->addPrimerR(mainFil->PrimerR[mainFil->PrimerIdxRev[tarID]], j);
+            }
+            fil->Barcode[j] = mainFil->Barcode[tarID];
+            if ( BC2mode ) {
+                fil->Barcode2[j] = mainFil->Barcode2[tarID];
+            }
+            fil->SampleID[j] = mainFil->SampleID[tarID];
+            fil->SampleID_Combi[j] = mainFil->SampleID_Combi[tarID];
+            fil->HeadSmplID[j] = mainFil->HeadSmplID[tarID];
+            if (fil->Demulti2Fls()) {
+                fil->demultiSinglFiles[j] = mainFil->demultiSinglFiles[tarID];
+                fil->demultiSinglFilesF[j] = mainFil->demultiSinglFilesF[tarID];
+                
+                //closing of ofstreams is only handled on the main object
+                //mainFil->demultiSinglFiles[tarID] = vector<ofstream*> (2,NULL);
+            }
+        }
+        //sanity check no double barcodes..
+        fil->checkDoubleBarcode();
+        
+        if (tarID==-1){cerr<<"tar == -1. abort.\n";exit(10);}
+        
+        //initialize object to handle all input file combinations
+        //main input of fastx, handles input IO
+        shared_ptr<InputStreamer> IS = make_shared<InputStreamer>(!bFASTQ, mainFil->getuserReqFastqVer(),
+                                                                  cmdArgs["-ignore_IO_errors"], cmdArgs["-pairedRD_HD_out"]);
+        if (tarSi < 2 && uniqueFas.size() > 1) {
+            IS->atFileYofX(i + 1, (uint)uniqueFas.size(), tarSi);
+        }
+        string mainFileShort = "";
+        mainFile = IS->setupInput(path, i, tarID, uniqueFas, FastqF, FastaF, QualF, MIDfq, fil->isPaired(), cmdArgs["-onlyPair"], mainFileShort, false);
+        if (!IS->qualityPresent()) {
+            fil->deactivateQualFilter();
+            cerr << "\n*********\nWarning:: Quality file is not present.\nRecommended to abort demultiplexing.\n*********\n\n";
+        }
+        fil->BarcodePreStats();
+        fil->checkDoubleBarcode();
+        fil->checkDoubleSampleIDHead();
+        
+        
+        if (mainFil->doOptimalClusterSeq()){
+            ucl->findSeq2UCinstruction(IS,bFASTQ, mainFil);
+            continue;// after this is only qual_ filter, not required from this point on
+        }
+
+
+#ifdef DEBUG
+        cerr << "Setting up output" << endl;
+#endif
+        //OutputStreamer OutStreamer = OutputStreamer(&fil, cmdArgs, writeStatus, RDSset);
+        shared_ptr<OutputStreamer> OutStreamer = make_shared<OutputStreamer>(fil, cmdArgs, writeStatus, RDSset);
+        fil->setMultiDNA(OutStreamer);
+        if (maxRds > 0) { OutStreamer->setReadLimit(maxRds - totReadsRead); }
+        writeStatus = ofstream::app;
+        //prepare for BC checking (rev/fwd)
+        if (fil->doDemultiplex()){
+            OutStreamer->setBCfixed(false, true);
+            if (OutStreamer->isPEseq() == 2) { OutStreamer->setBCfixed(false, false); }
+        }
+        if (cmdArgs.find("-oneLineFastaFormat") != cmdArgs.end() && cmdArgs["-oneLineFastaFormat"] == "1") {
+            OutStreamer->setOneLinerFastaFmt(true);
+        }
+        //cout << Dere->Nms_size() << " DEBCs\n";
+        OutStreamer->attachDereplicator(Dere);
+        //only pull out a subset of sequences
+        if (mainFil->doSubselReads()) {
+            if (cmdArgs.find("-mocatFix") != cmdArgs.end()) {
+                cerr << "MOCAT fix appplies\n";
+                RDSset->findMatches(IS, OutStreamer, true);
+            }else{
+                RDSset->findMatches(IS, OutStreamer, false);
+            }
+            //delete OutStreamer;
+            continue;
+        }
+
+
+#ifdef DEBUG
+        cerr << "Processing reads" << endl;
+#endif
+        
+        
+        int threads = 1;
+        if (cmdArgs.find("-threads") != cmdArgs.end()) {
+            threads = stoi(cmdArgs["-threads"]);
+        }
+        
+        
+        //**********************
+        //heavy reading routine
+        //**********************
+        if (OutStreamer->isPEseq() == 2){
+            //read_paired(cmdArgs,OutStreamer,IS);
+            while ( !read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs()) ) {
+                //reset output files to previous state
+                OutStreamer->resetOutFilesAndFilter();
+            }
+        } else {
+            
+            if (threads == 1) {
+                cout << "single_threaded" << endl;
+                read_single(cmdArgs,OutStreamer,IS);
+                cout << "processed: " << counter << endl;
+            } else if (threads == 2) {
+                cout << "multi_threaded" << endl;
+                read_single_threaded2(cmdArgs, OutStreamer, IS);
+            } else if (threads > 2) {
+                cout << "multi_threaded_mixed" << endl;
+                read_single_mixed(cmdArgs, OutStreamer, IS);
+            }
+            //read_single_threaded(cmdArgs, OutStreamer, IS, 6);
+        }
+        wait.printResults();
+        put_bm.printResults();
+        get_dna.printResults();
+
+
+#ifdef DEBUG
+        cerr << "All read processed" << endl;
+#endif
+        outFile = OutStreamer->leadOutFile();
+//		delete OutStreamer;
+#ifdef DEBUG
+        cerr << "OutStreamer deleted" << endl;
+#endif
+        
+        //stats
+        fil->prepStats();
+        if (IS->getCurFileN() == 0) {
+            fil->printStats(cerr, mainFile, outFile, true);
+        } else {
+            cerr<<fil->shortStats(""); shortStats = true;
+        }
+        
+        totReadsRead += fil->totalAccepts();
+        
+        shrtLog += fil->shortStats( mainFileShort);
+//		delete IS;
+        //write log file
+        if (uniqueFas.size() > 1){//only print sub log if neccessary
+            ofstream log;
+            string logF = cmdArgs["-log"] + string("0") + itos(i);
+            log.open (logF.c_str() ,ios_base::out);
+            fil->printStats(log,mainFile,outFile,true);
+            log.close();
+        }
+        mainFil->addStats(fil,idx[i]);
+#ifdef DEBUG
+        cerr << "Delete tmp filter" << endl;
+#endif
+    }
+    
+    
+    //-------------------------------------------------
+    //reading of input fq's is done
+    //postprocessing, write reads, dereplicates etc
+    // ------------------------------------------------
+
+
+#ifdef DEBUG
+    cerr << "Prep final logging" << endl;
+#endif
+//write log files
+    if (uniqueFas.size() > 1){
+        mainFile = "several";
+    }
+    
+    ofstream log; string deLog("");
+    string logF = cmdArgs["-log"], logFA = cmdArgs["-log"].substr(0, cmdArgs["-log"].length()-3) + "add.log";
+    
+    //different logfile for SEED extension
+    if (mainFil->doOptimalClusterSeq()){
+        //finish up dereplication file (creating pseudo seeds with counts)
+        ucl->finishMAPfile();
+        if (cmdArgs["-ucAdditionalCounts"] != ""){
+            ucl->set2UC();
+            ucl->finishUCfile(mainFil, cmdArgs["-ucAdditionalCounts"], true);//with smplHead (.mid)
+            ucl->finishUCfile(mainFil, cmdArgs["-ucAdditionalCounts1"], false);//without smplHead (.rest)
+        }
+        if (cmdArgs["-ucAdditionalCounts_refclust"] != ""){
+            //reference based clustering has some high qual_ seqs (no replacement with reads..)
+            //takeOver even found high qual_ hits with these default seeds..
+            shared_ptr<InputStreamer> FALL = make_shared<InputStreamer>(true,
+                                                                        mainFil->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"], cmdArgs["-pairedRD_HD_out"]);
+            //this reads in the SLV fna's & creates matrix entries for these
+            FALL->setupFna(cmdArgs["-OTU_fallback_refclust"]);
+            ucl->setRefMode();
+            ucl->addDefSeeds(FALL, mainFil);
+            ucl->set2UC();
+            //mapping from ref OTU clustering
+            ucl->finishUCfile(mainFil, cmdArgs["-optimalRead2Cluster_ref"], false);
+            //mid / rest mappings
+            ucl->finishUCfile(mainFil, cmdArgs["-ucAdditionalCounts_refclust"], true);//with smplHead (.rest)
+            ucl->finishUCfile(mainFil, cmdArgs["-ucAdditionalCounts_refclust1"], false);//without smplHead (.rest)
+            
+        }
+        if (cmdArgs["-log"] != "nolog") {
+            log.open(logF.c_str(), ios_base::out);
+            ucl->printStats(cerr);
+            ucl->printStats(log);
+            log.close();
+        }
+        
+        //everything done on DNA? Then write & delete
+        if (cmdArgs["-otu_matrix"] != "") {
+            ucl->writeOTUmatrix(cmdArgs["-otu_matrix"]);
+        }
+        //needs to be written after OTU matrix (renaming scheme)
+        shared_ptr<OutputStreamer> OutStreamer = make_shared<OutputStreamer>(mainFil, cmdArgs, ios::out, RDSset);
+        mainFil->setMultiDNA(OutStreamer);
+        ucl->writeNewSeeds(OutStreamer, mainFil,false);
+        //delete OutStreamer;
+        //new fastas also need to be written..
+        OutStreamer.reset(new OutputStreamer(mainFil, cmdArgs, ios::out, RDSset, ".ref", 1));//force fna output
+        mainFil->setMultiDNA( OutStreamer );
+        ucl->writeNewSeeds(OutStreamer, mainFil,true,true);
+        //delete OutStreamer;
+        
+        
+        return;
+    } else if (mainFil->doDereplicate()) {
+#ifdef DEBUG
+        cerr << "write Dereplicated DNA" << endl;
+#endif
+        deLog = Dere->writeDereplDNA(mainFil);
+#ifdef DEBUG
+        cerr << "done write Dere" << endl;
+#endif
+    }
+#ifdef DEBUG
+    cerr << "Logging almost finished" << endl;
+#endif
+    
+    if (cmdArgs["-log"] == "nolog") {
+//		delete Dere;
+        return;
+    }
+#ifdef DEBUG
+    cerr << "DereLog start" << endl;
+#endif
+    if (mainFil->doDereplicate()) {
+        string dereLog = logF.substr(0,logF.length()-3) + "dere";
+        Dere->writeLog(dereLog, deLog);
+//		delete Dere;
+    }
+
+#ifdef DEBUG
+    cerr << "DereLog end" << endl;
+#endif
+    if (shortStats) {
+        mainFil->printStats(std::cerr, mainFile, outFile, true);
+    }
+#ifdef DEBUG
+    cerr << "other logs start" << endl;
+#endif
+    //per sample success rate
+    string logPS = logF.substr(0, logF.length() - 3) + "acceptsPerSample.log";
+    log.open(logPS.c_str(), ios_base::out);
+    mainFil->SmplSpecStats(log);
+    log.close();
+    log.open(logF.c_str(), ios_base::out);
+    mainFil->printStats(log,mainFile,outFile,true);
+    log.close();
+    
+    string logFs = logF.substr(0, logF.length() - 3) + "acceptsPerFile.log";
+    log.open(logFs.c_str(), ios_base::out);
+    log << shrtLog;
+    log.close();
+    
+    string logFGC = logF.substr(0, logF.length() - 3) + "GC.txt";
+    log.open(logFGC.c_str(), ios_base::out);
+    mainFil->printGC(log, mainFil->isPaired());
+    log.close();
+#ifdef DEBUG
+    cerr << "other logs end" << endl;
+#endif
+
+
+//for additional files
+    if (mainFil->secondaryOutput()){
+        log.open (logFA.c_str() ,ios_base::out);
+        mainFil->printStats(log,mainFile,outFile,false);
+        log.close();
+    }
+    
+    
+    //length histogram
+    logF = cmdArgs["-length_hist"];
+    log.open (logF.c_str() ,ios_base::out);
+    mainFil->printHisto(log,0);
+    log.close();
+    //quality histogram
+    logF = cmdArgs["-qual_hist"];
+    log.open (logF.c_str() ,ios_base::out);
+    mainFil->printHisto(log,1);
+    log.close();
+    mainFil->closeOutFilesDemulti();
+#ifdef DEBUG
+    cerr << "separateByFile finished" << endl;
+#endif
+
+}*/
+
+//bool readCmdArgs(int argc, char* argv[],base_map<char*, char*, lstr>& cmdArgs);

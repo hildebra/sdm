@@ -19,11 +19,53 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 #include "IO.h"
-
-
+#include "Benchmark.h"
+#include "ReadMerger.h"
 
 int main(int argc, char* argv[])
 {
+    bool test = false;
+    if (test) {
+//        std::cout << "test" << std::endl;
+        //Merge::testMerge();
+//
+//        std::string file1 = "/usr/users/QIB_fr017/fritsche/Projects/sdm2/data/mergetest/r1_30.fastq";
+//        std::string file2 = "/usr/users/QIB_fr017/fritsche/Projects/sdm2/data/mergetest/r2_30.fastq";
+
+//        std::string file1 = "/usr/users/QIB_fr017/fritsche/Projects/sdm2/data/mergetest/r1_sub.fastq";
+//        std::string file2 = "/usr/users/QIB_fr017/fritsche/Projects/sdm2/data/mergetest/r2_sub.fastq";
+
+//        std::string file1 = "/usr/users/QIB_fr017/fritsche/Projects/sdm2/data/fatih_sm.1.fq";
+//        std::string file2 = "/usr/users/QIB_fr017/fritsche/Projects/sdm2/data/fatih_sm.2.fq";
+
+//        std::string file1 = "/usr/users/QIB_fr017/fritsche/Projects/sdm2/data/mergetest/1.fq";
+//        std::string file2 = "/usr/users/QIB_fr017/fritsche/Projects/sdm2/data/mergetest/2.fq";
+
+        std::string file1 = "C:/Users/hildebra/OneDrive/science/data/test/dada2Seed/testMrgR1.txt";
+        std::string file2 = "C:/Users/hildebra/OneDrive/science/data/test/dada2Seed/testMrgR2.txt";
+
+//        std::string file1 = "/usr/users/QIB_fr017/fritsche/Projects/sdm2/data/mergetest/test_cases.fq";
+//        std::string file2 = "/usr/users/QIB_fr017/fritsche/Projects/sdm2/data/mergetest/test_cases2.fq";
+//
+        std::ifstream is1(file1.c_str());
+        std::ifstream is2(file2.c_str());
+//
+//        const std::string revtest = "hallodri";
+//        std::cout << revtest << std::endl;
+//        Merge::reverseStringInPlace(const_cast<char *>(revtest.c_str()), revtest.length());
+//        std::cout << revtest << std::endl;
+//
+//        std::cout << "test merge with reads" << std::endl;
+		ReadMerger* RM = new ReadMerger();
+        RM->testMergeWithReads(is1, is2);
+
+        exit(0);
+    }
+
+
+    Benchmark sdm_benchmark("Time taken: ");
+    sdm_benchmark.start();
+    
 	if (argc<3){
 		//help_options,help_map,help_commands
 		if (argc==2){
@@ -52,31 +94,42 @@ int main(int argc, char* argv[])
 
 	OptContainer cmdArgs;
 	readCmdArgs(argc, argv, cmdArgs);
-	 
+	cdbg("CmdArgs read\n");
+
 	//rewrites header names
 	rewriteNumbers(cmdArgs);
+	cdbg("CmdArgs modified\n");
 
 	//reads the sdm_options file
-#ifdef DEBUG
-	cerr << "Setting up Filter" << endl;
-#endif
-	shared_ptr<Filters> fil = make_shared<Filters>(cmdArgs);
-	bool bReads = fil->readMap(cmdArgs);
-#ifdef DEBUG
-	cerr << "filter setup & map is read" << endl;
-#endif
-	if (!bReads){cerr<<"Failed to read Map.\n";exit(3);}
-	//cerr<<SAqualP[0]<<" "<<SAqualP[50];
-	fil->setcmdArgsFiles(cmdArgs);
+	cdbg("Setting up Filter\n");
+	//shared_ptr<Filters> fil = make_shared<Filters>(&cmdArgs);
 	
+	shared_ptr<Filters> fil = make_shared<Filters>(cmdArgs);
+	cdbg("filter setup\n");
+
+	
+	//bool bReads = fil->readMap();
+	bool bReads = fil->readMap();
+	if (!bReads) { cerr << "Failed to read Map.\n"; exit(3); }
+	cdbg("map is read\n");
+
+	fil->setcmdArgsFiles();
+	cdbg("CmdArgs set in filter\n");
+
 	clock_t tStart = clock();
+	
+	
 	//main function
-	separateByFile(fil,cmdArgs);
-	//cerr << "\nXXXX\n\n";
-//	delete fil;
+	separateByFile(fil, cmdArgs);
+	//end main function	
+ 
+ 
 
-	fprintf(stderr,"Time taken: %.2fs\n", (double)(clock() - tStart) / CLOCKS_PER_SEC);
+//	fprintf(stderr,"Time taken: %.2fs\n", (double)(clock() - tStart) / CLOCKS_PER_SEC);
 
+	sdm_benchmark.stop();
+	sdm_benchmark.printResults(std::cerr);
+	
 	return 0;
 }
 

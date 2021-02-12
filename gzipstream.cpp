@@ -26,6 +26,10 @@
 // Standard C++ Library".
 // ============================================================================
 
+//test
+#include "zlib.h"
+//Test
+
 #include "gzipstream.h"
 #include <iostream>
 #include <string.h>  // for memcpy
@@ -46,7 +50,7 @@ namespace GZSTREAM_NAMESPACE {
 		if (is_open())
 			return (gzstreambuf*)0;
 		mode = open_mode;
-		// no append nor read/write mode
+		// no appendSequence nor read/write mode
 		if ((mode & std::ios::ate) || (mode & std::ios::app)
 			|| ((mode & std::ios::in) && (mode & std::ios::out)))
 			return (gzstreambuf*)0;

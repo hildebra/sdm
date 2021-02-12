@@ -34,6 +34,7 @@
 #include <fstream>
 #include <zlib.h>
 #include <string>
+#include <cstring>
 
 #ifdef GZSTREAM_NAMESPACE
 namespace GZSTREAM_NAMESPACE {
@@ -78,7 +79,7 @@ namespace GZSTREAM_NAMESPACE {
 			if (is_open())
 				return (gzstreambuf*)0;
 			mode = open_mode;
-			// no append nor read/write mode
+			// no appendSequence nor read/write mode
 			if ((mode & std::ios::ate) 
 				|| ((mode & std::ios::in) && (mode & std::ios::out) && (mode & std::ios::app)))
 				return (gzstreambuf*)0;
@@ -119,7 +120,7 @@ namespace GZSTREAM_NAMESPACE {
 			int n_putback = gptr() - eback();
 			if (n_putback > 4)
 				n_putback = 4;
-			memcpy(buffer + (4 - n_putback), gptr() - n_putback, n_putback);
+			std::memcpy(buffer + (4 - n_putback), gptr() - n_putback, n_putback);
 
 			int num = gzread(file, buffer + 4, bufferSize - 4);
 			if (num <= 0) // ERROR or EOF
