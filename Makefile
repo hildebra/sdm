@@ -16,7 +16,7 @@ program_LIBRARY_DIRS := ${CPATH}
 program_LIBRARIES :=
 
 
-CPPFLAGS +=-Wall -O3 -lz -D__USE_XOPEN2K8 -std=c++17 -pthread
+CPPFLAGS +=-Wall -O3 -D__USE_XOPEN2K8 -std=c++17 -pthread
 CPPFLAGS += $(foreach includedir,$(program_INCLUDE_DIRS),-I$(includedir))
 LDFLAGS += $(foreach librarydir,$(program_LIBRARY_DIRS),-L$(librarydir))
 LDFLAGS += $(foreach library,$(program_LIBRARIES),-l$(library))
@@ -37,7 +37,7 @@ $(program_NAME): $(program_OBJS)
 clean:
 	@- $(RM) $(program_NAME)
 	@- $(RM) $(program_OBJS)
-	rm sdm
+	@- $(RM) sdm
 
 distclean: clean
 
