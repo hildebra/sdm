@@ -69,7 +69,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <assert.h>
 #include <time.h>
 #include <list>
-#include <cmath>
+#include <math.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <fcntl.h>
@@ -81,6 +81,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #ifdef KHASH
 #include "khash.hh"
 #endif
+
+#include "include/robin_set.h"
+#include "include/robin_hood.h"
+
 
 #ifdef _gzipread
 #include "gzstream.h"
@@ -99,7 +103,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif // _WIN32
 
 
-static const float sdm_version = 1.73f;
+static const float sdm_version = 1.8f;
 static const char* sdm_status = "beta";
 
 

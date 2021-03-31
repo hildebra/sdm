@@ -209,20 +209,18 @@ RemainderStrPos(-1), newHD(0), outFiles(0), outFilesIdx(0) {
 }
 
 void ReadSubset::findMatches(shared_ptr<InputStreamer> IS, shared_ptr<OutputStreamer> MD, bool mocatFix) {
-	shared_ptr<DNA> match(NULL); shared_ptr<DNA> match2(NULL);
+	vector<shared_ptr<DNA>> match; //shared_ptr<DNA> match2(NULL);
 	bool cont(true), cont2(true);
 	int idx(0);
 	int pairs = IS->pairNum();
 	unordered_map <string, int>::iterator SEEK;
 	bool b_doHD = newHD.size() > 0;
-	bool sync(false);//meaningless placeholder
+	//bool sync(false);//meaningless placeholder
 	while (cont) {
-		match = IS->getDNA(cont, 0, sync);
-		if (match == NULL) {break;}
-		if (pairs > 1) {
-			match2 = IS->getDNA(cont2, 1, sync);
-		}
-		string curID = match->getPositionFreeId();
+		match = IS->getDNAMC();
+		if (match[0] == NULL) { cont = false; break; }
+		//if (pairs > 1) {			match2 = IS->getDNA(cont2, 1);		}
+		string curID = match[0]->getPositionFreeId();
 		if (mocatFix && curID.length()>5 ) {
 			curID = header_stem(curID);
 			//cerr << curID << endl;
@@ -232,9 +230,9 @@ void ReadSubset::findMatches(shared_ptr<InputStreamer> IS, shared_ptr<OutputStre
 		SEEK = Targets.find(curID);
 		if (SEEK == Targets.end()) {//no hit
 			if (RemainderStrPos != -1) {
-				MD->writeSelectiveStream(match, 0, RemainderStrPos);
+				MD->writeSelectiveStream(match[0], 0, RemainderStrPos);
 				if (pairs > 1) {
-					MD->writeSelectiveStream(match2, 1, RemainderStrPos);
+					MD->writeSelectiveStream(match[1], 1, RemainderStrPos);
 				}
 			} else {// nothing written, but still need to delete
 //				delete match; if (pairs > 1) {delete match2;}
@@ -245,12 +243,12 @@ void ReadSubset::findMatches(shared_ptr<InputStreamer> IS, shared_ptr<OutputStre
 		//cerr << "H";
 		idx = SEEK->second;
 		if (b_doHD && newHD[idx] != "" && pairs>1) {
-            match->setHeader(newHD[idx] + "#1:0");
-            match2->setHeader(newHD[idx] + "#2:0");
+            match[0]->setHeader(newHD[idx] + "#1:0");
+            match[1]->setHeader(newHD[idx] + "#2:0");
 		}
-		MD->writeSelectiveStream(match, 0, outFilesIdx[idx]);
+		MD->writeSelectiveStream(match[0], 0, outFilesIdx[idx]);
 		if (pairs > 1) {
-			MD->writeSelectiveStream(match2, 1, outFilesIdx[idx]);
+			MD->writeSelectiveStream(match[1], 1, outFilesIdx[idx]);
 		}
 
 		//finished, clean up to reduce search space (faster??)
@@ -266,10 +264,10 @@ void ReadSubset::findMatches(shared_ptr<InputStreamer> IS, shared_ptr<OutputStre
 
 
 
-OutputStreamer::OutputStreamer(shared_ptr<Filters> fil, OptContainer& cmdArgs,
+OutputStreamer::OutputStreamer(Filters* fil, OptContainer& cmdArgs,
         std::ios_base::openmode writeStatus, 
 		shared_ptr<ReadSubset> RDSset,
-        string fileExt, ThreadPool *pool, int forceFmt) :
+        string fileExt, int numThreads, int forceFmt) :
         MFil(fil), subFilter(0), //DNAsP1(0), DNAsP2(0), DNAsS1(0), DNAsS2(0),
         //DNAsNoHead(0), DNAsP1_alt(0), DNAsP2_alt(0), DNAsS1_alt(0), DNAsS2_alt(0),
         suppressOutWrite(0), write2File(true),// mem_used(false),
@@ -290,9 +288,10 @@ OutputStreamer::OutputStreamer(shared_ptr<Filters> fil, OptContainer& cmdArgs,
 		totalFileStrms(0),
         bDoDemultiplexIntoFiles(false), demultiSinglFiles(0), //demultiSinglFilesF(0),
 		demultiMergeFiles(0),
-        onlyCompletePairsDemulti(false), pool(pool),
+        onlyCompletePairsDemulti(false),
 		b_merge_pairs_demulti_(false), b_merge_pairs_filter_(false),
-		b_merge_pairs_(false), merger(nullptr)
+		b_merge_pairs_(false), merger(1,nullptr),
+		Nthrds(numThreads)
 
 
 /*	qFilePos(0), sFilePos(0), fqFilePos(0),
@@ -342,21 +341,24 @@ OutputStreamer::OutputStreamer(shared_ptr<Filters> fil, OptContainer& cmdArgs,
 	if (b_merge_pairs_demulti_ || b_merge_pairs_filter_) {
 		b_merge_pairs_ = true;
 	}
+	setSubfilters(Nthrds);
 
 	//threads = futures(num_threads);
 	//if (pairedSeq){cerr<<"paired MFil\n";}
 }
+
+
 OutputStreamer::~OutputStreamer(){
 		//delete MFil;
 	cdbg("Destr OutputStreamer" );
 	//delAllDNAvectors();
 	cdbg(".. done\n" );
 
-/*	for (uint i=0; i<subFilter.size();i++){
-		delete subFilter[i];
-	}*/
 	this->closeOutStreams(true);
 	closeOutFilesDemulti();
+	for (uint i=0; i<subFilter.size();i++){
+		delete subFilter[i];
+	}
 	cdbg("Subfilters deleted, streams closed\n" );
 	//delete optim;
 }
@@ -403,17 +405,18 @@ void OutputStreamer::delAllDNAvectors() {
 */
 }
 
-void OutputStreamer::analyzeDNA(shared_ptr<DNA> d, int FilterUse, int pair, int& idx) {
+void OutputStreamer::analyzeDNA(shared_ptr<DNA> d, int FilterUse, int pair, int& idx, int thr) {
 	if (!d){
 		return ;
 	}
+	Filters * curFil = this->getFilters(thr);
 
-	if ( !MFil->doFilterAtAll() ) {
+	if ( !curFil->doFilterAtAll() ) {
 		bool isP1 = max(0, pair) == 0;
-		if (idx < 0 && !isP1 && !MFil->doubleBarcodes()) {
+		if (idx < 0 && !isP1 && !curFil->doubleBarcodes()) {
 			;
 		} else if (idx < 0) {
-            idx = MFil->cutTag(d, isP1); //still need to check for BC
+            idx = curFil->cutTag(d, isP1); //still need to check for BC
 		}
 		if (idx >= 0) { //prevent second read pair_ from being flagged as true
 			d->setPassed(true);
@@ -421,15 +424,16 @@ void OutputStreamer::analyzeDNA(shared_ptr<DNA> d, int FilterUse, int pair, int&
 		return;
 	}
 
-	if (MFil->secondaryOutput() ){
-        MFil->checkYellowAndGreen(d, pair, idx);
+	if (curFil->secondaryOutput() ){
+		//pricipally safe to call from thread
+        curFil->checkYellowAndGreen(d, pair, idx);
 	} else if (FilterUse==-1){
-		MFil->check(d, false, pair, idx);
+		curFil->check(d, false, pair, idx);
 	} else {
 		cerr << "Invalid control path in analyzeDNA\n"; exit(55);
-		shared_ptr<Filters> f = subFilter[FilterUse];
+		//Filters* f = subFilter[FilterUse];
 		//subFilter[FilterUse].check(d, false, pair_, idx);
-        f->check(d, false, pair, idx);
+        //f->check(d, false, pair, idx);
         
         
     }
@@ -463,7 +467,7 @@ vector<bool> OutputStreamer::analyzeDNA(shared_ptr<DNA> p1, shared_ptr<DNA> p2, 
 
 	//3rd: check if all quality criteria are met, BC is true etc.
 	//if (FilterUse == -1){
-	//ret = MFil->check_pairs(p1, p2, mid, ret, changePHead);
+	//ret = curFil->check_pairs(p1, p2, mid, ret, changePHead);
 	//}	else { //mutithread, to avoid race conditions etc use separate filter
 	//	ret = subFilter[FilterUse]->check_pairs(p1, p2, mid, ret, changePHead);
 	//}
@@ -499,22 +503,25 @@ void OutputStreamer::closeOutFilesDemulti() {
 //    cout << "FILES TO t DEMULTIPLEX OUT " << demultiSinglFiles.size() << endl;
     //cout << "domeulti: " << bDoDemultiplexIntoFiles << endl;
 
-
+	cdbg("OutputStreamer::closeOutFilesDemulti");
 	if (!bDoDemultiplexIntoFiles) { return; }
 	for (size_t i = 0; i < demultiSinglFiles.size(); i++) {
 	    //cout << " do fancy demultiplexing for " << i << endl;
 		if (demultiSinglFiles[i][0] != nullptr) {
 		    //cout << "yaas" << endl;
 		    delete demultiSinglFiles[i][0];
+			demultiSinglFiles[i][0] = nullptr;
 		}
 		if (demultiSinglFiles[i][1] != nullptr)
 		{
 		    delete demultiSinglFiles[i][1];
+			demultiSinglFiles[i][1] = nullptr;
 		}
 	}
 	for (size_t i = 0; i < demultiMergeFiles.size(); i++) {
 		if (demultiMergeFiles[i] != nullptr) {
 			delete demultiMergeFiles[i];
+			demultiMergeFiles[i] = nullptr;
 		}
 	}
     //cout << " closeOutFilesDemulti" << endl;
@@ -640,7 +647,8 @@ void OutputStreamer::writeAllStoredDNA2t(){
 #endif
 
 
-void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int BCoffset) {
+void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int BCoffset,
+	int curThread) {
 	if (!this->Demulti2Fls()) {
 		return;
 	}
@@ -659,13 +667,15 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 	bool mergeWr(false);
 
 	if ((green1 || green2) && b_merge_pairs_demulti_ && d1->merge_seed_pos_ > 0) {
-		shared_ptr<DNA> dna_merged = merger->merge(d1, d2);
+		shared_ptr<DNA> dna_merged = merger[curThread]->merge(d1, d2);
 		if (dna_merged) {
 			// write out merged DNA
 			dna_merged->prepareWrite(fastQoutVer);
+			//dmltMTX.lock();
 			*(demultiMergeFiles[idx]) << dna_merged->writeFastQ();
-			mergeWr = true;
 			BPwrittenInSRmerg += d1->length();
+			//dmltMTX.unlock();
+			//mergeWr = true;
 		}
 	}
 	if (mergeWr) {
@@ -681,13 +691,17 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 	if (green1) {
 		//cout << "trouble" << endl;
 		d1->prepareWrite(fastQoutVer);
+		//dmltMTX.lock();
 		*(demultiSinglFiles[idx][0]) << d1->writeFastQ( false);
 		BPwrittenInSR += d1->length();
+		//dmltMTX.unlock();
 	}
 	if (green2) {
 		//cout << "trouble" << endl;
 		d2->prepareWrite(fastQoutVer);
+		//dmltMTX.lock();
 		*(demultiSinglFiles[idx][1]) << d2->writeFastQ( false);
+		//dmltMTX.unlock();
 	}
 
 
@@ -713,7 +727,7 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d, int p, int BCoffset) {//th
 }
 
 
-void OutputStreamer::generateDemultiOutFiles(string path, shared_ptr<Filters> fil, std::ios_base::openmode writeStatus) {
+void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil, std::ios_base::openmode writeStatus) {
 	//fill in demultiSinglFiles vector
 	vector<ofbufstream*> empVec(2, NULL);
 	//vector<string> empVec2(2, "");
@@ -857,6 +871,8 @@ void OutputStreamer::incrementOutputFile(){
 void Filters::addDNAtoCStats(shared_ptr<DNA> d,int Pair) {
 	//here should be the only place to count Barcodes!
 	int easyPair = Pair < 3 ? Pair - 1 : Pair - 3;
+	
+	csMTX[easyPair]->lock();
 	collectStatistics[easyPair]->total2++;
 
 
@@ -934,6 +950,7 @@ void Filters::addDNAtoCStats(shared_ptr<DNA> d,int Pair) {
 			this->statAddDerepBadSeq(d->getBarcodeNumber());
 		}
 	}
+	csMTX[easyPair]->unlock();
 }
 
 
@@ -1024,28 +1041,33 @@ void Filters::addDNAtoCStatsMT(shared_ptr<DNA> d, int pair, int thread_id) {
 }
 
 
-bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair) {
+bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair, int thr) {
 	//second most important part: collect stats on DNA passing through here (should be all read)
 	//most important part: save DNA to be written later (or discard)
 	if (d == NULL || stopAll) {
 		return !stopAll;
 	}
 	int Cstream = 0;
+	bool writen(false);
 	
-	MFil->addDNAtoCStats(d, Pair);
+	//threadsafe
+	Filters* curFil = this->getFilters(thr);
+
+	curFil->addDNAtoCStats(d, Pair);
 
 	if (suppressOutWrite == 3) {
 		return !stopAll;
 	}
 
-	if (MFil->doFilterAtAll()) {
+	if (curFil->doFilterAtAll()) {
 		if ((b_writeGreenQual && d->isGreenQual() ) || 
 			(b_writeYellowQual && d->isYellowQual()) ) {
 			d->prepareWrite(fastQoutVer);
 			if (BWriteFastQ && b_changeFQheadVer) {//check if header PE naming needs to be changed
-				d->changeHeadPver(MFil->FQheadV());
+				d->changeHeadPver(curFil->FQheadV());
 			}
-			ReadsWritten++;
+			writen = true;
+			
 			if (d->isYellowQual()) {
 				Cstream = 1;
 			}
@@ -1054,7 +1076,7 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair) {
 			return !stopAll;
 		}
 	}
-
+	//sqfqostrMTX.lock();
 	if (BWriteFastQ) {//write in fastq format
 		*fqFile[Cstream][Pair-1] << d->writeFastQ();
 	} else {//write in fasta (and maybe qual) format
@@ -1063,13 +1085,14 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair) {
 			*qFile[Cstream][Pair-1] << d->writeQual( b_oneLinerFasta);
 		}
 	}
+	if (writen) { ReadsWritten++; }
 	if (maxReadsPerOFile > 0 && ReadsWritten + DNAinMem >= maxReadsPerOFile) {
 		//cerr << "ReadsWritten " << ReadsWritten << " DNAinMem " << DNAinMem << endl;
 		DNAinMem = 0;
 		//TODO multithread output file
 		incrementOutputFile();
 	}
-
+	//sqfqostrMTX.unlock();
 
 
 	return !stopAll;
@@ -1093,11 +1116,11 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair) {
 			}
 			else if (Pair == 3){
 				DNAsS1.push_back(d);
-				MFil->collectStatistics[0]->singleton++;
+				curFil->collectStatistics[0]->singleton++;
 			}
 			else if (Pair == 4){
 				DNAsS2.push_back(d);
-				MFil->collectStatistics[1]->singleton++;
+				curFil->collectStatistics[1]->singleton++;
 			}
 			DNAinMem++;
 		}
@@ -1114,11 +1137,11 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair) {
 				DNAsP2_alt.push_back(d);
 			}
 			else if (Pair == 3){ //yellow P1
-				MFil->statAddition[0]->singleton++;
+				curFil->statAddition[0]->singleton++;
 				DNAsS1_alt.push_back(d);
 			}
 			else if (Pair == 4){//yellow P2
-				MFil->statAddition[1]->singleton++;
+				curFil->statAddition[1]->singleton++;
 				DNAsS2_alt.push_back(d);
 			}
 			DNAinMem++;
@@ -1137,16 +1160,15 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair) {
 		
 	}
 	*/
-	return !stopAll;
 }
 
 bool OutputStreamer::saveForWrite_merge(shared_ptr<DNA> d, shared_ptr<DNA> d2,
-		string newHeader, bool elseWriteD1) {
+		string newHeader,int curThread, bool elseWriteD1) {
 	// CHECK WHERE TO IMPLEMENT BEST
 // MERGE DNA1 AND DNA2
 	shared_ptr<DNA> dna_merged = nullptr;
 	if (d->merge_seed_pos_ > 0) {
-		dna_merged = merger->merge(d, d2);
+		dna_merged = merger[curThread]->merge(d, d2);
 	}
 	if (dna_merged) {
 		// write out merged DNA
@@ -1350,27 +1372,23 @@ void OutputStreamer::writeNonBCReads(shared_ptr<DNA> d, shared_ptr<DNA> d2) {
 				(d->getBarcodeDetected() && !d2->getBarcodeDetected())) {
 				cerr << "Barcode only set in 1 reads.. something wrong!\n";
 			}
+			//nobcostrmMTX.lock();
 			*(fqNoBCFile[0]) << d->writeFastQ();
 			*(fqNoBCFile[1]) << d2->writeFastQ();
+			//nobcostrmMTX.unlock();
 		}
 	}
 }
 
 void OutputStreamer::setSubfilters(int num) {
-	if (num<2){return;}
+	if (num<1){return;}
 	subFilter.resize(num,NULL);
 	for (uint i=0;i<subFilter.size();i++){
-		subFilter[i] = make_shared<Filters>(MFil,true);
+		subFilter[i] = new Filters (MFil,MFil->currentBCnumber(),true);
     }
 }
 
-void OutputStreamer::setSubfiltersMT(int num, size_t threads=0) {
-    if (num<2){return;}
-    subFilter.resize(num,NULL);
-    for (uint i=0;i<subFilter.size();i++){
-        subFilter[i] = make_shared<Filters>(MFil,true, threads);
-    }
-}
+
 
 void OutputStreamer::mergeSubFilters() {
 	vector<int> idx (MFil->Barcode.size(),0);
@@ -1379,7 +1397,7 @@ void OutputStreamer::mergeSubFilters() {
 		MFil->addStats(subFilter[i],idx);
 	}
 }
-
+/*
 void OutputStreamer::mergeSubFiltersMT() {
     vector<int> idx (MFil->Barcode.size(),0);
 
@@ -1390,7 +1408,7 @@ void OutputStreamer::mergeSubFiltersMT() {
 			MFil->statAddition, subFilter[i]->statistics_, idx);
     }
 }
-
+*/
 
 void OutputStreamer::attachDereplicator(shared_ptr<Dereplicate> de) {
 	if (de != NULL) {
@@ -1420,13 +1438,14 @@ void OutputStreamer::attachDereplicator(shared_ptr<Dereplicate> de) {
 	}
 }*/
 void OutputStreamer::dereplicateDNA(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2) {
-	if (!b_doDereplicate) {
+	if (false || !b_doDereplicate) {
 		return;
 	}
-	
 	dereplicator->addDNA(tdn, tdn2);	
 	if (tdn->isDereplicated()) {
+		//drpMTX.lock();
 		cntDerep++;
+		//drpMTX.unlock();
 	}
 }
 
@@ -1858,16 +1877,25 @@ shared_ptr<DNA> OutputStreamer::mergeDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> d
 }
 */
 
-void OutputStreamer::findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2) {
-    total_read_counter_++;
-    if (merger->findSeed(dna1->getSequence(), dna2->getSequence())) {
-        merged_counter_++;
-        dna1->merge_seed_pos_ = (int) merger->result.seed.pos1;
-        dna1->merge_offset_ = merger->result.offset1;
-        dna2->merge_seed_pos_ = (int) merger->result.seed.pos2;
-        dna2->merge_offset_ = merger->result.offset2;
-        dna2->reversed_merge_ = merger->result.seed.is2reversed;
+void OutputStreamer::findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, int thrPos) {
+	bool didMerge(false);
+	if (dna1->length() == 0 || dna2->length() == 0) {
+		total_read_preMerge_++;  return; 
+	}
+    if (merger[thrPos]->findSeed(dna1->getSequence(), dna2->getSequence())) {
+		didMerge = true;
+        dna1->merge_seed_pos_ = (int) merger[thrPos]->result.seed.pos1;
+        dna1->merge_offset_ = merger[thrPos]->result.offset1;
+        dna2->merge_seed_pos_ = (int) merger[thrPos]->result.seed.pos2;
+        dna2->merge_offset_ = merger[thrPos]->result.offset2;
+        dna2->reversed_merge_ = merger[thrPos]->result.seed.is2reversed;
     }
+	total_read_preMerge_++; 
+	if (didMerge) {
+		merged_counter_++;
+	}
+	//mergStatMTX.lock(); 	mergStatMTX.unlock(); 
+	return;
 }
 
 //*******************************************
@@ -1900,7 +1928,7 @@ void DNAuniqSet::setBest() {
 //*******************************************
 //*        DEREPLICATE OBJECT
 //*******************************************
-Dereplicate::Dereplicate(OptContainer& cmdArgs,shared_ptr<Filters> mf):
+Dereplicate::Dereplicate(OptContainer& cmdArgs, Filters* mf):
         barcode_number_to_sample_id_(0), b_usearch_fmt(true), b_singleLine(true), b_pairedInput(false),
         minCopies(1,0), minCopiesStr("0"), //default minCopies accepts every derep
 totSize(0), tmpCnt(0), curBCoffset(0), b_derep_as_fasta_(true), b_derepPerSR(false),
@@ -2007,7 +2035,6 @@ mainFilter(mf)
 	return true;
 }*/
 
-std::mutex unique_dna_mtx;
 bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 	//1st build hash of DNA
 	if (!dna->getBarcodeDetected()) {
@@ -2023,10 +2050,12 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 	//int MrgPos1 = -1;
 	shared_ptr<DNA> dna_merged = nullptr;
 	string srchSeq("");
+
 	if (dna2 != nullptr && dna->merge_seed_pos_ != -1) {
 		MrgPos1 = dna2->merge_seed_pos_;
 		dna_merged = merger->merge(dna, dna2);
 	}
+
 	if (dna_merged){
 		srchSeq = dna_merged->getSeqPseudo().substr(0, dna->length());
 	}
@@ -2035,25 +2064,26 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 	}
 
     // Lock because were accessing the base_map
-    std::lock_guard<std::mutex> unique_dna_lck (unique_dna_mtx);
 
     // See if DNA object is present
     // auto dna_unique = Tracker.find(new_dna_unique);
-	
-	auto dna_unique1 = Tracker.find(srchSeq);
-    if (dna_unique1 != Tracker.end()) {// found something
+	bool new_insert(true);
+	map<int, shared_ptr<DNAunique>>::iterator dna_unique;
+    drpMTX.lock();
+	HashDNA::iterator dna_unique1 = Tracker.find(srchSeq);
+	//HashDNA::iterator TrackerEnd = Tracker.end();
+	if (dna_unique1 != Tracker.end()) {// found something
+		new_insert = false;
+		dna_unique = dna_unique1->second.find(MrgPos1);
 		//truly dereplicated? at least overlap should fit..
-		auto dna_unique = dna_unique1->second.find(MrgPos1);
-		if (dna_unique == dna_unique1->second.end()) {//simple version: dont add in
-		// Create new dna_unique object
-			dna->setMidQual(false); dna->setDereplicated();
-			shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
-			new_dna_unique->saveMem();
-			if (dna2 != nullptr) { new_dna_unique->attachPair(make_shared<DNAunique>(dna2, sample_id)); }
-			Tracker[srchSeq][MrgPos1] = new_dna_unique;
-			return true;//new seed
+		if (dna_unique == dna_unique1->second.end()) {
+			new_insert = true;
 		}
-
+	}
+	drpMTX.unlock();
+    if (!new_insert) {// found something
+		//drpMTX.lock();
+		//cdbg("inserting to DNAderep ");
         dna->setDereplicated();
 
         // increment sample counter
@@ -2068,29 +2098,33 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
         if (pass && betterPreSeed(dna, dna2, dna_unique->second )) {
             // Uparse does NOT use qualities for clustering, therefore we do not need to calculate average qualities for this dna object
             // Lotus uses qualities for constructing taxonomy (therefore we do replace dna if theres a better quality read)
-			shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
-            new_dna_unique->takeOver(dna_unique->second, dna2);
-			dna_unique->second = new_dna_unique;
-            //Tracker.erase(*dna_unique);
-            //Tracker.insert(new_dna_unique);
+			//drpMTX.lock();
+			dna_unique->second->takeOverDNA(dna,dna2);
+			//drpMTX.unlock();
+			//shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
+			//new_dna_unique->takeOver(dna_unique->second, dna2);
+			//drpMTX.lock();
+			//dna_unique->second = new_dna_unique;
+			//drpMTX.unlock();
 
         }
-        return false;//added to seeds
+		//drpMTX.unlock();
     } else if (pass) {
         // Create new dna_unique object
+		//cdbg("set new DNAderep ");
         dna->setMidQual(false); dna->setDereplicated();
 		shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
         new_dna_unique->saveMem();
         if (dna2 != nullptr) {new_dna_unique->attachPair(make_shared<DNAunique>(dna2, sample_id));} 
+		drpMTX.lock();
 		Tracker[srchSeq][MrgPos1] = new_dna_unique;
-        return true;//new seed
+		drpMTX.unlock();
     }
-    
-
-    return true;//didn't do a thing..
+	//drpMTX.unlock();
+    return new_insert;//didn't do a thing..
 }
 
-void Dereplicate::BCnamesAdding(shared_ptr<Filters> fil) {
+void Dereplicate::BCnamesAdding(Filters* fil) {
 	vector<string> refSID = fil->SampleID;
 	for (size_t i = 0; i < refSID.size(); i++) {
 		barcode_number_to_sample_id_.push_back(refSID[i]);
@@ -2145,7 +2179,7 @@ void Dereplicate::finishMap() {
 	std::remove(mapF.c_str());
 	std::rename((mapF + "t").c_str(), mapF.c_str());
 }
-string Dereplicate::writeDereplDNA(shared_ptr<Filters> mf, string SRblock) {
+string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	ofstream of, omaps, of2, ofRest, of2p2, of_merged;
 	cerr << "Evaluating and writing dereplicated reads..\n";
 	int fastqVer = mf->getuserReqFastqOutVer();
@@ -2407,9 +2441,11 @@ Filters::Filters(OptContainer& cmdArgs1) :
         Barcode(0), revBarcode(0), Barcode2(0), revBarcode2(0),
         HeadSmplID(0),
         hetPrimer(2,vector<string>(0)),
-        collectStatistics(2), statAddition(2),
+        collectStatistics(2), csMTX(2,NULL) , statAddition(2),
         FastaF(0), QualF(0), FastqF(0), MIDfqF(0),
         derepMinNum(0),
+	SequencingRun(0),
+
         lMD(NULL), 
         tAdapter(""), tAdapterLength(0),
         removeAdapter(false), bDoMultiplexing(true), bDoBarcode(true),
@@ -2447,9 +2483,11 @@ Filters::Filters(OptContainer& cmdArgs1) :
         maxReadsPerOFile(0), ReadsWritten(0), OFileIncre(0),
 		demultiBPperSR(0),
         barcodeLengths1_(0), barcodeLengths2_(0),
-		SequencingRun(0),
         cmdArgs(cmdArgs1)
 		{
+	csMTX[0] = new mutex();	csMTX[1] = new mutex();
+	//csMTX[0].unlock(); 
+	//csMTX[1].unlock();
 
     collectStatistics[0] = make_shared<collectstats>(); 
 	collectStatistics[1] = make_shared<collectstats>();
@@ -2746,14 +2784,14 @@ Filters::Filters(OptContainer& cmdArgs1) :
 
 
 
-Filters::Filters(shared_ptr<Filters> of, int BCnumber, bool takeAll, size_t threads) 
+Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads) 
 	:
 	PrimerL(0,""), PrimerR(0,""),
         PrimerL_RC(0,""), PrimerR_RC(0,""),
         PrimerIdx(of->PrimerIdx),
         Barcode(0), revBarcode(0), Barcode2(0), revBarcode2(0),
 	    HeadSmplID(0), hetPrimer(2, vector<string>(0)),
-		collectStatistics(2,nullptr), statAddition(2,nullptr),
+		collectStatistics(2,nullptr), csMTX(2, NULL), statAddition(2,nullptr),
         FastaF(of->FastaF), QualF(of->QualF), FastqF(of->FastqF),
         MIDfqF(of->MIDfqF), derepMinNum(of->derepMinNum),
         lMD(nullptr), 
@@ -2800,12 +2838,16 @@ Filters::Filters(shared_ptr<Filters> of, int BCnumber, bool takeAll, size_t thre
         bDoCombiSamples(of->bDoCombiSamples),
         maxReadsPerOFile(of->maxReadsPerOFile),
 		demultiBPperSR(of->demultiBPperSR),
-        ReadsWritten(of->ReadsWritten), OFileIncre(of->OFileIncre),
+        //ReadsWritten(of->ReadsWritten), OFileIncre(of->OFileIncre),
         barcodeLengths1_(0), barcodeLengths2_(0), SequencingRun(0)
 {
 	cdbg("New Filter object from copy\n");
+	ReadsWritten = of->writtenReads();
+	OFileIncre = of->getFileIncrementor();
     BCdFWDREV[0].fix(); BCdFWDREV[1].fix();
 	//collectStatistics.resize(2); statAddition.resize(2);
+	csMTX[0] = new mutex(); csMTX[1] = new mutex();
+
 	collectStatistics[0] = make_shared<collectstats>(); 
 	collectStatistics[1] = make_shared<collectstats>();
     statAddition[0] = make_shared<collectstats>(); statAddition[1] = make_shared<collectstats>(); ;
@@ -2829,71 +2871,71 @@ Filters::Filters(shared_ptr<Filters> of, int BCnumber, bool takeAll, size_t thre
         barcodeLengths2_ = of->barcodeLengths2_;
 		SequencingRun = of->SequencingRun;
 		SequencingRun2id = of->SequencingRun2id;
-        BarcodePreStats();
-        
-    }
-    
+BarcodePreStats();
+
+	}
+
 }
 
 /*
 //copy of filter, but leave stat vals empty
-Filters::Filters(shared_ptr<Filters> of, int BCnumber, bool takeAll, size_t threads) :
-        PrimerL(0,""), PrimerR(0,""),
-        PrimerL_RC(0,""), PrimerR_RC(0,""),
-        PrimerIdx(of->PrimerIdx),
-        Barcode(0), revBarcode(0), Barcode2(0), revBarcode2(0),
-        HeadSmplID(0), hetPrimer(2, vector<string>(0)), 
+Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads) :
+		PrimerL(0,""), PrimerR(0,""),
+		PrimerL_RC(0,""), PrimerR_RC(0,""),
+		PrimerIdx(of->PrimerIdx),
+		Barcode(0), revBarcode(0), Barcode2(0), revBarcode2(0),
+		HeadSmplID(0), hetPrimer(2, vector<string>(0)),
 		collectStatistics(2), statAddition(2), statistics_(threads),
-        FastaF(of->FastaF), QualF(of->QualF), FastqF(of->FastqF),
-        MIDfqF(of->MIDfqF), derepMinNum(of->derepMinNum),
-        lMD(NULL), 
-        tAdapter(of->tAdapter), tAdapterLength(of->tAdapterLength),
-        removeAdapter(of->removeAdapter), bDoMultiplexing(of->bDoMultiplexing),
-        bDoBarcode(of->bDoBarcode), bDoBarcode2(of->bDoBarcode2), bDoBarcode2Rd1(of->bDoBarcode2Rd1),
-        bDoHeadSmplID(of->bDoHeadSmplID),
-        bBarcodeSameSize(of->bBarcodeSameSize),
-        bOneFileSample(of->bOneFileSample), curBCnumber(BCnumber), BCoffset(0),
-        bAdditionalOutput(of->bAdditionalOutput), b2ndRDBcPrimCk(of->b2ndRDBcPrimCk),
-        bRevRdCk(of->bRevRdCk), bChkRdPrs(of->bChkRdPrs),
-        min_l(of->min_l), alt_min_l(of->alt_min_l), min_l_p(of->min_l_p), alt_min_l_p(of->alt_min_l_p),
-        maxReadLength(0), norm2fiveNTs(of->norm2fiveNTs),
-        max_l(of->max_l), min_q(of->min_q), alt_min_q(of->alt_min_q),
-        BcutPrimer(of->BcutPrimer), alt_BcutPrimer(of->alt_BcutPrimer),
-        bPrimerR(of->bPrimerR),
-        bRequireRevPrim(of->bRequireRevPrim), alt_bRequireRevPrim(of->alt_bRequireRevPrim),
-        bRequireFwdPrim(of->bRequireFwdPrim), alt_bRequireFwdPrim(of->alt_bRequireFwdPrim),
-        BcutTag(of->BcutTag),
-        bCompletePairs(of->bCompletePairs), bShortAmplicons(of->bShortAmplicons),
-        minBCLength1_(of->minBCLength1_), minBCLength2_(of->minBCLength2_), maxBCLength1_(of->maxBCLength1_), maxBCLength2_(of->maxBCLength2_), minPrimerLength_(of->minPrimerLength_), maxHomonucleotide(of->maxHomonucleotide),
-        PrimerErrs(of->PrimerErrs), alt_PrimerErrs(of->alt_PrimerErrs), barcodeErrors_(of->barcodeErrors_),
-        MaxAmb(of->MaxAmb), alt_MaxAmb(of->alt_MaxAmb),
-        FQWwidth(of->FQWwidth), EWwidth(of->EWwidth),
-        RevPrimSeedL(of->RevPrimSeedL),
-        b_BinFilBothPairs(of->b_BinFilBothPairs),
-        BinFilErr(of->BinFilErr), BinFilP(of->BinFilP),
-        FQWthr(of->FQWthr), EWthr(of->EWthr),
-        alt_FQWthr(of->alt_FQWthr), alt_EWthr(of->alt_EWthr),
-        PEheaderVerWr(of->PEheaderVerWr), TrimStartNTs(of->TrimStartNTs),
-        TruncSeq(of->TruncSeq),
-        iniSpacer(of->iniSpacer), userReqFastqVer(of->userReqFastqVer),
-        userReqFastqOutVer(of->userReqFastqOutVer), maxAccumQP(of->maxAccumQP),
-        alt_maxAccumQP(of->alt_maxAccumQP),
+		FastaF(of->FastaF), QualF(of->QualF), FastqF(of->FastqF),
+		MIDfqF(of->MIDfqF), derepMinNum(of->derepMinNum),
+		lMD(NULL),
+		tAdapter(of->tAdapter), tAdapterLength(of->tAdapterLength),
+		removeAdapter(of->removeAdapter), bDoMultiplexing(of->bDoMultiplexing),
+		bDoBarcode(of->bDoBarcode), bDoBarcode2(of->bDoBarcode2), bDoBarcode2Rd1(of->bDoBarcode2Rd1),
+		bDoHeadSmplID(of->bDoHeadSmplID),
+		bBarcodeSameSize(of->bBarcodeSameSize),
+		bOneFileSample(of->bOneFileSample), curBCnumber(BCnumber), BCoffset(0),
+		bAdditionalOutput(of->bAdditionalOutput), b2ndRDBcPrimCk(of->b2ndRDBcPrimCk),
+		bRevRdCk(of->bRevRdCk), bChkRdPrs(of->bChkRdPrs),
+		min_l(of->min_l), alt_min_l(of->alt_min_l), min_l_p(of->min_l_p), alt_min_l_p(of->alt_min_l_p),
+		maxReadLength(0), norm2fiveNTs(of->norm2fiveNTs),
+		max_l(of->max_l), min_q(of->min_q), alt_min_q(of->alt_min_q),
+		BcutPrimer(of->BcutPrimer), alt_BcutPrimer(of->alt_BcutPrimer),
+		bPrimerR(of->bPrimerR),
+		bRequireRevPrim(of->bRequireRevPrim), alt_bRequireRevPrim(of->alt_bRequireRevPrim),
+		bRequireFwdPrim(of->bRequireFwdPrim), alt_bRequireFwdPrim(of->alt_bRequireFwdPrim),
+		BcutTag(of->BcutTag),
+		bCompletePairs(of->bCompletePairs), bShortAmplicons(of->bShortAmplicons),
+		minBCLength1_(of->minBCLength1_), minBCLength2_(of->minBCLength2_), maxBCLength1_(of->maxBCLength1_), maxBCLength2_(of->maxBCLength2_), minPrimerLength_(of->minPrimerLength_), maxHomonucleotide(of->maxHomonucleotide),
+		PrimerErrs(of->PrimerErrs), alt_PrimerErrs(of->alt_PrimerErrs), barcodeErrors_(of->barcodeErrors_),
+		MaxAmb(of->MaxAmb), alt_MaxAmb(of->alt_MaxAmb),
+		FQWwidth(of->FQWwidth), EWwidth(of->EWwidth),
+		RevPrimSeedL(of->RevPrimSeedL),
+		b_BinFilBothPairs(of->b_BinFilBothPairs),
+		BinFilErr(of->BinFilErr), BinFilP(of->BinFilP),
+		FQWthr(of->FQWthr), EWthr(of->EWthr),
+		alt_FQWthr(of->alt_FQWthr), alt_EWthr(of->alt_EWthr),
+		PEheaderVerWr(of->PEheaderVerWr), TrimStartNTs(of->TrimStartNTs),
+		TruncSeq(of->TruncSeq),
+		iniSpacer(of->iniSpacer), userReqFastqVer(of->userReqFastqVer),
+		userReqFastqOutVer(of->userReqFastqOutVer), maxAccumQP(of->maxAccumQP),
+		alt_maxAccumQP(of->alt_maxAccumQP),
 		//BChit, BCrevhit initialize to 0 - new set, new luck
 		pairedSeq(of->pairedSeq),
-        revConstellationN(0),
-        BCdFWDREV(of->BCdFWDREV),
-        restartSet(false),
-        b_optiClusterSeq(of->b_optiClusterSeq), b_subselectionReads(of->b_subselectionReads),
-        b_doQualFilter(of->b_doQualFilter),
-        b_doFilter(of->b_doFilter),
-        bDoDereplicate(of->bDoDereplicate),
-        bDoCombiSamples(of->bDoCombiSamples),
-        maxReadsPerOFile(of->maxReadsPerOFile),
-        ReadsWritten(of->ReadsWritten), OFileIncre(of->OFileIncre),
-        barcodeLengths1_(0), barcodeLengths2_(0), SequencingRun(0)
+		revConstellationN(0),
+		BCdFWDREV(of->BCdFWDREV),
+		restartSet(false),
+		b_optiClusterSeq(of->b_optiClusterSeq), b_subselectionReads(of->b_subselectionReads),
+		b_doQualFilter(of->b_doQualFilter),
+		b_doFilter(of->b_doFilter),
+		bDoDereplicate(of->bDoDereplicate),
+		bDoCombiSamples(of->bDoCombiSamples),
+		maxReadsPerOFile(of->maxReadsPerOFile),
+		ReadsWritten(of->ReadsWritten), OFileIncre(of->OFileIncre),
+		barcodeLengths1_(0), barcodeLengths2_(0), SequencingRun(0)
 		{
 	BCdFWDREV[0].fix(); BCdFWDREV[1].fix();
-    collectStatistics[0] = collectstats(); collectStatistics[1] = collectstats();
+	collectStatistics[0] = collectstats(); collectStatistics[1] = collectstats();
 	collectStatistics[0]->ini_repStat(); collectStatistics[1]->ini_repStat();
 
 	if (bAdditionalOutput) {
@@ -2916,8 +2958,8 @@ Filters::Filters(shared_ptr<Filters> of, int BCnumber, bool takeAll, size_t thre
 		PrimerR_RC = of->PrimerR_RC;
 		hetPrimer = of->hetPrimer;
 		lMD = of->lMD;
-        barcodeLengths1_ = of->barcodeLengths1_;
-        barcodeLengths2_ = of->barcodeLengths2_;
+		barcodeLengths1_ = of->barcodeLengths1_;
+		barcodeLengths2_ = of->barcodeLengths2_;
 		SequencingRun = of->SequencingRun;
 		SequencingRun2id = of->SequencingRun2id;
 		BarcodePreStats();
@@ -2928,23 +2970,23 @@ Filters::Filters(shared_ptr<Filters> of, int BCnumber, bool takeAll, size_t thre
 */
 
 Filters::~Filters() {
-#ifdef DEBUG
-	cerr << "Deleting filter .. " ;
-#endif
+	cdbg("Deleting filter .. ");
+	for (size_t i = 0; i < csMTX.size(); i++){
+		delete csMTX[i];
+	}
 
 //	for (size_t i = 0; i < 2; i++) { delete PostFilt[i]; delete RepStatAddition[i]; }
 //	delete PreFiltP1; delete PreFiltP2;
-#ifdef DEBUG
-	cerr << "Done" << endl;
-#endif
+	cdbg("Done\n");
 }
 
 
-shared_ptr<Filters> Filters::filterPerBCgroup(const vector<int> idxi) {
+Filters* Filters::filterPerBCgroup(const vector<int> idxi) {
 	cdbg("filterPerBCgroup::start : "+ itos(idxi[0])+"\n");
 
 	// get filter from main filter object passing an index for mapping?!
-	shared_ptr<Filters> filter = make_shared<Filters>(shared_from_this(), idxi[0]);
+//	shared_ptr<Filters> filter = make_shared<Filters>(shared_from_this(), idxi[0]);
+	Filters* filter = new Filters(this, idxi[0]);
 	cdbg("filterPerBCgroup::star2t\n");
 
 	// number of mapping file lines associated with that unique fastx
@@ -2996,7 +3038,7 @@ UClinks * Filters::ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDS
 		//are fallback fasta sequences available?
 		if (cmdArgs["-OTU_fallback"] != "") {
 			shared_ptr<InputStreamer> FALL = make_shared<InputStreamer>(true,
-				this->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"], cmdArgs["-pairedRD_HD_out"]);
+				this->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"], cmdArgs["-pairedRD_HD_out"],1);
 			FALL->setupFna(cmdArgs["-OTU_fallback"]);
 			ucl->setupDefSeeds(FALL, SampleID);
 		}
@@ -3007,7 +3049,7 @@ UClinks * Filters::ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDS
 		RDSset = make_shared<ReadSubset>(cmdArgs["-specificReads"], "");
 	}
 	else if (this->doDereplicate()) {
-		Dere = make_shared<Dereplicate>(cmdArgs, shared_from_this());
+		Dere = make_shared<Dereplicate>(cmdArgs, this);
 		Dere->attachMerger(merg);
 	}
 	return ucl;
@@ -3135,14 +3177,14 @@ void Filters::reverseTS_all_BC2() {
 void Filters::preFilterSeqStat(shared_ptr<DNA> d, int pair) {
 	if (d == NULL)
 		return;
-	
-
+	int easyPair = 1;
 	if (pair <= 0) {
-		collectStatistics[0]->PreFilt->addDNAStats(d);
-	} else if (pair == 1) {
-		collectStatistics[1]->PreFilt->addDNAStats(d);
+		easyPair = 0;
 	}
+	//csMTX[easyPair]->lock();
+	collectStatistics[easyPair]->PreFilt->addDNAStats(d);
 	updateMaxSeqL(d->length());
+	//csMTX[easyPair]->unlock();
 }
 
 void Filters::preFilterSeqStatMT(shared_ptr<DNA> d, int pair, uint thread) {
@@ -3377,6 +3419,7 @@ bool Filters::check(shared_ptr<DNA> d, bool doSeeding, int pairPre,
 	return true;
 }
 //DNA qual_ check, and some extra parameters
+//should be safe to call from different threads
 bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 
 	unsigned int hindrance = 0;
@@ -3609,6 +3652,7 @@ void Filters::allResize(unsigned int x){
 	barcodeLengths2_.resize(x, 0);
 	SampleID.resize(x, "");
 	SampleID_Combi.resize(x, "");
+	SequencingRun.resize(x, "");
 	
 	collectStatistics[0]->BarcodeDetected.resize(x, 0);
 	collectStatistics[1]->BarcodeDetected.resize(x, 0);
@@ -3703,7 +3747,7 @@ int Filters::cutTag(shared_ptr<DNA> d, string&presentBC, int& c_err, bool isPair
 	}
 	if (d->isMIDseq()) {
 		if (d->length() < minBCLength1_) { return -1; }
-		scanRegion = d->length() - minBCLength1_ + 1;
+		scanRegion =  d->length() - minBCLength1_ + 1;
 	}
 
 	scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1);
@@ -4108,7 +4152,7 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
 
 
         
-        bool found = false;
+        //bool found = false;
 
         // was locked with pragma for multithreading
         for (start = 0; start < scanRegion; start++) {
@@ -5255,7 +5299,7 @@ void ReportStats::calcSummaryStats(float remSeqs, unsigned int min_l, float min_
 			( (float(rstat_qualSum)/remSeqs) / min_q) ) / 2.f;
 }
 
-void Filters::addStats(shared_ptr<Filters> fil, vector<int>& idx){
+void Filters::addStats(Filters* fil, vector<int>& idx){
 	for (size_t i = 0; i < 2; i++) {
 		collectStatistics[i]->addStats(fil->collectStatistics[0], idx); 
 		if (bAdditionalOutput) {
@@ -5263,8 +5307,8 @@ void Filters::addStats(shared_ptr<Filters> fil, vector<int>& idx){
 		}
 	}
 	maxReadsPerOFile = fil->maxReadsPerOFile;
-	ReadsWritten = fil->ReadsWritten;//the idea here is to have a number of reads in CURRENT file, not total reads
-	OFileIncre = fil->OFileIncre;
+	ReadsWritten = fil->writtenReads();//the idea here is to have a number of reads in CURRENT file, not total reads
+	OFileIncre = fil->getFileIncrementor();
 	revConstellationN += fil->revConstellationN;
 }
 
@@ -5579,7 +5623,8 @@ UClinks::UClinks( OptContainer& cmdArgs):
 	SeedsAreWritten(false),
 	OTUmat(0), unregistered_samples(false),
 	doChimeraCnt(false), OTUnumFixed(true),
-	b_merge_pairs_optiSeed_(false),merger(nullptr)
+	b_merge_pairs_optiSeed_(false),merger(nullptr),
+	totalDerepCnt(0)
 
 {
 	//read in UC file and assign clusters
@@ -5736,7 +5781,7 @@ void UClinks::finishMAPfile(){
 		return;
 	}
 	string line("");
-	bool hardAdd = false;
+	//bool hardAdd = false;
 
 	//go through ucl file line by line
 	while (!safeGetline(mapdere, line).eof()) {	
@@ -5794,7 +5839,7 @@ void UClinks::finishMAPfile(){
 
 //functions selects optimal read to represent OTU
 void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ, 
-	shared_ptr<Filters> fil){
+	Filters* fil){
 	if (UCread){return;}
 
 	if (IS->hasMIDseqs()){
@@ -5809,12 +5854,12 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 	DNAidmapsIT fndDNAinOld;
 	std::list<string>::iterator listIT;
 	shared_ptr<DNAunique> match(NULL); shared_ptr<DNA>  match2(NULL);
-	bool cont(true),cont2(true);
+	bool cont(true);//,cont2(true);
 	string segs("");
 	string segs2;
 	float perID;
 	vector<int> curCLID(0,0);
-	bool sync(false); // syncing of 2 read pairs; not implemented for this function yet
+	//bool sync(false); // syncing of 2 read pairs; not implemented for this function yet
 
 	while ( getUCFlineInfo(segs, segs2, perID, curCLID, !b_derepAvailable) ) {
 		//int subcnt = 0;
@@ -5825,14 +5870,14 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 		}
 		//goes through UC file
 		while(cont){
-			shared_ptr<DNA> tmpDNA = IS->getDNA(cont, 0, sync);
-			if (tmpDNA == NULL) { break; }//signal that at end of file
+			shared_ptr<DNA> tmpDNA = IS->getDNA(0);
+			if (tmpDNA == NULL) { cont = false; break; }//signal that at end of file
 			match.reset( new DNAunique(tmpDNA, -1));
 			//delete tmpDNA;
 			//assummes in original implementation, that we can get derep.map lines with the same 
 			//ordering as fq derep (which works normally, just not for dada2 mode)
 			oneDerepLine(match);
-			match2 = IS->getDNA(cont2, 1, sync);
+			match2 = IS->getDNA(1);
 			string curID = match->getId();
 			curID = curID.substr(0,curID.find_first_of(' '));
 			//check if dnaTemp1 a) matches id_ b) is better
@@ -5862,7 +5907,7 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 
 }
 
-void UClinks::finishUCfile(shared_ptr<Filters> fil, string addUC, bool bSmplHd){
+void UClinks::finishUCfile(Filters* fil, string addUC, bool bSmplHd){
 	if (UCread){
 		addUCdo(addUC,bSmplHd);
 		UCread = true;
@@ -5944,7 +5989,7 @@ bool UClinks::uclInOldDNA_simple(const string& segs,const vector<int>& curCLID) 
 	return false;
 }
 bool UClinks::uclInOldDNA(const string& segs,const vector<int>& curCLID, float perID,
-	shared_ptr<Filters> fil) {
+	Filters* fil) {
 	//check if DNA is in group of unmatched DNA's ?
 	if (segs == ""){ return false; }//empty ucl line
 	DNAidmapsIT unusedIT = unusedID.find(segs);
@@ -6203,7 +6248,7 @@ void UClinks::add2OTUmat(const string& smplID, int curCLID, matrixUnit spl) {
 }
 void UClinks::add2OTUmat(shared_ptr<DNAunique> d, int curCLID, matrixUnit rep) {
 	if (d == NULL) { cerr << " add2OTUmat::d is NULL\n"; exit(85); }
-	unordered_map <int, long> map = d->getDerepMap();
+	read_occ map = d->getDerepMap();
 	if ( rep <1 ) { rep = 1; }
 	for (auto iterator = map.begin(); iterator != map.end(); iterator++) {
 		//assert(OTUmat.size() <= iterator->first);
@@ -6212,10 +6257,10 @@ void UClinks::add2OTUmat(shared_ptr<DNAunique> d, int curCLID, matrixUnit rep) {
 }
 
 void UClinks::setupDefSeeds(shared_ptr<InputStreamer> FA, const vector<string>& smpls) {
-	bool contRead = true; bool sync(false);
+	bool contRead = true; //bool sync(false);
 	while (contRead) {
-		shared_ptr<DNA> tmpDNA = FA->getDNA(contRead, 0,sync);
-		if (tmpDNA == NULL) { break; }
+		shared_ptr<DNA> tmpDNA = FA->getDNA( 0);
+		if (tmpDNA == NULL) { contRead = false; break; }
 		shared_ptr<DNAunique> tmp = make_shared<DNAunique>(tmpDNA, -1);
 //		delete tmpDNA;
 		//second pair_
@@ -6261,12 +6306,12 @@ void UClinks::setupDefSeeds(shared_ptr<InputStreamer> FA, const vector<string>& 
 	}
 }
 
-void UClinks::addDefSeeds(shared_ptr<InputStreamer> FA, shared_ptr<Filters> fil) {
+void UClinks::addDefSeeds(shared_ptr<InputStreamer> FA, Filters* fil) {
 	bool contRead = true;
-	int addCnt = 0; bool sync(false);
+	int addCnt = 0; //bool sync(false);
 	while (contRead) {
-		shared_ptr<DNA> tmpDNA = FA->getDNA(contRead, 0, sync);
-		if (tmpDNA == NULL) { break; }
+		shared_ptr<DNA> tmpDNA = FA->getDNA( 0);
+		if (tmpDNA == NULL) { contRead = false; break; }
 		shared_ptr<DNAunique> tmp = make_shared<DNAunique>(tmpDNA, -1);
 		//delete tmpDNA;
 		//second pair_
@@ -6306,7 +6351,7 @@ void UClinks::addDefSeeds(shared_ptr<InputStreamer> FA, shared_ptr<Filters> fil)
 }
 
 void UClinks::besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1, 
-	shared_ptr<DNA> tdn2, shared_ptr<Filters> fil) {
+	shared_ptr<DNA> tdn2, Filters* fil) {
 	bool checkBC = true; 
 	int TagIdx(-2);
 	if (tdn2 != NULL) {//fix for pairs assuming midSeqs
@@ -6388,14 +6433,14 @@ void UClinks::removeSizeStr(string& w) {
 	w = w.substr(0, idx);
 }
 
-void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, shared_ptr<Filters> fil, 
+void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, Filters* fil, 
 			bool refSeeds, bool printLnk) {
 	if (!RefDBmode && refSeeds){ return; }
 	//ofstream O(outf.c_str());
 	int paired = fil->isPaired();
 	//MD->printStorage();
 	ofstream links;
-	uint st (0), to ((uint) oriKey.size());
+	uint st(0); uint to((uint)oriKey.size());
 	//in case of refDB mode, need to start from point where refDBs were added in..
 	if (refSeeds && RefDBmode && RefDBotuStart >= 0){
 		cerr << "Writing ref DB sequences..";
@@ -6434,9 +6479,9 @@ void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, shared_ptr<Filters> f
 			d->setNewID(newH + ".1");
 
 			if (b_merge_pairs_optiSeed_ && bestDNA2[i] != NULL) {
-				MD->findSeedForMerge(d, bestDNA2[i]);
+				MD->findSeedForMerge(d, bestDNA2[i],0);
 				bool didMerge(false);
-				didMerge = MD->saveForWrite_merge(d, bestDNA2[i], newH , true);
+				didMerge = MD->saveForWrite_merge(d, bestDNA2[i], newH , 0, true);
 				if (!didMerge) {//not merged? we want to add this DNA nonetheless to output
 					//better to do this in saveForWrite already
 				}
@@ -6444,17 +6489,17 @@ void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, shared_ptr<Filters> f
 
 			if (bestDNA2[i] != NULL) {
 			    //sorted by pair1,2, quality yellow green, singleton (pair 1 2 3 4) etc
-				MD->saveForWrite(d, 1);
+				MD->saveForWrite(d, 1,-1);
 				bestDNA2[i]->setPassed(true);
 				bestDNA2[i]->setNewID(newH + ".2");
-				MD->saveForWrite(bestDNA2[i], 2);
+				MD->saveForWrite(bestDNA2[i], 2,-1);
 			} else {
-				MD->saveForWrite(d, 3);
+				MD->saveForWrite(d, 3,-1);
 			}
 		} else {
 			d->setNewID(newH);
 			d->setPassed(true);
-			MD->saveForWrite(d, 1);
+			MD->saveForWrite(d, 1,-1);
 		}
 	}
 	MD->closeOutStreams();

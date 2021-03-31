@@ -119,6 +119,8 @@ private:
 	qualStats qS;
 	bool b_takeStats;
 
+	mutex merg2MTX;
+
 
 
 public:
@@ -126,7 +128,10 @@ public:
 
 	//functions
 	ReadMerger(bool collStats=false):b_takeStats(collStats){}
-	~ReadMerger() { cout << "Destroyed Read Merger\n"; }
+	~ReadMerger() { cdbg("Destroyed Read Merger\n"); }
+
+	//empty dummy for now
+	void addRMstats(ReadMerger*) {}
 
 	void printMergeHisto() { mS.printLogs(); }
 	void printQualHisto(string File,string SRb="") { qS.printHisto(File); }
@@ -185,7 +190,7 @@ public:
 
 
     
-
+	/*
     static void highlight(std::string str, size_t pos, size_t len = 1, char c = '^', size_t offset = 0) {
         std::cout << std::string(' ', offset) << str << std::endl;
         std::cout << std::string(' ', pos+offset) << std::string(c, len) << std::endl;
@@ -195,4 +200,5 @@ public:
         std::cout << std::string(dna->merge_offset_, ' ') << dna->getSequence() << std::endl;
         std::cout << std::string(dna->merge_seed_pos_ + dna->merge_offset_, ' ') << std::string(5, '^') << std::endl;
     }
+	*/
 };

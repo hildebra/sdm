@@ -19,7 +19,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #ifndef _InputStr_h
 #define _InputStr_h
 
-
+//input through combined getDNApairs
+#define togRe//ad
+//input through getDNAlines
+#define IOsep
 
 #include "DNAconsts.h"
 #include "FastxReader.h"
@@ -28,12 +31,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <locale>
 #include <climits>
 #include "ThreadPool.h"
+#include <fstream>
 
 extern char DNA_trans[256];
 extern short DNA_amb[256];
 extern short NT_POS[256];
 extern short DNA_IUPAC[256 * 256];
 typedef double matrixUnit;
+typedef robin_hood::unordered_flat_map<int, long> read_occ;
 
 
 string spaceX(uint k);
@@ -74,9 +79,155 @@ string applyFileIT(string x, int it, const string xtr = "");
 bool fileExists(const std::string& name, int i=-1,bool extiffail=true);
 //vector<int> orderOfVec(vector<int>&);
 
+class ifbufstream {//: private std::streambuf, public std::ostream {
+public:
+	ifbufstream(const string& inF, size_t buf1=50000) :
+		file(inF),modeIO(ios::in),at(0),isGZ(false), atEnd(false), hasKickoff(false), bufS(buf1)
+	{
+		keeper = new char[bufS];
+		keeperW = new char[bufS];
+		if (isGZfile(file)) { //write a gzip out??
+			isGZ = true;
+#ifndef _gzipread
+			cerr << "ifbufstream::gzip input not supported in your sdm build\n" << file << endl;
+			exit(51);
+#endif
+		}
+		if (isGZ) {
+#ifdef _gzipread
+			primary = new zstr::ifstream(file.c_str());
+#else
+			cerr << "gzip not supported in your sdm build\n (ifbufstream) " << file; exit(50);
+#endif
+		}
+		else {
+			primary = new ifstream(file, modeIO);
+		}
+		//primary->set_rdbuf(0);
 
+		if (!primary){
+			atEnd = true;
+			return;
+		}
+		/*primary.seekg(0, primary.end);
+		int length = primary.tellg();
+		primary.seekg(0, is.beg);*/
+		//first round read..
+		primary->read(keeper, bufS);
+		kickOff();
+	}
+	~ifbufstream() {
+		delete[] keeper; 
+		if (keeperW != nullptr) { delete[] keeperW; }
+		delete primary;
+	}
+	void clear() {
+		at = 0;
+		primary->clear();
+		delete primary;
+		primary = new ifstream(file, modeIO);
+	}
+	bool eof() {
+		return atEnd;
+	}
+	bool operator! (void) {
+		return !atEnd;
+	}
+	void jumpLines(int x=1) {
+		string mpt;
+		for (int y = 0; y < x; y++) {
+			this->getline(mpt);
+		}
+	}
+	bool getline(string& ret) {
+		ret.clear();
+		if (atEnd && at >= bufS) {
+			return false;
+		}
+		for (;;) {
+			char c = keeper[at];
+			at++;
+			if (at >= bufS) {
+				readChunk();// read next chunk already
+			}
+
+			switch (c) {
+			case '\n':				
+				return true;
+			case '\r':
+				if (keeper[at] == '\n') {
+					at+=1; 
+					return true;
+				}
+			case EOF:
+				// Also handle the case when the last line has no line ending
+				atEnd = true;
+				//primary->setstate(std::ios::eofbit);
+				return false;
+			default:
+				ret += c;
+			}
+		}
+		return true;
+	}
+private:
+	bool internalReadChunk() {
+		if (!*(primary)) {
+			keeperW = nullptr;
+			atEnd = true;
+			bufS = primary->gcount();
+			//keeperW[XX] = char_traits<char>::eof();
+			return false;
+		}
+		primary->read(keeperW, bufS);
+		return true;
+	}
+	bool kickOff() {
+		if (false ) {//do MC?
+			if (!atEnd) {
+				readKickoff = async(std::launch::async, &ifbufstream::internalReadChunk,
+					this);
+				hasKickoff = true;
+				return true;
+			}	else {
+				return false;
+			}
+		}
+		else {
+			// Without multithreading
+			return internalReadChunk();
+		}
+	}
+	bool readChunk() {
+		if (hasKickoff) { hasKickoff = false; readKickoff.get(); }
+		if (atEnd && keeperW == nullptr) {
+			return false;
+		}
+		
+		//do a swap, no memcpy needed
+		char* tmp = keeper;
+		keeper = keeperW;
+		keeperW = tmp;
+		//memcpy(keeper, keeperW, bufS);
+
+		at = 0;
+		kickOff();
+		
+
+		//primary->read(keeperW, bufS);
+		return true;
+	}
+	string file;
+	char* keeper; char* keeperW;
+	ios_base::openmode modeIO;
+	size_t at;
+	bool  isGZ, atEnd, hasKickoff;
+	istream* primary;
+	future<bool> readKickoff;
+	size_t bufS ;
+};
 std::ptrdiff_t len_common_prefix_base(char const a[], char const b[]);
-static std::mutex output_mtx;
+//static std::mutex output_mtx;
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
 	ofbufstream():file("T"), modeIO(ios::app), used(0),
@@ -84,7 +235,7 @@ public:
 		int x = 0;
 	}
 	ofbufstream(const string IF, int mif, ThreadPool *pool=nullptr) :file(IF), modeIO(mif), used(0),
-		coutW(false), isGZ(false), pool(pool), primary(nullptr){
+		coutW(false), isGZ(false),primary(nullptr){
 		
 		if (modeIO == ios::out) {
 			remove(file.c_str());
@@ -92,9 +243,12 @@ public:
 		if (file == "T") {//write to ostream
 			coutW = true;
 			keeper = new char[0];
+			keeperW = new char[0];
 			return;
 		}
 		keeper = new char[bufS];
+		//second keeper swappable with keeper to always have one added to, one written out (kickoff system)
+		keeperW = new char[bufS];
 		if (isGZfile(IF)) { //write a gzip out??
 			isGZ = true; 
 #ifndef _gzipread
@@ -106,21 +260,24 @@ public:
 	}
 
 	~ofbufstream() {
-		writeStream();
+		if (hasKickoff) { hasKickoff = false; writeKickoff.get(); }
+		writeStream(false);
 		deactivate();
 		delete[] keeper;
+		delete[] keeperW;
 	}
 	bool operator! (void) {
 		return false;
 	}
 	void operator<< (const string& X) {
         {
+			append_mtx_.lock();
 			if (coutW) {
 				cout << X;
 				return;
 			}
 			
-			std::unique_lock<std::mutex> lock(append_mtx_);
+			//std::unique_lock<std::mutex> lock(append_mtx_);
             size_t lX(X.length());
             //writeStream();
             if (lX + used > bufS) {
@@ -128,13 +285,12 @@ public:
             }
             memcpy(keeper + used, X.c_str(), lX);
             used += lX;
+			append_mtx_.unlock();
         }
     }
 
     // Multithreading through Threadpool
-    void setThreadPool(ThreadPool *pool) {
-        this->pool = pool;
-    }
+    void setThreadPool(ThreadPool *pool) {this->pool = pool;}
 	void emptyStream() {
 		used = 0;
 	}
@@ -167,53 +323,72 @@ public:
 
 private:
     std::mutex append_mtx_;
-	void writeStream() {
+	bool internalWrite(bool closeThis){
+		primary->write(keeperW, used);
+		//delete[] keeperW;//clean up
+		return true;
+		if (closeThis) {
+			deactivate();
+		}
+	}
+	void writeStream(bool doKickoff=true) {
         static int counter = 0;
         //out << omp_get_thread_num << ": " << (counter++) << endl;
         if (used == 0) {
             return;
         }
+		//do this first to prevent keeper/keeperW getting corrupted
+		if (hasKickoff) { hasKickoff = false; writeKickoff.get(); }
 		bool closeThis = true;
 		if (primary == nullptr) {
 			this->activate();
 			closeThis = false;
-
 		}
+		//swap opeartion
+		char* keeperTmp = keeperW;
+		keeperW = keeper;
+		keeper = keeperTmp;
+		//keeper = new char[bufS];
         //if (false) {
-        if (pool && pool->active) {
+        /*if ( pool ) {
             // With multithreading
             std::string keeper_copy = string(keeper, used);
             std::string file_copy = file;
             pool->enqueue([keeper_copy, file_copy] {
                 write(std::move(keeper_copy), file_copy);
             });
-        } else {
+        /**/
+		//multithreading via kickoff
+		if (pool && doKickoff){
+			writeKickoff = async(std::launch::async, &ofbufstream::internalWrite, 
+				this, closeThis);
+			hasKickoff = true;
+		} else {
             // Without multithreading
-            
-			primary->write(keeper, used);
+			internalWrite(closeThis);
         }
-		if (closeThis) {
-			deactivate();
-		}
 		used = 0;
     }
 	string file;
 	char *keeper;
+	char* keeperW;
 	int modeIO;
 	size_t used;
 	bool coutW, isGZ;
 	ostream* primary;
 	
-    static const size_t bufS = 1000000;
+    static const size_t bufS = 600000;
 
     // Multithreading throw threadpool
-    ThreadPool *pool = nullptr;
+    ThreadPool *pool = nullptr;//currently just used to check if MC or not
     // end
+	future<bool> writeKickoff;
+	bool hasKickoff=false;
 
-    static void write(std::string s, std::string file) {
+    void write(std::string s, std::string file) {
         {
             // Lock the input area
-            std::lock_guard<std::mutex> guard(output_mtx);
+            //std::lock_guard<std::mutex> guard(output_mtx);
             ofstream of(file.c_str(), ios::app);
             of.write(s.c_str(), s.size());
             of.close();
@@ -269,6 +444,7 @@ string detectSeqFmt(const string);
 class Filters;
 
 class DNA{
+	friend class DNAunique;
 public:
 	DNA(string seq, string names) : sequence_(seq), sequence_length_(sequence_.length()),
                                     id_(names), new_id_(names),
@@ -286,8 +462,11 @@ public:
            FtsDetected(),
            id_fixed_(false), tempFloat(0.f), merge_offset_(-1) {
 	}
+	//starts with fastx record
 	DNA(FastxRecord*, qual_score & minQScore, qual_score & maxQScore, qual_score fastQver);
-	
+	//works directly with 4 lines in fastq format
+	DNA(vector<string> fq, qual_score fastQver);
+
 	~DNA() {
 	    //cout << "destruct" << endl;
 	}
@@ -306,7 +485,11 @@ public:
 			return false;
 		}
 	}
-	
+	//something wrong with DNA object, just del all info
+	void delself() {
+		sequence_ = ""; sequence_length_ = 0; id_ = ""; new_id_ = ""; qual_.resize(0);
+		good_quality_ = false; mid_quality_ = false;
+	}
 	//~DNA(){}
 	void appendSequence(const string &s) { sequence_ += s; sequence_length_ = sequence_.length(); }
 	void appendQuality(const vector<qual_score> &q);
@@ -452,6 +635,8 @@ public:
 	void setFwdPrimCut() { FtsDetected.forward = true; }
 	void setDereplicated() { FtsDetected.dereplicated = true; }
 	bool isDereplicated() { return FtsDetected.dereplicated ; }
+	void constellationPairRev(bool b) { FtsDetected.revPairConstellation = b; }
+	bool isConstellationPairRev() { return FtsDetected.revPairConstellation ; }
 	//only used in pre best seed step
 	//float getSeedScore() { return tempFloat; }
 	//void setSeedScore(float i) { tempFloat = (float)i; }
@@ -535,9 +720,10 @@ protected:
 	struct ElementsDetection {
 		bool forward; bool reverse;//primers detected
 		bool TA_cut; bool barcode_detected;  bool barcode_cut; bool dereplicated;
+		bool revPairConstellation;
 
 		ElementsDetection() : forward(false), reverse(false), TA_cut(false), barcode_detected(false),
-                              barcode_cut(false), dereplicated(false) {}
+                              barcode_cut(false), dereplicated(false), revPairConstellation(false) {}
 		void transferFrom(ElementsDetection& o) { 
 			forward = o.forward;
 			reverse = o.reverse;
@@ -545,6 +731,7 @@ protected:
 			barcode_detected = o.barcode_detected;
 			barcode_cut = o.barcode_cut;
 			dereplicated = o.dereplicated;
+			revPairConstellation = o.revPairConstellation;
 		}
 		void reset() {
 		    forward = false;
@@ -553,6 +740,7 @@ protected:
 		    barcode_detected = false;
             barcode_cut = false;
             dereplicated = false;
+			revPairConstellation = false;
 		}
 
 	} FtsDetected;
@@ -577,6 +765,7 @@ struct DNAHasher
 
 
 class DNAunique : public DNA {//used for dereplication
+	friend class DNA;
 public:
     // Constructors and Destructors
 	DNAunique() : DNA(), count_(0), pair_(0) {}
@@ -600,10 +789,10 @@ public:
 	void writeMap(ofstream & os, const string&, vector<int>&, const vector<int>&);
 	inline int getCount() { return count_; }
 	uint getBestSeedLength() { return best_seed_length_; }
-	void setBestSeedLength(uint i) { best_seed_length_ = i; }
+	void setBestSeedLength(uint i) { DNAuniMTX.lock(); best_seed_length_ = i; DNAuniMTX.unlock();}
 	void incrementSampleCounterBy(int sample_id, long count);
 	void transferOccurence(shared_ptr<DNAunique>);
-	const unordered_map<int, long> & getDerepMap() { return occurence; }
+	const read_occ& getDerepMap() { return occurence; }
 	vector<int> getDerepMapSort(size_t);
 	//vector<pair_<int, int>> getDerepMapSort2(size_t wh);
 	//void getDerepMapSort(vector<int>&, vector<int>&);
@@ -633,13 +822,14 @@ public:
 	}
 	void sumQualities(shared_ptr<DNA> dna) {
 		if (dna == nullptr) return;
+		DNAuniMTX.lock();
 		prepSumQuals();
 		const vector<qual_score> quals = dna->getQual();
 		for (uint i = 0; i < length(); i++) {
 			quality_sum_per_base_[i] += quals[i];
 		}
-}
-
+		DNAuniMTX.unlock();
+	}
 
 	void prepareDerepQualities(int ofastQver);
     void writeDerepFastQ(ofstream &, bool = true);
@@ -664,7 +854,8 @@ public:
 	bool pass_deprep_smplSpc( const vector<int>&);
 	int counts() const { return count_; }
 
-    void takeOver(shared_ptr<DNAunique> dna_unique_old, shared_ptr<DNA> dna2);
+	void takeOver(shared_ptr<DNAunique> dna_unique_old, shared_ptr<DNA> dna2);
+	void takeOverDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2);
 	uint64_t * transferPerBaseQualitySum();
 
     uint64_t* quality_sum_per_base_ = nullptr;
@@ -672,19 +863,41 @@ private:
 	int count_;
 	//matrixUnit chimeraCnt;
 	int best_seed_length_;
-	unordered_map<int, long> occurence;
+	
+	read_occ occurence;
+	mutex DNAuniMTX;
 	shared_ptr<DNAunique> pair_;
 
 	// to calculate mean
     std::string qualities_avg_;
+
+	//threadsafe
 };
+
+
+//multi threading Input Streamer
+struct job3 {
+	job3() :inUse(false) {}
+	std::future <shared_ptr<DNA>> fut;
+	std::future <shared_ptr<DNA>> fut2;
+	std::future <shared_ptr<DNA>> fut3;
+	bool inUse = false;
+};
+//multi threading Input Streamer
+struct jobC {
+	jobC() :inUse(false) {}
+	std::future <vector<shared_ptr<DNA>>> Cfut;
+	bool inUse = false;
+};
+
+shared_ptr<DNA> lauchStr2DNA(vector<string> in, bool keepPairHD, int fastQver);
 
 class InputStreamer{
 public:
-	InputStreamer(bool fnRd, qual_score fq, string ignore_IO_errors,string pairedRD_HD_out) :
+	InputStreamer(bool fnRd, qual_score fq, string ignore_IO_errors,string pairedRD_HD_out, int threads) :
             _fileLength(10), _max(60), _last(0),
             fasta_istreams(3, NULL), quality_istreams(3, NULL), fastq_istreams(3, NULL),
-            fastaFilepathTemp(3, ""), qualityFilepathTemp(3, ""), fastqFilepathTemp(3, ""),
+            fastaFilepathTemp(3, ""), qualityFilepathTemp(3, ""), 
 		//fna(3,NULL), qual_(3,NULL), fastq(3,NULL),
 		
 #ifdef _gzipread	
@@ -700,16 +913,23 @@ public:
             currentFile(0), totalFileNumber(0), BCnumber(0),
             qualAbsent(false),
             fqReadSafe(true), fqPassedFQsdt(true),
-            fqSolexaFmt(false), openedGZ(false),
-            ErrorLog(0), DieOnError(true)
+            fqSolexaFmt(false), 
+            ErrorLog(0), DieOnError(true), at_thread(0), num_threads(1)
 	{
 		opos[0] = 1; if (fastQver == 0) { QverSet = false; }
 		if (ignore_IO_errors =="1") { DieOnError = false; }
 		if (pairedRD_HD_out == "0") { keepPairHD = false; }
+		num_threads = threads;
+		slots.resize(1);//never more than one, otherwise threads read at same time from IO
 	}
 	~InputStreamer();
 	
-		
+//most used routine to get a new DNA entry		// stillMore = is fastq file empty? pos = read pair to return [0/1/-1]
+	shared_ptr<DNA> getDNA(int pos);
+	void getDNAlines(vector<string>&,int pos);
+	vector<shared_ptr<DNA>> getDNApairs();
+	//mutli core version
+	vector < shared_ptr<DNA>> getDNAMC();
 
 	//path, fasta, qual_, pairNum
 	string setupInput(string path, int tarID,
@@ -720,10 +940,8 @@ public:
 	void setupFna(string);
 	//path, fastq, fastqVer, pairNum
 	bool setupFastq(string,string, int&,string,bool simu= false, bool verbose=false);
-	//0=pair_ 1; 1=pair_ 2; 2=midSeq; sync=synchronize read pairs (ie only first pair_ read so far, jump to same DNA reads with second pair_)
-	shared_ptr<DNA> getDNA(bool&,int,bool& sync);
-	void getDNA(FastxRecord* FR1, FastxRecord* FR2, FastxRecord* FRM,
-		shared_ptr<DNA>* dna1, shared_ptr<DNA>* dna2, shared_ptr<DNA>* mid);
+	//shared_ptr<DNA> getDNA(bool &has_next, bool &repair_input_stream, int pos);
+	//void getDNA(FastxRecord* FR1, FastxRecord* FR2, FastxRecord* FRM,shared_ptr<DNA>* dna1, shared_ptr<DNA>* dna2, shared_ptr<DNA>* mid);
 	void jumpToNextDNA(bool&, int);
 	//shared_ptr<DNA> getDNA2(bool&);
 	//shared_ptr<DNA> getDNA_MID(bool&);
@@ -737,16 +955,17 @@ public:
 	void atFileYofX(uint cF, uint tF, uint BCn) { currentFile = cF; totalFileNumber = tF; BCnumber = BCn; }
 	uint getCurFileN() { return currentFile; }
     
-    shared_ptr<DNA> getDNA(bool &has_next, bool &repair_input_stream, int &pos);
 	
-    vector<istream*> fasta_istreams, quality_istreams, fastq_istreams;
+    vector<istream*> fasta_istreams, quality_istreams;
+	vector<ifbufstream*> fastq_istreams;
     
     
-    void getDNA(FastxRecord *read1, FastxRecord *read2, FastxRecord *quality1, FastxRecord *quality2, FastxRecord *FRM,
-                shared_ptr<DNA> *dna1, shared_ptr<DNA> *dna2, shared_ptr<DNA> *mid);
+  //  void getDNA(FastxRecord *read1, FastxRecord *read2, FastxRecord *quality1, FastxRecord *quality2, FastxRecord *FRM,
+   //             shared_ptr<DNA> *dna1, shared_ptr<DNA> *dna2, shared_ptr<DNA> *mid);
 
 private:
 	inline qual_score minmaxQscore(qual_score t);// , int lnCnt);
+	void minmaxQscore(shared_ptr<DNA> t);// , int lnCnt);
 	int parseInt(const char** p1);// , int &pos);// , const char ** &curPos);
 	bool setupFastq_2(string, string, string);
 	bool setupFastaQual2(string, string, string = "fasta file");
@@ -770,7 +989,12 @@ private:
 	
 	//abstraction to real file type
 
-	vector<string> fastaFilepathTemp, qualityFilepathTemp, fastqFilepathTemp;
+	//required for Fasta in term storage
+	vector<shared_ptr<DNA>> dnaTemp1;
+	vector<shared_ptr<DNA>> dnaTemp2;
+
+	vector<string> fastaFilepathTemp, qualityFilepathTemp;
+	//fastqFilepathTemp;
 	//0,1,2 refers to pairs / MID fasta files
 	//vector<ifstream> fna, qual_, fastq;
 	//ifstream qual_, fastq,
@@ -779,15 +1003,13 @@ private:
 		//usually used for MID
 		//fna3, qual3, fastq3;
 
-	//required for Fasta in term storage
-	vector<shared_ptr<DNA>> dnaTemp1;
-	vector<shared_ptr<DNA>> dnaTemp2;
-	//shared_ptr<DNA> tdn21; shared_ptr<DNA> tdn22;
-	//shared_ptr<DNA> tdn31; shared_ptr<DNA> tdn32;
+	shared_ptr<DNA> tdn21; shared_ptr<DNA> tdn22;
+	shared_ptr<DNA> tdn31; shared_ptr<DNA> tdn32;
 	bool isFasta, hasMIDs;
 	bool keepPairHD;
 	vector<int> lnCnt;// , lnCnt2, lnCnt3;//line count
 	qual_score fastQver,minQScore,maxQScore;//which version of Fastq? minima encountered Qscore
+	mutex fqverMTX;
 	bool QverSet;
 	//1 or 2?
 	int numPairs;
@@ -799,13 +1021,21 @@ private:
 	bool qualAbsent;
 	//fq format not checked for completeness
 	bool fqReadSafe, fqPassedFQsdt, fqSolexaFmt;
-	bool openedGZ;
 
 	//collects errors, handles errors
 	vector<string> ErrorLog;
 	bool DieOnError;
+
+	mutex protect;
+	int num_threads;
+	int at_thread; 
+#ifdef togRead
+	vector <jobC> slots;
+#else
+	vector <job3> slots;
+#endif
     
-    shared_ptr<DNA> getDNA(bool &has_next);
+    /*shared_ptr<DNA> getDNA(bool &has_next);
     
     shared_ptr<DNA> getDNAFromRecord(int &pos);
     
@@ -814,7 +1044,7 @@ private:
     shared_ptr<DNA> getDNAFromRecord(FastxRecord &record);
     
     void addQuality(shared_ptr<DNA> fasta, FastxRecord *quality);
-    
+    */
 };
 
 

@@ -22,6 +22,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "Benchmark.h"
 #include "ReadMerger.h"
 
+
 int main(int argc, char* argv[])
 {
     bool test = false;
@@ -63,6 +64,7 @@ int main(int argc, char* argv[])
     }
 
 
+
     Benchmark sdm_benchmark("Time taken: ");
     sdm_benchmark.start();
     
@@ -84,9 +86,7 @@ int main(int argc, char* argv[])
 		general_help();
 		exit(0);
 	}
-#ifdef DEBUG
-	cerr << "DEBUG mode"<<endl;
-#endif
+	cdbg("DEBUG mode\n");
 
 	ini_DNAconstants();
 
@@ -104,7 +104,7 @@ int main(int argc, char* argv[])
 	cdbg("Setting up Filter\n");
 	//shared_ptr<Filters> fil = make_shared<Filters>(&cmdArgs);
 	
-	shared_ptr<Filters> fil = make_shared<Filters>(cmdArgs);
+	Filters* fil = new Filters(cmdArgs);
 	cdbg("filter setup\n");
 
 	
@@ -123,6 +123,7 @@ int main(int argc, char* argv[])
 	separateByFile(fil, cmdArgs);
 	//end main function	
  
+	delete fil;
  
 
 //	fprintf(stderr,"Time taken: %.2fs\n", (double)(clock() - tStart) / CLOCKS_PER_SEC);

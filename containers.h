@@ -21,8 +21,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "InputStream.h"
 #include "ReadMerger.h"
-#include "include/robin_set.h"
-#include "include/robin_hood.h"
+//#include "include/robin_map.h"
+
+//#include <math.h>
 
 
 //fwd declaration
@@ -365,8 +366,8 @@ private:
 class Filters : public std::enable_shared_from_this<Filters> {
 public:
 	Filters(OptContainer&);
-	Filters(shared_ptr<Filters> of, int, bool = false, size_t threads=1);
-    //Filters(shared_ptr<Filters> of, int, bool = false, size_t threads=1);
+	Filters(Filters* of, int, bool = false, size_t threads=1);
+    //Filters(Filters* of, int, bool = false, size_t threads=1);
 	~Filters();
 	//was previously in separateByFile()
 	//void ini_filestruct(OptContainer& cmdArgs);
@@ -374,7 +375,7 @@ public:
 	UClinks * ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDSset,
 		shared_ptr<Dereplicate>& Dere);// , ReadMerger* merg);
 
-	shared_ptr<Filters> filterPerBCgroup(const vector<int>);
+	Filters* filterPerBCgroup(const vector<int>);
 
 	//pair_:-1: no Pair-sequence_, 0,1=pair_ 1/2 (assumes MID BC)
 	//doSeeding: extract longes Seed //false, -1, -2
@@ -470,16 +471,12 @@ public:
 	void prepStats();
 	void revConstellationCnts(int x) { revConstellationN += x; }//number of read pairs, where pair1/2 are changed (mo)
 	void addDNAtoCStats(shared_ptr<DNA> d,int);
-	void sTotalPlus(int pair) {  collectStatistics[pair]->total++; //collectStatistics[pair_].totalRejected++;
+	void sTotalPlus(int pair) {  
+		csMTX[pair]->lock();
+		collectStatistics[pair]->total++; //collectStatistics[pair_].totalRejected++;
+		csMTX[pair]->unlock();
 	}
-	std::mutex total_plus_mtx;
-    void sTotalPlusMT(int pair) {
-        {
-            std::lock_guard<std::mutex> total_plus_lck(total_plus_mtx);
-            collectStatistics[pair]->total++;
-        }
-    }
-	void addStats(shared_ptr<Filters> fil, vector<int>& idx);
+	void addStats(Filters* fil, vector<int>& idx);
 
 	void DNAstatLQ(shared_ptr<DNA> d, int pair,bool Additional) {
 		if (Additional) {
@@ -495,7 +492,8 @@ public:
 	void SmplSpecStats(ostream&);
 	void printHisto(ostream&, int which, int set = 1);//which: 1=qual_ //set:0 only filter, 1 all available
 	bool combineSamples(){ return bDoCombiSamples; }
-	void SRessentials(int s) { SequencingRun.resize(s, ""); }
+	
+	void SRessentials(int s) { if (SequencingRun.size() < s) { SequencingRun.resize(s, ""); } }
 	//return a vector that says entry x (from invec) corresponds to group y
 	vector<int> combiSmplConvergeVec(const vector<string>&);
 //public version of BC finder..
@@ -540,7 +538,7 @@ public:
 
 	// mostly collect statistics of filter (green filtered)
 	vector<shared_ptr<collectstats>> collectStatistics; // top quality statistics
-
+	vector<mutex*> csMTX;
     // stats for additional reads to be output (yellow)
 	vector<shared_ptr<collectstats>> statAddition; // mid quality statistics
 
@@ -565,7 +563,8 @@ public:
 
     void preFilterSeqStatMT(shared_ptr<DNA> d, int pair, uint thread);
 
-    void addStatsMT(shared_ptr<Filters> fil, vector<int> &idx);
+    void addStatsMT(Filters* fil, vector<int> &idx);
+	int currentBCnumber() { return curBCnumber; }//only used in "one sample per file" cases
 
 protected:
 	bool check_lengthXtra(shared_ptr<DNA> d, int hindrance=0, int leng=-1){
@@ -604,7 +603,6 @@ protected:
 	void reverseTS_all_BC2();
 
 	void decideHeadBC();
-	int currentBCnumber() { return curBCnumber; }//only used in "one sample per file" cases
 
 
 
@@ -692,13 +690,16 @@ protected:
 	bool bDoCombiSamples;
 
 	//controls output file size
-	int maxReadsPerOFile, ReadsWritten, OFileIncre;
+	int maxReadsPerOFile;
+	int OFileIncre;
+	int ReadsWritten;
 	uint demultiBPperSR;
 	//needed to pass by ref
 	BarcodeMap emptyBarcodes;
 	//base_map with barcodes.. faster matching (?)
 	BarcodeMap barcodes1_, barcodes2_;
-	vector<int> barcodeLengths1_, barcodeLengths2_;
+	vector<int> barcodeLengths1_;
+	vector<int> barcodeLengths2_;
 	
 	OptContainer cmdArgs;
     
@@ -744,17 +745,17 @@ private:
 	int totalCnts;
 };
 
-typedef robin_hood::unordered_map<string, DNAuniqSet> HashDNA;
+typedef robin_hood::unordered_node_map<string, DNAuniqSet> HashDNA;
 
 
 class Dereplicate{
 public:
-	Dereplicate(OptContainer&, shared_ptr<Filters> mf);
-	~Dereplicate(){}
+	Dereplicate(OptContainer&, Filters* mf);//
+	//~Dereplicate() { mainFilter = NULL; }
 	int getHighestBCoffset() { return (int)barcode_number_to_sample_id_.size(); }
 	//bool addDNA(shared_ptr<DNA> dna);
 	bool addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2);
-	string writeDereplDNA(shared_ptr<Filters> fil, string SRblock);
+	string writeDereplDNA(Filters* fil, string SRblock);
 	void writeLog(string logF, string rep) {
 		ofstream logx;
 		string logPS = logF.substr(0, logF.length() - 4) + "dereplication.log";
@@ -763,7 +764,7 @@ public:
 		logx.close();
 	}
 	void setPaired(bool b) { b_pairedInput = b; }
-	void BCnamesAdding(shared_ptr<Filters>fil);
+	void BCnamesAdding(Filters*fil);
 	void reset();
 	bool DerepPerSR() { return b_derepPerSR; }
 	bool mergeDereRead() {return b_merge_pairs_derep_;	}
@@ -804,7 +805,9 @@ private:
 	string outHQf_p2;// = baseOF + ".2.hq.fq";
 	string outRest;// = outfile + ".rest";
 
-	shared_ptr<Filters> mainFilter;
+	Filters* mainFilter;
+
+	mutex drpMTX;
 
 };
 
@@ -813,14 +816,14 @@ class UClinks{
 public:
 	UClinks(OptContainer& );
 	~UClinks();
-	void findSeq2UCinstruction(shared_ptr<InputStreamer>,bool, shared_ptr<Filters> fil);
-	void writeNewSeeds(shared_ptr<OutputStreamer>, shared_ptr<Filters> fil, bool, bool=false);
+	void findSeq2UCinstruction(shared_ptr<InputStreamer>,bool, Filters* fil);
+	void writeNewSeeds(shared_ptr<OutputStreamer>, Filters* fil, bool, bool=false);
 	void printStats(ostream&);
-	void finishUCfile(shared_ptr<Filters> fil, string, bool);
+	void finishUCfile(Filters* fil, string, bool);
 	void finishMAPfile();
 	void setupDefSeeds(shared_ptr<InputStreamer> FA, const vector<string>& smpls);
 	//to add "high qual_" ref sequences
-	void addDefSeeds(shared_ptr<InputStreamer> FA, shared_ptr<Filters> fil);
+	void addDefSeeds(shared_ptr<InputStreamer> FA, Filters* fil);
 	void pairedSeqsMerged(){ pairsMerge = true; }
 	void writeOTUmatrix(string outfile);
 	void resetInputUcUp(){ UpUcFnd = false; }
@@ -831,10 +834,10 @@ private:
 	void addUCdo(string,bool );
 	void add2OTUmat(const string&, int, matrixUnit);
 	void add2OTUmat(shared_ptr<DNAunique>, int, matrixUnit);
-	bool uclInOldDNA(const string&, const vector<int>&, float, shared_ptr<Filters> fil);
+	bool uclInOldDNA(const string&, const vector<int>&, float, Filters* fil);
 	bool uclInOldDNA_simple(const string&, const vector<int>&);
 	bool getUCFlineInfo(string&, string&, float&, vector<int>&, bool addFromHDstring = false);
-	void besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1, shared_ptr<DNA> tdn2, shared_ptr<Filters> fil);
+	void besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1, shared_ptr<DNA> tdn2, Filters* fil);
 	void setOTUnms();
 
 	inline void removeSizeStr(string&);
@@ -890,9 +893,9 @@ private:
 class OutputStreamer{
 public:
 	//wrStatus controls if this appends or overwrites output
-	OutputStreamer(shared_ptr<Filters> filters, OptContainer& cmdArgs,
+	OutputStreamer(Filters* filters, OptContainer& cmdArgs,
                    std::ios_base::openmode wrStatus, shared_ptr<ReadSubset>,
-                   string fileExt = "", ThreadPool* pool=nullptr, int=-1);
+                   string fileExt = "", int numThreads=0, int=-1);
 	~OutputStreamer();
 	//clean up streams
 	void closeOutFilesDemulti();
@@ -905,9 +908,9 @@ public:
 	void setQualWrite(bool x) { BWriteQual = x; }
 	//void addNoHeadDNA(shared_ptr<DNA> d) { DNAsNoHead.push_back(d); }
 	//-1,-1,-2
-	void analyzeDNA(shared_ptr<DNA> d, int FilterUse, int pair, int &idx);
+	void analyzeDNA(shared_ptr<DNA> d, int FilterUse, int pair, int &idx, int thr);
 	vector<bool> analyzeDNA(shared_ptr<DNA> p1, shared_ptr<DNA> p2, shared_ptr<DNA> mid, bool changePHead, int = -1);
-    void findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2);
+    void findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, int thrPos);
 
 	//void writeAndDel(shared_ptr<DNA> d, int p=1) { writeAndDel(d.get(), p); }
 	//void writeAndDel(shared_ptr<DNA> d, int Pair = 1);//1=pair1;2=pair2;3=singleton1,4=singl2
@@ -915,11 +918,14 @@ public:
 	void writeSelectiveStream(shared_ptr<DNA> d, int Pair, int FS);//1=pair1;2=pair2;3=singl1,4=singl2  ;; FS: different multi FileStreams to be used
 	
 																   //pretty final bool, aborts all, so careful with this
-	bool saveForWrite(shared_ptr<DNA> d, int Pair = 1);//1=pair1;2=pair2;3=singleton
+	bool saveForWrite(shared_ptr<DNA> d, int Pair, int thr);//1=pair1;2=pair2;3=singleton
 	bool saveForWrite_merge(shared_ptr<DNA> d, shared_ptr<DNA> d2,
-		string newHeader="",bool elseWriteD1=false);
+		string newHeader="",int curThread=0, bool elseWriteD1=false);
 //bool saveForWriteMT(shared_ptr<DNA> dna, int thread, int pair = 1);
-	shared_ptr<Filters> getFilters(int w = -1) { if (w == -1) { return MFil; } else { return subFilter[w]; } }
+	Filters* getFilters(int w = -1) { 
+		if (w == -1) { return  MFil; 
+		} else { return subFilter[w]; } 
+	}
 	int isPEseq() { return pairedSeq; }
 	//ofstream::app, ios_base::out
 	void openOutStreams(OptContainer& cmdArgs, int, std::ios_base::openmode, string = "",int=-1);
@@ -945,22 +951,25 @@ public:
 	//dereplication of DNA seqs
 	void attachDereplicator(shared_ptr<Dereplicate> de);
 	//void dereplicateDNA(shared_ptr<DNA>);
+	//dereplicate DNA by looking in dereplicator for 100% id seq. is treadsafe
 	void dereplicateDNA(shared_ptr<DNA>,shared_ptr<DNA>);
-	//debug function to look closer at nonBC reads
+	//debug function to look closer at nonBC reads, threadsafe
 	void writeNonBCReads(shared_ptr<DNA> d, shared_ptr<DNA> d2);
 	void setReadLimit(int x) { maxRdsOut = x; }
 
 	//demultiplex related
 	void write2Demulti(shared_ptr<DNA>, int, int BCoffset);
-	void write2Demulti(shared_ptr<DNA>, shared_ptr<DNA>, int BCoffset);
-	void generateDemultiOutFiles(string, shared_ptr<Filters>, std::ios_base::openmode=ios::out);
+	//write DNA to demultiplexed files, is threadsafe
+	void write2Demulti(shared_ptr<DNA>, shared_ptr<DNA>, int BCoffset,int curThread);
+	void generateDemultiOutFiles(string, Filters*, std::ios_base::openmode=ios::out);
+	
 	bool mergeReads() {
 		return b_merge_pairs_;
 	}
 
     bool b_doDereplicate;
-    size_t merged_counter_ = 0;
-    size_t total_read_counter_ = 0;
+    atomic_size_t merged_counter_ = 0;
+    atomic_size_t total_read_preMerge_ = 0;
 
 	uint getDemultiBPperSR() {	return demultiBPperSR;	}
 	void resetDemultiBPperSR() {demultiBPperSR = 0;}
@@ -969,7 +978,7 @@ public:
 	void setBPwrittenInSRmerg(uint x) { BPwrittenInSRmerg = x; }
 	uint getBPwrittenInSRmerg(void) { return BPwrittenInSRmerg; }
 
-	void attachReadMerger(ReadMerger* merg) { merger = merg; }
+	void attachReadMerger(vector<ReadMerger*> merg) { merger = merg; }
 
 private:
 	void setwriteMode(std::ios_base::openmode wm) {	wrMode = wm;}
@@ -992,11 +1001,11 @@ private:
 	void incrementOutputFile();
 
 	//contains min seq pars & Barcodes etc.
-    shared_ptr<Filters> MFil;
+    Filters* MFil;
 	//UClinks* optim;
 	//for threaded statisitics counting
-	//vector<shared_ptr<Filters>> subFilter;
-    vector<shared_ptr<Filters>> subFilter;
+	//vector<Filters*> subFilter;
+    vector<Filters*> subFilter;
 
 
 	//contains DNA sequences (that failed to have matching Q and vice versa
@@ -1011,7 +1020,9 @@ private:
 	vector<ostream*> fqNoBCFile;*/
 	uint totalFileStrms;
 	vector<vector<ostr*>> sFile, qFile, fqFile;
+	mutex sqfqostrMTX;
 	vector<ostr*> fqNoBCFile;
+	//mutex nobcostrmMTX;
 	vector<ostr*> of_merged_fq;//1D vec, since no read pairs
 
 
@@ -1020,7 +1031,7 @@ private:
 	int suppressOutWrite;//0=all normal, 1=skip mainfile, 2=skip addfile, 3=skip both
 	bool write2File;
 	//bool mem_used;
-	int DNAinMem, writeThreadStatus;
+	atomic_int DNAinMem, writeThreadStatus;
 #ifdef _THREADED
 	std::thread wrThread;
 	std::mutex mutex;
@@ -1041,15 +1052,18 @@ private:
 	//std::vector<std::future<ulong>> threads; 
 	int Nthrds,thrdsCnt; bool thrdsActive;
 	//controls output file size
-	int maxReadsPerOFile,ReadsWritten;
+	int maxReadsPerOFile;
+	atomic_int ReadsWritten;
 	uint demultiBPperSR;
-	uint BPwrittenInSR, BPwrittenInSRmerg;
+	atomic_int BPwrittenInSR;
+	atomic_int BPwrittenInSRmerg;
 	int maxRdsOut;//not used currently?
 	bool stopAll;//red button, just stop all
 	string leadingOutf;
 	OptContainer locCmdArgs;
 	shared_ptr<Dereplicate> dereplicator;
-	int cntDerep;
+	atomic_int cntDerep;
+	mutex drpMTX;
 
 	//abstraction to real file type
 	//0,1,2,3 refers to pairs (0,1) & singletons (2,3)
@@ -1067,12 +1081,14 @@ private:
 	//vector<vector<string>> demultiSinglFilesF;
 	vector<ofbufstream*> demultiMergeFiles;
 	bool onlyCompletePairsDemulti; //demultiplex even if other pair_ is not passing?
+	mutex dmltMTX;
 
 	//merge the filtered output?
 	bool b_merge_pairs_ = false;
 	bool b_merge_pairs_filter_ = false;
 	bool b_merge_pairs_demulti_ = false;
-	ReadMerger* merger;
+	vector<ReadMerger*> merger;
+	mutex mergStatMTX;
 
 
 	// Multithreaded
@@ -1097,9 +1113,8 @@ private:
 //	streamoff qFileS2Pos, sFileS2Pos, fqFileS2Pos;//singleton
 
 
-    void setSubfiltersMT(int num, size_t threads);
 
-    void mergeSubFiltersMT();
+   // void mergeSubFiltersMT();
 
     //shared_ptr<DNA> mergeDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, ReadMerger &merger);
 };

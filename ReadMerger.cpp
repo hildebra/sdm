@@ -10,7 +10,7 @@ void mergeStats::printHisto(string File) {
 	if (!temp) { cerr << "Could not open outstream to read merger stat file:\n" << File << endl; exit(478); }
 
 	temp << "Pos\tFracFwd\tmismatchFwd\tmatchFwd\tFracRev\tmismatchRev\tmatchRev\n";
-	int maxVS = max(matchFwd.size(), matchRev.size());
+	int maxVS = max((int)matchFwd.size(), (int)matchRev.size());
 	for (int i = 0; i < maxVS; i++) {
 		temp << i << "\t";
 		if (i < matchFwd.size()) {
@@ -77,7 +77,7 @@ void qualStats::printHisto(string File) {
 	temp.open(File.c_str(), ios::out);
 	if (!temp) { cerr << "Could not open outstream to read merger stat file:\n" << File << endl; exit(478); }
 	temp << "Pos\tAvgQ_r1\tAvgQ_r2\n";
-	int maxVS = max(r1.size(), r2.size());
+	int maxVS = max((int)r1.size(), (int)r2.size());
 	//int q11 = int(r1[0]);
 	for (int i = 0; i < maxVS; i++) {
 		temp << i <<"\t";
@@ -380,7 +380,7 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 		return nullptr;
 	}
 	//if (read1->QualCtrl.MaxAmb || read2->QualCtrl.MaxAmb) {return nullptr;}
-
+	//merg2MTX.lock();
 	if (b_takeStats) {
 		qS.logQuals(read1->getQual(), read2->getQual());
 	}
@@ -499,7 +499,7 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 
 		//logging.. tmp
 		if (b_takeStats) {
-			mS.logDistri(pos1, Qual2.size() - pos2, overlap, sameNT);
+			mS.logDistri(pos1, (int)Qual2.size() - pos2, (int)overlap, sameNT);
 		}
 
 		new_qual[pos_overlap] = getMergedQual(
@@ -562,9 +562,9 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	//filter for Ns
 	merged_read->stripLeadEndN();
 	if (merged_read->numNonCanonicalDNA(true)) {
-		return nullptr;
+		merged_read= nullptr;
 	}
-
+	//merg2MTX.unlock();
 
 	return merged_read;
 }

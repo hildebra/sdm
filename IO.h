@@ -29,13 +29,15 @@ typedef std::map<std::string, shared_ptr<DNA>> DNAmap;
 //void openOutFiles(string files, string fmt,string );
 //void prepareOutFiles(OptContainer& cmdArgs);
 //void read_fastq(OptContainer& cmdArgs, OutputStreamer* MD,string fileS);
-bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, shared_ptr<InputStreamer>,bool );
-bool read_paired_DNAready(shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2, 
-	shared_ptr<DNA> MIDseq, bool MIDuse, OutputStreamer* MD, int& revConstellation);
+bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, 
+	shared_ptr<InputStreamer>,bool , int Nthreads);
+bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn, bool MIDuse,
+	shared_ptr<OutputStreamer> MD, int curThread);
+//shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2,shared_ptr<DNA> MIDseq,
 
 //bool read_tripple(OptContainer& cmdArgs, OutputStreamer* MD, InputStreamer*);
 
-void separateByFile(shared_ptr<Filters> mainFilter, OptContainer& cmdArgs);
+void separateByFile(Filters* mainFilter, OptContainer& cmdArgs);
 
 void threadAnalyzeDNA(shared_ptr<DNA> tdn, shared_ptr<OutputStreamer> MD,int thrCnt);
 //void trippleThreadAnalyzeDNA(shared_ptr<OutputStreamer> MD, shared_ptr<DNA> tdn,shared_ptr<DNA>dnaTemp2,shared_ptr<DNA> MIDseq,bool changePHead);//,int thrCnt=0);
