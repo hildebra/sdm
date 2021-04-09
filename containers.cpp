@@ -274,7 +274,9 @@ OutputStreamer::OutputStreamer(Filters* fil, OptContainer& cmdArgs,
         DNAinMem(0), writeThreadStatus(0),
         fastQver(fil->getuserReqFastqVer()),
         fastQoutVer(fil->getuserReqFastqOutVer()), BWriteQual(false),
-        BWriteFastQ(false), b_multiOutStream(false), b_changeFQheadVer(false),
+        BWriteFastQ(false), b_multiOutStream(false), pairedSeq(-1),
+		b_changeFQheadVer(false),
+		b_checkedHeaderChange(false),
         b_oneLinerFasta(false), b_doDereplicate(false), b_writeGreenQual(true), b_writeYellowQual(true),
         maxReadsPerOFile(fil->maxReadsOutput()), 
 		demultiBPperSR(fil->getDemultiBPperSR()), 
@@ -352,13 +354,14 @@ OutputStreamer::~OutputStreamer(){
 		//delete MFil;
 	cdbg("Destr OutputStreamer" );
 	//delAllDNAvectors();
-	cdbg(".. done\n" );
-
+	//cdbg(".. done\n" );
+	dmltMTX.lock();
 	this->closeOutStreams(true);
 	closeOutFilesDemulti();
 	for (uint i=0; i<subFilter.size();i++){
 		delete subFilter[i];
 	}
+	dmltMTX.unlock();
 	cdbg("Subfilters deleted, streams closed\n" );
 	//delete optim;
 }
@@ -478,8 +481,13 @@ vector<bool> OutputStreamer::analyzeDNA(shared_ptr<DNA> p1, shared_ptr<DNA> p2, 
 }
 
 bool OutputStreamer::checkFastqHeadVersion(shared_ptr<DNA> d,bool disable) {
+	if (b_checkedHeaderChange) {
+		return b_changeFQheadVer;
+	}
+	b_checkedHeaderChange = true;
+	if (pairedSeq == 1) { b_changeFQheadVer = false; return false; }
+	drpMTX.lock();
 	b_changeFQheadVer = false;
-	if (pairedSeq==1){return false;}
 	int fastQheadVer = 0;
 	string head = d->getId();
 	int shouldVer = MFil->FQheadV();
@@ -496,6 +504,7 @@ bool OutputStreamer::checkFastqHeadVersion(shared_ptr<DNA> d,bool disable) {
 	if (disable){
 		b_changeFQheadVer = false;
 	}
+	drpMTX.unlock();
 	return ret;
 }
 
@@ -747,6 +756,7 @@ void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil, std::ios
 
 	bDoDemultiplexIntoFiles = true;
 	bool openOstreams = true; uint ostrCnt(0);
+	size_t bufS = 40000;
 	
 	demultiSinglFiles.resize(fil->SampleID.size(), empVec);
 	demultiMergeFiles.resize(fil->SampleID.size(), nullptr);
@@ -756,19 +766,19 @@ void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil, std::ios
 		//if (ostrCnt > maxFileStreams) {openOstreams = false;}
 		if (pairedSeq == 1 || pairedSeq == -1) {
 			string nfile = path + fil->SampleID[i] + ".fq";
-			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, pool); }
+			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, bufS); }
 			//demultiSinglFilesF[i][0] = nfile;
 			ostrCnt++;
 		}
 		else {
 			string nfile = path + fil->SampleID[i] + ".1.fq";
-			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, pool); }
+			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, bufS*0.8); }
 			//demultiSinglFilesF[i][0] = nfile;
 			nfile = path + fil->SampleID[i] + ".2.fq";
-			if (openOstreams) { demultiSinglFiles[i][1] = new ofbufstream(nfile.c_str(), writeStatus, pool); }
+			if (openOstreams) { demultiSinglFiles[i][1] = new ofbufstream(nfile.c_str(), writeStatus, bufS*1.2); }
 			//demultiSinglFilesF[i][1] = nfile;
 			nfile = path + fil->SampleID[i] + ".merg.fq";
-			if (openOstreams) { demultiMergeFiles[i] = new ofbufstream(nfile.c_str(), writeStatus, pool); }
+			if (openOstreams) { demultiMergeFiles[i] = new ofbufstream(nfile.c_str(), writeStatus); }
 			
 			ostrCnt += 2;
 		}
@@ -1416,11 +1426,13 @@ void OutputStreamer::attachDereplicator(shared_ptr<Dereplicate> de) {
 		dereplicator->setPaired(pairedSeq > 1);
 		//insert code here to fix BC offset in filter & add to derep info on sample names from the current filter
 		int curBCOffset = dereplicator->getHighestBCoffset();
-#ifdef DEBUG
-		cerr << "BARCODE INCREMENT: " << curBCOffset << endl;
-#endif
+
+		cdbg(  "BARCODE INCREMENT: " + itos(curBCOffset )+"\n");
 		
 		MFil->setBCoffset(curBCOffset);
+		for (size_t i = 0; i < subFilter.size(); i++) {
+			subFilter[i]->setBCoffset(curBCOffset);
+		}
 		dereplicator->BCnamesAdding(MFil);
 
 		if (dereplicator->mergeDereRead()) {
@@ -1731,7 +1743,8 @@ void OutputStreamer::openSeveralOutstreams(OptContainer& cmdArgs, shared_ptr<Rea
 	}
 }
 
-void OutputStreamer::openOutStreams(OptContainer& cmdArgs,int fileIt,std::ios_base::openmode wrMode_i, 
+void OutputStreamer::openOutStreams(OptContainer& cmdArgs,int fileIt,
+	std::ios_base::openmode wrMode_i, 
 	string fileExt, int forceFmt){
 	this->setwriteMode(wrMode_i);
 	if ( suppressOutWrite == 3 || (cmdArgs["-o_fastq"] == "" && cmdArgs["-o_fna"] == "" && cmdArgs["-o_qual"] == "") ){
@@ -1931,10 +1944,10 @@ void DNAuniqSet::setBest() {
 Dereplicate::Dereplicate(OptContainer& cmdArgs, Filters* mf):
         barcode_number_to_sample_id_(0), b_usearch_fmt(true), b_singleLine(true), b_pairedInput(false),
         minCopies(1,0), minCopiesStr("0"), //default minCopies accepts every derep
-totSize(0), tmpCnt(0), curBCoffset(0), b_derep_as_fasta_(true), b_derepPerSR(false),
-b_wroteMapHD(false),
-mapF(""), outHQf(""), outHQf_p2(""), outRest(""),
-mainFilter(mf)
+		totSize(0), tmpCnt(0), curBCoffset(0), b_derep_as_fasta_(true), b_derepPerSR(false),
+		b_wroteMapHD(false), b_merge_pairs_derep_(false),merger(nullptr),
+		mapF(""), outHQf(""), outHQf_p2(""), outRest(""),
+		mainFilter(mf)
 {
 	outfile = cmdArgs["-o_dereplicate"];
 
@@ -2800,7 +2813,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
         bDoBarcode(of->bDoBarcode), bDoBarcode2(of->bDoBarcode2), bDoBarcode2Rd1(of->bDoBarcode2Rd1),
 		bDoHeadSmplID(of->bDoHeadSmplID),
         bBarcodeSameSize(of->bBarcodeSameSize),
-        bOneFileSample(of->bOneFileSample), curBCnumber(BCnumber), BCoffset(0),
+        bOneFileSample(of->bOneFileSample), curBCnumber(BCnumber), BCoffset(of->BCoffset),
         bAdditionalOutput(of->bAdditionalOutput), b2ndRDBcPrimCk(of->b2ndRDBcPrimCk),
         bRevRdCk(of->bRevRdCk), bChkRdPrs(of->bChkRdPrs),
         min_l(of->min_l), alt_min_l(of->alt_min_l), min_l_p(of->min_l_p), alt_min_l_p(of->alt_min_l_p),
@@ -3025,7 +3038,6 @@ Filters* Filters::filterPerBCgroup(const vector<int> idxi) {
 //service function to ini what needs to be done
 UClinks * Filters::ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDSset, 
 	shared_ptr<Dereplicate>& Dere) {
-	ReadMerger* merg = new ReadMerger(); //create special object for these functions
 	if (this->doOptimalClusterSeq()) {
 		ucl = new UClinks(cmdArgs);
 		if (cmdArgs.find("-mergedPairs") != cmdArgs.end() && cmdArgs["-mergedPairs"] == "1") {
@@ -3042,6 +3054,7 @@ UClinks * Filters::ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDS
 			FALL->setupFna(cmdArgs["-OTU_fallback"]);
 			ucl->setupDefSeeds(FALL, SampleID);
 		}
+		ReadMerger* merg = new ReadMerger(); //create special object for these functions
 		ucl->attachMerger(merg);
 	}
 	else if (this->doSubselReads()) {
@@ -3050,6 +3063,7 @@ UClinks * Filters::ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDS
 	}
 	else if (this->doDereplicate()) {
 		Dere = make_shared<Dereplicate>(cmdArgs, this);
+		ReadMerger* merg = new ReadMerger(); //create special object for these functions
 		Dere->attachMerger(merg);
 	}
 	return ucl;
@@ -3444,60 +3458,42 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 	    d->QualCtrl.TagFail = true;
 	    return false;
 	}
-	
+	//bShortAmplicons checks for reverse primer on 1st read
 	if (BcutPrimer) {
-		if (pair != 1 && !cutPrimer(d, PrimerIdx[tagIdx], false,pair) && bRequireFwdPrim) {//0 or -1
-		    d->failed(); return false;
-		}
-		else if (bShortAmplicons) {//pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
-			cutPrimer(d, PrimerIdx[tagIdx], true,pair);
-		}
-	}
-	if (check_lengthXtra(d)){
-		d->QualCtrl.minL = true;//sMinLength(pair_);
-		d->failed(); return false;
-	}
-	if (max_l!=0 && d->length()-hindrance > max_l){
-		d->QualCtrl.maxL = true; //sMaxLength(pair_);
-		d->failed(); return false;
-	}
-
-	
-	//rev primer is the first that needs to be looked for
-	//makes it slower, as higher chance for low qual_ and this routine is costly.. however more important to get good lock on rev primer
-	if ((pair != 0 || bShortAmplicons) && bPrimerR) {
-		//removal of reverse primer
-		//bool revPrm(false);
-		bool revCheck = pair == -1 || pair == 0;//1:false for RC, else always a reverse check
-		cutPrimerRev(d, PrimerIdxRev[tagIdx], revCheck);
-		if (d->getRevPrimCut()) {
-			//RevPrimFound = true;
-			d->QualCtrl.PrimerRevFail = false;
-			//check length
-			if (check_lengthXtra(d, hindrance)) {
-				d->QualCtrl.minL = true; //sMinLength(pair_);
+		if (pair != 1  ) {//0 or -1
+			cutPrimer(d, PrimerIdx[tagIdx], bShortAmplicons, pair);
+			if (!d->getFwdPrimCut() && bRequireFwdPrim) {
 				d->failed(); return false;
 			}
-		} else  {//stats, but only for 2nd pair_
-			//sRevPrimerFail(pair_);
-			d->QualCtrl.PrimerRevFail = true; // maybe takeOver later with routine that checks for FtsDetected
-			if (pair != 0 && bRequireRevPrim) {//failed to find reverse primer
-				if (alt_bRequireRevPrim) {
-					d->failed(); return false;
-				} else {
-					//RevPrimFound = false;
-					d->QualCtrl.PrimerRevFail = false;
-					d->setMidQual(true);
+		}
+		else if (pair != 0) {//pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
+			bool revCheck = pair == -1 || pair == 0;//1:false for RC, else always a reverse check
+			cutPrimerRev(d, PrimerIdxRev[tagIdx], revCheck);
+			if (d->getRevPrimCut()) {
+				d->QualCtrl.PrimerRevFail = false;
+			}
+			else {//stats, but only for 2nd pair_
+			 //sRevPrimerFail(pair_);
+				d->QualCtrl.PrimerRevFail = true; // maybe takeOver later with routine that checks for FtsDetected
+				if (pair != 0 && bRequireRevPrim) {//failed to find reverse primer
+					if (alt_bRequireRevPrim) {
+						d->failed(); return false;
+					}
+					else {
+						d->QualCtrl.PrimerRevFail = false;	d->setMidQual(true);
+					}
 				}
 			}
 		}
+	}
+	if (check_lengthXtra(d)){
+		d->failed(); return false;
 	}
 
 	//if seq needs to be cut, than here
 	if (TruncSeq>0){
 		d->cutSeqPseudo(TruncSeq);
 		if ( check_lengthXtra(d) ){
-			//d->QualCtrl.minL = true; //sMinLength(pair_);
 			d->failed(); return false;
 		}
 	}
@@ -3520,7 +3516,7 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 		}
 
 
-		int rea = 2, rea2 = 2;
+		int rea (2), rea2 (2);
 		if ((min_q > 0 || FQWthr > 0) && d->qualWinfloat(FQWwidth, FQWthr, rea) < min_q) {
 			d->QualCtrl.AvgQual = true; //sAvgQual(pair_);
 			if ((alt_min_q > 0 || alt_FQWthr > 0) && d->qualWinfloat(FQWwidth, alt_FQWthr, rea2) < alt_min_q) {
@@ -3534,8 +3530,6 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 		if (rea == 1) {
 			d->QualCtrl.QualWin = true; //sQualWin(pair_);
 			if (rea2 == 1) {
-				//statAddition.QualWin++;
-				//d->QualCtrl.QualWin = true;
 				d->failed(); return false;
 			}
 		}
@@ -3543,14 +3537,12 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 			float ExpErr = d->binomialFilter((int)BinFilErr, BinFilP);
 			if (ExpErr > BinFilErr){
 				d->QualCtrl.BinomialErr = true;
-				//sBinomError(pair_, ExpErr);
 				d->failed(); return false;
 			}
 		}
 	}
 	int ambNTs = d->numACGT();
 	if (MaxAmb!=-1 && ambNTs > MaxAmb){
-//		sMaxAmbig(pair_);
 		d->QualCtrl.MaxAmb = true;
 		if (alt_MaxAmb!=-1 && ambNTs>= alt_MaxAmb){
 			d->QualCtrl.MaxAmb = true; //statAddition.MaxAmb++;
@@ -3561,12 +3553,6 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 		d->QualCtrl.HomoNT = true;//sHomoNT(pair_);
 		d->failed(); return false;
 	}
-
-	//cerr<<d->getId()<<endl;
-	//if (RevPrimFound) {//this sequence has been filtered for the reverse barcode
-	//	sReversePrimerFnd(pair_);
-	//}
-
 
 	//adapter removed, quality filtering done. If no map is provided, that is all that is needed
 	if (!bDoMultiplexing){
@@ -3580,8 +3566,6 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 			d->cutSeq(0,TrimStartNTs);
 
 		}
-		//collectStatistics[ pair_].totalRejected--;
-		//if (qualWinTrim || AccErrTrim) { collectStatistics[pair_].Trimmed++; }
 		d->setPassed(true);
 		return true;
 	}
@@ -3589,27 +3573,6 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 	if (!d->isYellowQual()) {
 		d->setPassed(true);
 	}
-
-	/*	if (pairPre <= 0) {
-			statAddition.totalRejected--;
-			if (qualWinTrim || AccErrTrim) {
-				statAddition.Trimmed++;
-				if (AccErrTrim) { statAddition.AccErrTrimmed++; }
-				if (qualWinTrim) { statAddition.QWinTrimmed++; }
-			} 
-			//if (TecAdap) { statAddition.adapterRem++; }
-		}
-	} else {
-		if (qualWinTrim || AccErrTrim) {
-			collectStatistics[pair_].Trimmed++;
-			if (AccErrTrim) { collectStatistics[pair_].AccErrTrimmed++; }
-			if (qualWinTrim) { collectStatistics[pair_].QWinTrimmed++; }
-		}
-		//if (TecAdap) { collectStatistics[pair_].adapterRem++; }
-		//keep control over passed / not as close as possible to source
-		collectStatistics[pair_].totalRejected--;
-		
-	}*/
 
 	return true;
 }
@@ -3952,11 +3915,11 @@ void Filters::BCintoHead(int idx, shared_ptr<DNA> d,const string presentBC,
 		on + spacee + string("orig_bc=") + (*locBC)[idx];
 	if (c_err > 0 || atEnd) {//atEnd: dbl barcode
 		//convert c_err to s_c_err;
-		string s_c_err; stringstream conve;
-		conve << c_err;
-		s_c_err = conve.str();
+		//string s_c_err; stringstream conve;
+		//conve << c_err;
+		//s_c_err = conve.str();
 		nID += spacee + string("new_bc=") + presentBC +
-			spacee + string("bc_diffs=") + s_c_err;
+			spacee + string("bc_diffs=") + itos(c_err);
 	}
 	d->setNewID(nID);
 	d->setBCnumber(idx, BCoffset);
@@ -4224,7 +4187,7 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
 //cuts primers, tags
 bool Filters::cutPrimer(shared_ptr<DNA> d,int primerID,bool RC,int pair){
 	//only adapted to singular BC
-	if (PrimerL[0].length()==0){return true;}
+	if (PrimerL.size()==0 || PrimerL[0].length()==0){return true;}
 	int start(-1) ,stop(-1);
 	int tolerance(30), startSearch(0);
 	if (!d->getBarcodeCut() && maxBCLength1_ > 0) { tolerance = maxBCLength1_ + 4;
@@ -5471,19 +5434,19 @@ void ReportStats::printStats2(ostream& give, float remSeqs,int pair){
 			unsigned int maxQ = highest(rstat_VQmed);
 			give << "Min/Avg/Max stats Pair 1";// -RSQS : "<<RSQS;
 			if ( remSeqs == 0 ) {
-				give << "\n     - sequence_ Length : " << "0/0/0"
+				give << "\n     - sequence Length : " << "0/0/0"
 					<< "\n     - Quality :   " << "0/0/0";
 			} else {
-				give << "\n     - sequence_ Length : " << minS << "/" << float(rstat_NTs) / (float)rstat_totReads << "/" << maxS
+				give << "\n     - sequence Length : " << minS << "/" << float(rstat_NTs) / (float)rstat_totReads << "/" << maxS
 					<< "\n     - Quality :   " << minQ << "/" << float(rstat_qualSum) / (float)rstat_totReads << "/" << maxQ;
 			}
 		} else {
 			give << "Average Stats - RSQS : " << RSQS;
 			if ( remSeqs == 0 ) {
-				give << "\n     - sequence_ Length : " << "0/0/0"
+				give << "\n     - sequence Length : " << "0/0/0"
 					<< "\n     - Quality :   " << "0/0/0";
 			} else {
-				give << "\n     - sequence_ Length : " << float(rstat_NTs) / (float)rstat_totReads
+				give << "\n     - sequence Length : " << float(rstat_NTs) / (float)rstat_totReads
 					<< "\n     - Quality :   " << float(rstat_qualSum) / (float)rstat_totReads;
 			}
 		}
@@ -5493,7 +5456,7 @@ void ReportStats::printStats2(ostream& give, float remSeqs,int pair){
 	
 		if (bMedianCalcs){
 			//give << "Median Stats Pair 1";// -USQS : " << USQS;
-			give << "\n     - Median sequence_ Length : " << rstat_Smed << ", Quality : " << rstat_Qmed;// << "\n";
+			give << "\n     - Median sequence Length : " << rstat_Smed << ", Quality : " << rstat_Qmed;// << "\n";
 		}
 		give << "\n     - Accum. Error " << (rstat_accumError / (float)rstat_totReads) << "\n";
 }
@@ -5575,11 +5538,9 @@ vector<size_t> ReportStats::medVrange(const vector<uint> x) {
 	return ret;
 }
 
-std::mutex histoMutex;
 void ReportStats::addMedian2Histo(unsigned int in, vector<unsigned int>& histo)
 {
     {
-        std::lock_guard<std::mutex> histoLck(histoMutex);
         if (in >= histo.size()) {
             histo.resize(in + 3, 0);
             assert(in < 1e6);
@@ -5593,6 +5554,10 @@ void ReportStats::addMedian2Histo(unsigned int in, vector<unsigned int>& histo)
 UClinks::~UClinks(){
 	ucf.close();
 	mapdere.close();
+	if (merger != nullptr) {
+		delete merger;
+		merger = nullptr;
+	}
 /*
 	for (uint i=0; i< bestDNA.size();i++){
 		delete bestDNA[i];
@@ -6055,7 +6020,7 @@ bool UClinks::getUCFlineInfo(string& segs, string& segs2,float& perID,
 		bool chimera = false;
 		vector<string>tarsV; //saves hits to OTUs
 		//2 ways to get to a) hit info b) query & otu
-		if (!UPARSE8up){
+		if (!UPARSE8up){ //uparse 7
 			if ( (line.substr(0, 1) != "H")) {
 				continue;
 			}
@@ -6067,7 +6032,7 @@ bool UClinks::getUCFlineInfo(string& segs, string& segs2,float& perID,
 				getline(ss, segs, '\t');
 			}
 			getline(ss, segs2, '\t');
-		} else if (!UPARSE9up){ // 
+		} else if (!UPARSE9up){ // uparse 8
 			//query first entry
 			string tmp;
 			getline(ss, segs, '\t');//0

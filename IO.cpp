@@ -93,12 +93,25 @@ void read_single(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, shared_pt
 }
 
 
+bool read_paired_STRready(vector< vector< string>> tmpLines,
+	bool MIDuse, shared_ptr<OutputStreamer> MD, int curThread, 
+	bool keepPairHd, qual_score FastqVer ) {
+	vector<shared_ptr<DNA>> ret(3,nullptr);
+	ret[0] = str2DNA(tmpLines[0], keepPairHd, FastqVer,0);
+	ret[1] = str2DNA(tmpLines[1], keepPairHd, FastqVer,1);
+	if (MIDuse) {
+		ret[2] = str2DNA(tmpLines[2], keepPairHd, FastqVer,2);
+	}
+
+	return read_paired_DNAready(ret, MIDuse, MD, curThread);
+}
+static mutex testreadpair;
 //is called from a while loop, that reads the DNA pairs
 bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	bool MIDuse, shared_ptr<OutputStreamer> MD, int curThread) {
 
 	if (tdn[0] == nullptr) {
-	    return true;
+	    return false;
 	} //|| tdn->length()==0
 	//DNA objects as they should be??
 	if (MIDuse && tdn[2] == nullptr) {
@@ -109,7 +122,8 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 		cerr << "Second provided file has not the same number of entries as first file.\n";
 		exit(5);
 	}
-
+	MD->checkFastqHeadVersion(tdn[0]);
+	//testreadpair.lock();
 
 	Filters* curFil = MD->getFilters(curThread);
 	//register read at all with stat counter:
@@ -297,7 +311,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
     /*if (OutStreamer->b_merge_pairs_derep_ && tdn[0]->merge_seed_pos_ > 0) {
         auto dna_merged = ReadMerger::merge(tdn[0], tdn[1]);
     }*/
-
+	//testreadpair.unlock();
 	//save for later .. and collect stats
 	if (!MD->saveForWrite(tdn[0], idx1, curThread) || !MD->saveForWrite(tdn[1], idx2, curThread)) {
 		return false;
@@ -335,16 +349,30 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 
 	int DNAinMem(0);
 	bool cont(true),cont2(true),cont3(true);
+	bool keepPairedHD = IS->keepPairedHD();
 	int revConstellation(0);
 	int cnt(0); 
 	bool switching(true); // important to keep track of this, to fix swapped read pairs
 
+	vector<string>tmpLines2(4, "");
+	vector<vector<string>> tmpLines(3, tmpLines2);
+	vector<shared_ptr<DNA>> tdn;
+
 	while ( cont ) {
 		//bool sync = false;
-		vector<shared_ptr<DNA>> tdn;
-		//
+		//tests of different ways to read files..
 		if (false) {
 			tdn = IS->getDNAMC();//
+		}
+		else if (true) {
+			for (uint i = 0; i < 3; i++) {
+				if (!MIDuse && i == 2) {
+					continue;
+				}
+				IS->getDNAlines(tmpLines[i], i);
+			}
+			
+		
 		} else {
 			tdn.resize(3, nullptr);
 			tdn[0] = IS->getDNA(0);
@@ -356,12 +384,13 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 				}
 			}
 		}
+		qual_score fastqVer = IS->fastQscore();
 
 		cnt++;
-		if (tdn[0] == nullptr) { cont = false;  break; }
 		//check if the PE format is right
-		if ( fqHeadVer ) { MD->checkFastqHeadVersion(tdn[0]); fqHeadVer = false; }
-		if (doMC) {
+		if (true && doMC) {
+//			if (tdn[0] == nullptr) { cont = false;  break; }
+//			if (fqHeadVer) { MD->checkFastqHeadVersion(tdn[0]); fqHeadVer = false; }
 
 			//work with threadpool instead 
 			/*
@@ -375,24 +404,45 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 			bool notSubm(true);
 			while (notSubm) {//go over possible submission slots
 				if (thrCnt >= Nthreads) {thrCnt = 0;}
-				if (slots[thrCnt].inUse == true && slots[thrCnt].job.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
+				if (slots[thrCnt].inUse == true && 
+					slots[thrCnt].job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
 					slots[thrCnt].inUse = false;
 					cont = slots[thrCnt].job.get();
 				}
 				if (slots[thrCnt].inUse == false) {
-					cdbg("submit readPairRdy ");
-					slots[thrCnt].job = async(std::launch::async, read_paired_DNAready, 
-						tdn, MIDuse, MD, thrCnt);
+					//cdbg("submit readPairRdy ");
+//					slots[thrCnt].job = async(std::launch::async, read_paired_DNAready,
+//						tdn, MIDuse, MD, thrCnt);
+					slots[thrCnt].job = async(std::launch::async, read_paired_STRready,
+						tmpLines, MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
 					slots[thrCnt].inUse = true;
 					notSubm = false;
 				}
 				thrCnt++;
 			}
+			if (!cont) { break; }
 			/**/
 
 		} else {
-			cont = read_paired_DNAready(tdn, MIDuse, MD,0);
-			if (tdn[0]->isConstellationPairRev()) {revConstellation++;}
+			if (0) {
+				if (tdn[0] == nullptr) { cont = false;  break; }
+				if (fqHeadVer) { MD->checkFastqHeadVersion(tdn[0]); fqHeadVer = false; }
+				cont = read_paired_DNAready(tdn, MIDuse, MD, 0);
+				if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
+			}
+			else {
+				cont = read_paired_STRready(tmpLines, MIDuse, MD, 0, 
+					keepPairedHD, fastqVer);
+				//if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
+			}
+		}
+	}
+
+	//get all slots
+	for (int x = 0; x < slots.size(); x++){
+		if (slots[x].inUse == true && slots[x].job.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
+			slots[x].inUse = false;
+			cont = slots[x].job.get();
 		}
 	}
 

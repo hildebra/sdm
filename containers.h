@@ -451,7 +451,8 @@ public:
 	void setWrittenReads(int x){ReadsWritten=x;}
 	int getFileIncrementor(){return OFileIncre;}
 	void incrementFileIncrementor(){ OFileIncre++; ReadsWritten = 0; }//
-	void setBCoffset(int x) { BCoffset = x; }
+	void setBCoffset(int x) { 
+		BCoffset = x; }
 	inline int getBCoffset() { return BCoffset; }
 	//if no qual_ file present, than deactivate qual_ filter
 	void deactivateQualFilter() { b_doQualFilter = false; }
@@ -568,20 +569,26 @@ public:
 
 protected:
 	bool check_lengthXtra(shared_ptr<DNA> d, int hindrance=0, int leng=-1){
-		if (min_l <= 0 &&alt_min_l <= 0 ){return false;}
-		if (leng==-1){
-			leng = d->length();
-		}
-		if (leng-hindrance < min_l){
-			if (leng-hindrance >= alt_min_l){
-				d->setMidQual(true);
-				d->QualCtrl.minL = false;
-				return false;
+		if (min_l > 0) {
+			if (leng == -1) {
+				leng = d->length();
 			}
-			//statAddition.minL++;
-			d->QualCtrl.minL = true;
+			if (leng - hindrance < min_l) {
+				if (leng - hindrance >= alt_min_l) {
+					d->setMidQual(true);
+					d->QualCtrl.minL = false;
+					return false;
+				}
+				//statAddition.minL++;
+				d->QualCtrl.minL = true;
+				return true;
+			}
+		}
+		if (max_l > 0 && leng - hindrance > max_l) {
+			d->QualCtrl.maxL = true; //sMaxLength(pair_);
 			return true;
 		}
+
 		return false;
 	}
 	bool check_length( int leng, int hindrance=0){
@@ -647,7 +654,7 @@ protected:
 	bool bRequireFwdPrim,alt_bRequireFwdPrim;
 	bool BcutTag;//cut Tag from seq?
 	bool bCompletePairs;//if paired seq, only accept complete pairs
-	bool bShortAmplicons;
+	bool bShortAmplicons;//checks for reverse primer on 1st read
 	//minBCLength1_ is Barcode length
 	unsigned int minBCLength1_, minBCLength2_, maxBCLength1_, maxBCLength2_, minPrimerLength_, maxHomonucleotide;
 	int PrimerErrs,alt_PrimerErrs,barcodeErrors_,MaxAmb, alt_MaxAmb;//allowed max errs per Primer, Tag; max Ambigous Chars(not ACGT)
@@ -692,7 +699,7 @@ protected:
 	//controls output file size
 	int maxReadsPerOFile;
 	int OFileIncre;
-	int ReadsWritten;
+	atomic_int ReadsWritten;
 	uint demultiBPperSR;
 	//needed to pass by ref
 	BarcodeMap emptyBarcodes;
@@ -751,7 +758,9 @@ typedef robin_hood::unordered_node_map<string, DNAuniqSet> HashDNA;
 class Dereplicate{
 public:
 	Dereplicate(OptContainer&, Filters* mf);//
-	//~Dereplicate() { mainFilter = NULL; }
+	~Dereplicate() {
+		if (merger != nullptr) { delete merger; merger = nullptr;}
+	}
 	int getHighestBCoffset() { return (int)barcode_number_to_sample_id_.size(); }
 	//bool addDNA(shared_ptr<DNA> dna);
 	bool addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2);
@@ -1020,7 +1029,7 @@ private:
 	vector<ostream*> fqNoBCFile;*/
 	uint totalFileStrms;
 	vector<vector<ostr*>> sFile, qFile, fqFile;
-	mutex sqfqostrMTX;
+	//mutex sqfqostrMTX;
 	vector<ostr*> fqNoBCFile;
 	//mutex nobcostrmMTX;
 	vector<ostr*> of_merged_fq;//1D vec, since no read pairs
@@ -1032,18 +1041,15 @@ private:
 	bool write2File;
 	//bool mem_used;
 	atomic_int DNAinMem, writeThreadStatus;
-#ifdef _THREADED
-	std::thread wrThread;
-	std::mutex mutex;
-	vector<std::thread> threads;
-#endif
+
 	int fastQver; //33, 62 or 59
 	int fastQoutVer; //33, 62 or 59
 	//write out quality file, is the input paired End sequenced
 	bool BWriteQual, BWriteFastQ;
 	bool b_multiOutStream;
 	int pairedSeq; //1=single, 2=PE, 3=PE+MID
-	bool b_changeFQheadVer; // T/F 0=no PE, 1= XX/1, 2=XX 1:0:3
+	bool b_changeFQheadVer; // linked to fastQheadVer
+	bool b_checkedHeaderChange;
 	bool b_oneLinerFasta; // write one line per sequence?
     bool b_writeGreenQual;
 	bool b_writeYellowQual;

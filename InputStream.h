@@ -51,17 +51,20 @@ bool isGZfile(const string fileS);//test if file is gzipped input
 
 
 
-static inline void rtrim(std::string &s) {
+static void rtrim(std::string& s) {
 	//s.erase(std::find_if(s.rbegin(), s.rend(), std::not1(std::ptr_fun<int, int>(std::isspace))).base(), s.end());
 	//return s;
 	s.erase(std::find_if(s.rbegin(), s.rend(), [](unsigned char ch) {
 		return !std::isspace(ch);
-	}).base(), s.end());
+		}).base(), s.end());
 }
+inline int parseInt(const char** p1);
 
-
-void cdbg(const string& x);
-
+static void cdbg(const string& x) {
+#ifdef DEBUG
+	cerr << x;
+#endif
+}
 
 //MOCAT header fix
 std::vector<std::string> header_string_split(const std::string str, const std::string sep);
@@ -79,13 +82,24 @@ string applyFileIT(string x, int it, const string xtr = "");
 bool fileExists(const std::string& name, int i=-1,bool extiffail=true);
 //vector<int> orderOfVec(vector<int>&);
 
+static std::mutex input_mtx;
+
 class ifbufstream {//: private std::streambuf, public std::ostream {
 public:
-	ifbufstream(const string& inF, size_t buf1=50000) :
+	ifbufstream(const string& inF, size_t buf1=20000,bool test=false) :
 		file(inF),modeIO(ios::in),at(0),isGZ(false), atEnd(false), hasKickoff(false), bufS(buf1)
 	{
+		if (bufS < 10) {
+			cerr << "Buffer size chosen too small: " << bufS << endl << "class ifbufstream\n";
+			exit(236);
+		}
+
 		keeper = new char[bufS];
 		keeperW = new char[bufS];
+		for (int x = 0; x < bufS; x++) {
+			keeper[x] = EOF; keeperW[x] = EOF;
+		}
+		
 		if (isGZfile(file)) { //write a gzip out??
 			isGZ = true;
 #ifndef _gzipread
@@ -109,15 +123,26 @@ public:
 			atEnd = true;
 			return;
 		}
+		if (test) {
+			return;
+		}
 		/*primary.seekg(0, primary.end);
 		int length = primary.tellg();
 		primary.seekg(0, is.beg);*/
 		//first round read..
 		primary->read(keeper, bufS);
-		kickOff();
+		if (!(*primary) || bufS > primary->gcount()) {
+			bufS = primary->gcount()+1;
+			atEnd = true;
+			delete[] keeperW;
+			keeperW = nullptr;
+		} else {
+			kickOff();
+		}
 	}
 	~ifbufstream() {
-		delete[] keeper; 
+		if (hasKickoff) { hasKickoff = false; readKickoff.get(); }
+		delete[] keeper;
 		if (keeperW != nullptr) { delete[] keeperW; }
 		delete primary;
 	}
@@ -128,7 +153,7 @@ public:
 		primary = new ifstream(file, modeIO);
 	}
 	bool eof() {
-		return atEnd;
+		return atEnd && at >= bufS;
 	}
 	bool operator! (void) {
 		return !atEnd;
@@ -139,6 +164,49 @@ public:
 			this->getline(mpt);
 		}
 	}
+	//specific function that gets fasta line looking for pattern '\n>'
+	bool getlines(string& ret,int & linesRead) {
+		ret.clear();
+		if (atEnd && at >= bufS) {
+			return false;
+		}
+		for (;;) {
+			char c = keeper[at];
+			at++;
+			if (at >= bufS && !readChunk()) {
+				return false;// read next chunk already
+			}
+
+			switch (c) {
+			case '\n':
+				linesRead++;
+				if (keeper[at] == '>') {
+					return true;
+				}
+				break;
+			case '\r':
+				if (keeper[at] == '\n') {
+					linesRead++;
+					at += 1;
+					if (at < bufS && keeper[at] == '>') {
+						return true;
+					}
+					break;
+				}
+			case EOF:
+				// Also handle the case when the last line has no line ending
+				atEnd = true;
+				//primary->setstate(std::ios::eofbit);
+				return false;
+			default:
+				ret += c;
+			}
+		}
+		if (atEnd && at >= bufS) {
+			return false;
+		}
+		return true;
+	}
 	bool getline(string& ret) {
 		ret.clear();
 		if (atEnd && at >= bufS) {
@@ -147,8 +215,8 @@ public:
 		for (;;) {
 			char c = keeper[at];
 			at++;
-			if (at >= bufS) {
-				readChunk();// read next chunk already
+			if (at >= bufS && !readChunk()) {
+				return false;// read next chunk already
 			}
 
 			switch (c) {
@@ -168,26 +236,36 @@ public:
 				ret += c;
 			}
 		}
+		if (atEnd && at >= bufS) {
+			return false;
+		}
 		return true;
 	}
 private:
 	bool internalReadChunk() {
 		if (!*(primary)) {
+			if (keeperW != nullptr) { delete[] keeperW; }
 			keeperW = nullptr;
 			atEnd = true;
-			bufS = primary->gcount();
+			bufS = primary->gcount()+1;
 			//keeperW[XX] = char_traits<char>::eof();
 			return false;
 		}
+		input_mtx.lock();
 		primary->read(keeperW, bufS);
+		
+		input_mtx.unlock();
 		return true;
 	}
 	bool kickOff() {
-		if (false ) {//do MC?
+		if (true ) {//do MC?
 			if (!atEnd) {
+				assert(!hasKickoff);
+				localMTX.lock();
+				hasKickoff = true;
 				readKickoff = async(std::launch::async, &ifbufstream::internalReadChunk,
 					this);
-				hasKickoff = true;
+				localMTX.unlock();
 				return true;
 			}	else {
 				return false;
@@ -225,17 +303,19 @@ private:
 	istream* primary;
 	future<bool> readKickoff;
 	size_t bufS ;
+	mutex localMTX;
 };
 std::ptrdiff_t len_common_prefix_base(char const a[], char const b[]);
-//static std::mutex output_mtx;
+static std::mutex output_mtx;
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
-	ofbufstream():file("T"), modeIO(ios::app), used(0),
+	ofbufstream(size_t bufferS):file("T"), modeIO(ios::app), used(0),
 		coutW(true), isGZ(false){
 		int x = 0;
 	}
-	ofbufstream(const string IF, int mif, ThreadPool *pool=nullptr) :file(IF), modeIO(mif), used(0),
-		coutW(false), isGZ(false),primary(nullptr){
+	ofbufstream(const string IF, int mif, size_t bufferS=20000) :
+		file(IF), modeIO(mif), used(0),
+		coutW(false), isGZ(false),primary(nullptr), bufS(bufferS){
 		
 		if (modeIO == ios::out) {
 			remove(file.c_str());
@@ -271,7 +351,6 @@ public:
 	}
 	void operator<< (const string& X) {
         {
-			append_mtx_.lock();
 			if (coutW) {
 				cout << X;
 				return;
@@ -283,6 +362,7 @@ public:
             if (lX + used > bufS) {
                 writeStream();
             }
+			append_mtx_.lock();
             memcpy(keeper + used, X.c_str(), lX);
             used += lX;
 			append_mtx_.unlock();
@@ -324,7 +404,9 @@ public:
 private:
     std::mutex append_mtx_;
 	bool internalWrite(bool closeThis){
+		output_mtx.lock();
 		primary->write(keeperW, used);
+		output_mtx.unlock();
 		//delete[] keeperW;//clean up
 		return true;
 		if (closeThis) {
@@ -359,7 +441,7 @@ private:
             });
         /**/
 		//multithreading via kickoff
-		if (pool && doKickoff){
+		if (doKickoff){
 			writeKickoff = async(std::launch::async, &ofbufstream::internalWrite, 
 				this, closeThis);
 			hasKickoff = true;
@@ -377,7 +459,7 @@ private:
 	bool coutW, isGZ;
 	ostream* primary;
 	
-    static const size_t bufS = 600000;
+    size_t bufS;
 
     // Multithreading throw threadpool
     ThreadPool *pool = nullptr;//currently just used to check if MC or not
@@ -466,6 +548,7 @@ public:
 	DNA(FastxRecord*, qual_score & minQScore, qual_score & maxQScore, qual_score fastQver);
 	//works directly with 4 lines in fastq format
 	DNA(vector<string> fq, qual_score fastQver);
+	DNA(vector<string> fq);
 
 	~DNA() {
 	    //cout << "destruct" << endl;
@@ -522,7 +605,7 @@ public:
 	const string& getOldId() { return id_; }
 	string getShortId() { return id_.substr(0, getShorterHeadPos(id_)); }
 	string getNewIDshort() { return new_id_.substr(0, getShorterHeadPos(new_id_)); }
-	bool seal();
+	bool seal(bool isFasta=false);
 
 	bool isEmpty() {
 	    if (id_.empty() && sequence_.empty()) {
@@ -890,7 +973,7 @@ struct jobC {
 	bool inUse = false;
 };
 
-shared_ptr<DNA> lauchStr2DNA(vector<string> in, bool keepPairHD, int fastQver);
+shared_ptr<DNA> str2DNA(vector<string> in, bool keepPairHD, int fastQver, int readpos);
 
 class InputStreamer{
 public:
@@ -932,10 +1015,11 @@ public:
 	vector < shared_ptr<DNA>> getDNAMC();
 
 	//path, fasta, qual_, pairNum
-	string setupInput(string path, int tarID,
-                      const string& uniqueFastxFile, const vector<string>& fastqFiles, const vector<string>& fastaFiles, const vector<string>& qualityFiles,
-                      const vector<string>& midFiles, int &paired, string onlyPair,
-                      string& mainFilename, bool simulate = false);
+	string setupInput(string path, int tarID, const string& uniqueFastxFile, 
+		const vector<string>& fastqFiles, 
+		const vector<string>& fastaFiles, const vector<string>& qualityFiles,
+		const vector<string>& midFiles, int &paired, string onlyPair,
+		string& mainFilename, bool simulate = false);
 	bool setupFastaQual(string,string, string, int&, string,bool=false);
 	void setupFna(string);
 	//path, fastq, fastqVer, pairNum
@@ -954,9 +1038,12 @@ public:
 	bool checkInFileStatus();
 	void atFileYofX(uint cF, uint tF, uint BCn) { currentFile = cF; totalFileNumber = tF; BCnumber = BCn; }
 	uint getCurFileN() { return currentFile; }
+
+	bool keepPairedHD() { return keepPairHD; }
+	qual_score fastQscore() { return fastQver; }
     
 	
-    vector<istream*> fasta_istreams, quality_istreams;
+    vector<ifbufstream*> fasta_istreams, quality_istreams;
 	vector<ifbufstream*> fastq_istreams;
     
     
@@ -966,15 +1053,14 @@ public:
 private:
 	inline qual_score minmaxQscore(qual_score t);// , int lnCnt);
 	void minmaxQscore(shared_ptr<DNA> t);// , int lnCnt);
-	int parseInt(const char** p1);// , int &pos);// , const char ** &curPos);
 	bool setupFastq_2(string, string, string);
 	bool setupFastaQual2(string, string, string = "fasta file");
 	shared_ptr<DNA> read_fastq_entry(istream & fna, qual_score &minQScore,
 		int&,bool&,bool);
 	shared_ptr<DNA> read_fastq_entry_fast(istream & fna, int&,bool&);
 	void jmp_fastq(istream &, int&);
-	bool read_fasta_entry(istream&fasta_is, istream&quality_is, shared_ptr<DNA> in, shared_ptr<DNA>, int&);
-	static bool getFastaQualLine(istream&fna,  string&);
+	bool read_fasta_entry(ifbufstream*fasta_is, ifbufstream*quality_is, shared_ptr<DNA> in, shared_ptr<DNA>, int&);
+	//static bool getFastaQualLine(istream&fna,  string&);
 	void maxminQualWarns_fq();
 	int auto_fq_version();
 	int auto_fq_version(qual_score minQScore, qual_score maxQScore=0);

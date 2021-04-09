@@ -11,6 +11,8 @@ sdm
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 
+Makefile_d
+
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/
