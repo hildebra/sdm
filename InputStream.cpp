@@ -1240,7 +1240,7 @@ void DNAunique::incrementSampleCounter(int sample_id) {
 	if (sample_id < 0) {
 		return;
 	}
-	DNAuniMTX.lock();
+	//DNAuniMTX.lock();
 	count_++;
 #ifdef _MAPDEREPLICATE
 	auto sample_counter = occurence.find(sample_id);
@@ -1250,17 +1250,17 @@ void DNAunique::incrementSampleCounter(int sample_id) {
 		sample_counter->second++;
 	}
 #endif
-	DNAuniMTX.unlock();
+	//DNAuniMTX.unlock();
 }
 void DNAunique::incrementSampleCounterBy(int sample_id, long count) {
-	DNAuniMTX.lock();
+	//DNAuniMTX.lock();
 	auto sample_counter = occurence.find(sample_id);
 	if (sample_counter == occurence.end()) {
 		occurence[sample_id] = count;
 	} else {
         sample_counter->second += count;
 	}
-	DNAuniMTX.unlock();
+	//DNAuniMTX.unlock();
 }
 /*vector<pair_<int, int>> DNAunique::getDerepMapSort2(size_t wh ){
 	typedef std::pair_<int, int> mypair;
@@ -1312,7 +1312,7 @@ bool DNAunique::pass_deprep_smplSpc(const vector<int>& cv) {
 
 
 void DNAunique::transferOccurence(const shared_ptr<DNAunique> dna_unique) {
-	DNAuniMTX.lock();
+	//DNAuniMTX.lock();
 
 	if (occurence.size() == 0) {
 		occurence = dna_unique->occurence;
@@ -1332,7 +1332,7 @@ void DNAunique::transferOccurence(const shared_ptr<DNAunique> dna_unique) {
 		//size track
 		count_ += dna_unique->count_;
 	}
-	DNAuniMTX.unlock();
+	//DNAuniMTX.unlock();
 }
 
 
@@ -1400,7 +1400,7 @@ void DNAunique::takeOver(shared_ptr<DNAunique> const dna_unique_old, shared_ptr<
 }
 void DNAunique::takeOverDNA(shared_ptr<DNA> const dna_unique_old, shared_ptr<DNA> const dna2) {
 
-	DNAuniMTX.lock();
+	//DNAuniMTX.lock();
 	
 	if (dna2 != nullptr) {
 		this->attachPair(make_shared<DNAunique>(dna2, -1));
@@ -1409,6 +1409,7 @@ void DNAunique::takeOverDNA(shared_ptr<DNA> const dna_unique_old, shared_ptr<DNA
 	accumulated_error_ = dna_unique_old-> accumulated_error_;
 	FtsDetected=dna_unique_old->FtsDetected;
 	good_quality_=dna_unique_old->good_quality_;
+	//new_id_ = dna_unique_old->id_;
 	id_ = dna_unique_old->id_;
 	id_fixed_=dna_unique_old->id_fixed_;
 	new_id_ = dna_unique_old-> new_id_;
@@ -1430,7 +1431,9 @@ void DNAunique::takeOverDNA(shared_ptr<DNA> const dna_unique_old, shared_ptr<DNA
 	accumulated_error_ = dna_unique_old-> accumulated_error_;
 	tempFloat = dna_unique_old-> tempFloat;
 	
-	DNAuniMTX.unlock();
+	
+	this->saveMem();
+	//DNAuniMTX.unlock();
 }
 
 uint64_t * DNAunique::transferPerBaseQualitySum() {

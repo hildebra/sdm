@@ -30,8 +30,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <cctype>
 #include <locale>
 #include <climits>
-#include "ThreadPool.h"
+//#include "ThreadPool.h"
 #include <fstream>
+#include <shared_mutex>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <future>
+
+
 
 extern char DNA_trans[256];
 extern short DNA_amb[256];
@@ -82,7 +89,7 @@ string applyFileIT(string x, int it, const string xtr = "");
 bool fileExists(const std::string& name, int i=-1,bool extiffail=true);
 //vector<int> orderOfVec(vector<int>&);
 
-static std::mutex input_mtx;
+//static mutex input_mtx;
 
 class ifbufstream {//: private std::streambuf, public std::ostream {
 public:
@@ -252,8 +259,7 @@ private:
 			return false;
 		}
 		input_mtx.lock();
-		primary->read(keeperW, bufS);
-		
+		primary->read(keeperW, bufS);	
 		input_mtx.unlock();
 		return true;
 	}
@@ -261,11 +267,11 @@ private:
 		if (true ) {//do MC?
 			if (!atEnd) {
 				assert(!hasKickoff);
-				localMTX.lock();
+				//
 				hasKickoff = true;
 				readKickoff = async(std::launch::async, &ifbufstream::internalReadChunk,
 					this);
-				localMTX.unlock();
+				//localMTX.unlock();
 				return true;
 			}	else {
 				return false;
@@ -277,8 +283,10 @@ private:
 		}
 	}
 	bool readChunk() {
+		localMTX.lock();
 		if (hasKickoff) { hasKickoff = false; readKickoff.get(); }
 		if (atEnd && keeperW == nullptr) {
+			localMTX.unlock();
 			return false;
 		}
 		
@@ -290,7 +298,7 @@ private:
 
 		at = 0;
 		kickOff();
-		
+		localMTX.unlock();
 
 		//primary->read(keeperW, bufS);
 		return true;
@@ -304,9 +312,10 @@ private:
 	future<bool> readKickoff;
 	size_t bufS ;
 	mutex localMTX;
+	mutex input_mtx;
 };
 std::ptrdiff_t len_common_prefix_base(char const a[], char const b[]);
-static std::mutex output_mtx;
+//static mutex output_mtx;
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
 	ofbufstream(size_t bufferS):file("T"), modeIO(ios::app), used(0),
@@ -356,21 +365,21 @@ public:
 				return;
 			}
 			
-			//std::unique_lock<std::mutex> lock(append_mtx_);
+			std::unique_lock<std::mutex> lock(append_mtx_);
             size_t lX(X.length());
             //writeStream();
             if (lX + used > bufS) {
                 writeStream();
             }
-			append_mtx_.lock();
-            memcpy(keeper + used, X.c_str(), lX);
+			//output_mtx.lock_shared();
             used += lX;
-			append_mtx_.unlock();
+            memcpy(keeper + used- lX, X.c_str(), lX);
+			//output_mtx.unlock_shared();
         }
     }
 
     // Multithreading through Threadpool
-    void setThreadPool(ThreadPool *pool) {this->pool = pool;}
+    //void setThreadPool(ThreadPool *pool) {this->pool = pool;}
 	void emptyStream() {
 		used = 0;
 	}
@@ -395,23 +404,26 @@ public:
 			return;
 		}
 		//primary->close();
+		output_mtx.lock();
 		delete primary;// ->close();
 		primary = nullptr;
+		output_mtx.unlock();
 
 	}
     // end
 
 private:
-    std::mutex append_mtx_;
+	mutex append_mtx_;
+	mutable shared_mutex output_mtx;
 	bool internalWrite(bool closeThis){
 		output_mtx.lock();
 		primary->write(keeperW, used);
 		output_mtx.unlock();
 		//delete[] keeperW;//clean up
-		return true;
 		if (closeThis) {
 			deactivate();
 		}
+		return true;
 	}
 	void writeStream(bool doKickoff=true) {
         static int counter = 0;
@@ -427,9 +439,11 @@ private:
 			closeThis = false;
 		}
 		//swap opeartion
+		output_mtx.lock();
 		char* keeperTmp = keeperW;
 		keeperW = keeper;
 		keeper = keeperTmp;
+		output_mtx.unlock();
 		//keeper = new char[bufS];
         //if (false) {
         /*if ( pool ) {
@@ -455,14 +469,14 @@ private:
 	char *keeper;
 	char* keeperW;
 	int modeIO;
-	size_t used;
+	atomic_size_t used;
 	bool coutW, isGZ;
 	ostream* primary;
 	
     size_t bufS;
 
     // Multithreading throw threadpool
-    ThreadPool *pool = nullptr;//currently just used to check if MC or not
+    //ThreadPool *pool = nullptr;//currently just used to check if MC or not
     // end
 	future<bool> writeKickoff;
 	bool hasKickoff=false;
@@ -855,7 +869,8 @@ public:
 	DNAunique(string s, string x) : DNA(s, x), count_(1) {}
 
 	// Mostly used constructor
-	DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), count_(0), best_seed_length_((uint)sequence_.size()), pair_(0) {
+	DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), count_(0), 
+		best_seed_length_((uint)sequence_.size()), pair_(0) {
         incrementSampleCounter(BC);
 	}
 	~DNAunique() {
@@ -872,7 +887,7 @@ public:
 	void writeMap(ofstream & os, const string&, vector<int>&, const vector<int>&);
 	inline int getCount() { return count_; }
 	uint getBestSeedLength() { return best_seed_length_; }
-	void setBestSeedLength(uint i) { DNAuniMTX.lock(); best_seed_length_ = i; DNAuniMTX.unlock();}
+	void setBestSeedLength(uint i) { best_seed_length_ = i; }//DNAuniMTX.lock(); DNAuniMTX.unlock();}
 	void incrementSampleCounterBy(int sample_id, long count);
 	void transferOccurence(shared_ptr<DNAunique>);
 	const read_occ& getDerepMap() { return occurence; }
@@ -905,13 +920,13 @@ public:
 	}
 	void sumQualities(shared_ptr<DNA> dna) {
 		if (dna == nullptr) return;
-		DNAuniMTX.lock();
+		//DNAuniMTX.lock();
 		prepSumQuals();
 		const vector<qual_score> quals = dna->getQual();
 		for (uint i = 0; i < length(); i++) {
 			quality_sum_per_base_[i] += quals[i];
 		}
-		DNAuniMTX.unlock();
+		//DNAuniMTX.unlock();
 	}
 
 	void prepareDerepQualities(int ofastQver);
@@ -942,13 +957,18 @@ public:
 	uint64_t * transferPerBaseQualitySum();
 
     uint64_t* quality_sum_per_base_ = nullptr;
+
+	//void lock() { DNAuniMTX.lock(); }
+	//void unlock() { DNAuniMTX.unlock(); }
+	mutex DNAuniMTX;
+	
+
 private:
 	int count_;
 	//matrixUnit chimeraCnt;
 	int best_seed_length_;
 	
 	read_occ occurence;
-	mutex DNAuniMTX;
 	shared_ptr<DNAunique> pair_;
 
 	// to calculate mean

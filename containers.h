@@ -609,6 +609,7 @@ protected:
 	void reverseTS_all_BC();	
 	void reverseTS_all_BC2();
 
+	//decides if BC is read from fasta header or looked for in MID seq/ DNA seq
 	void decideHeadBC();
 
 
@@ -750,6 +751,7 @@ private:
 	shared_ptr<DNAunique> bestDNU;
 	bool bestSet;
 	int totalCnts;
+	mutex lockMTX;
 };
 
 typedef robin_hood::unordered_node_map<string, DNAuniqSet> HashDNA;
@@ -816,7 +818,7 @@ private:
 
 	Filters* mainFilter;
 
-	mutex drpMTX;
+	mutable std::shared_mutex drpMTX;
 
 };
 
@@ -1098,7 +1100,7 @@ private:
 
 
 	// Multithreaded
-	ThreadPool *pool = nullptr;
+	//ThreadPool *pool = nullptr;
 
 
 	//future<void> derepThread;

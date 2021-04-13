@@ -481,7 +481,7 @@ vector<bool> OutputStreamer::analyzeDNA(shared_ptr<DNA> p1, shared_ptr<DNA> p2, 
 }
 
 bool OutputStreamer::checkFastqHeadVersion(shared_ptr<DNA> d,bool disable) {
-	if (b_checkedHeaderChange) {
+	if (!b_checkedHeaderChange) {
 		return b_changeFQheadVer;
 	}
 	b_checkedHeaderChange = true;
@@ -2082,7 +2082,7 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
     // auto dna_unique = Tracker.find(new_dna_unique);
 	bool new_insert(true);
 	map<int, shared_ptr<DNAunique>>::iterator dna_unique;
-    drpMTX.lock();
+    drpMTX.lock_shared();//lock for hash
 	HashDNA::iterator dna_unique1 = Tracker.find(srchSeq);
 	//HashDNA::iterator TrackerEnd = Tracker.end();
 	if (dna_unique1 != Tracker.end()) {// found something
@@ -2093,8 +2093,10 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 			new_insert = true;
 		}
 	}
-	drpMTX.unlock();
+	drpMTX.unlock_shared();//lock for hash
     if (!new_insert) {// found something
+			//lock object so only one thread is working on it
+		dna_unique->second->DNAuniMTX.lock();
 		//drpMTX.lock();
 		//cdbg("inserting to DNAderep ");
         dna->setDereplicated();
@@ -2121,6 +2123,8 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 			//drpMTX.unlock();
 
         }
+		dna_unique->second->DNAuniMTX.unlock();
+
 		//drpMTX.unlock();
     } else if (pass) {
         // Create new dna_unique object
@@ -2259,13 +2263,14 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	//convert to vector, that can than be written out
 	vector<shared_ptr<DNAunique>> dereplicated_dnas (Tracker.size());
 	int count = 0;
-	for (auto dd : Tracker) {
+	HashDNA::iterator dd;
+	for (dd = Tracker.begin(); dd != Tracker.end();dd++) {
 		//super simple, double check later for correctness TODO
-		size_t xsi = dd.second.size();
+		size_t xsi = dd->second.size();
 		if (xsi > 1) {
 			int y = 0;
 		}
-        dereplicated_dnas[count] = dd.second.best();
+        dereplicated_dnas[count] = dd->second.best();
 		count++;
 	}
 //	bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r) {	return l->getCount() < r->getCount();}

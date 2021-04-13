@@ -122,7 +122,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 		cerr << "Second provided file has not the same number of entries as first file.\n";
 		exit(5);
 	}
-	MD->checkFastqHeadVersion(tdn[0]);
+	//MD->checkFastqHeadVersion(tdn[0]);
 	//testreadpair.lock();
 
 	Filters* curFil = MD->getFilters(curThread);
@@ -325,7 +325,7 @@ struct job2 {
 };
 
 bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, 
-	shared_ptr<InputStreamer> IS, bool MIDuse, int Nthreads, ThreadPool* pool) {
+	shared_ptr<InputStreamer> IS, bool MIDuse, int Nthreads) {
 	
 	DNAmap oldMIDs;
 	bool fqHeadVer(true);
@@ -356,7 +356,7 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 
 	vector<string>tmpLines2(4, "");
 	vector<vector<string>> tmpLines(3, tmpLines2);
-	vector<shared_ptr<DNA>> tdn;
+	vector<shared_ptr<DNA>> tdn(3,nullptr);
 
 	while ( cont ) {
 		//bool sync = false;
@@ -374,7 +374,7 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 			
 		
 		} else {
-			tdn.resize(3, nullptr);
+			//tdn.resize(3, nullptr);
 			tdn[0] = IS->getDNA(0);
 			tdn[1] = IS->getDNA( 1);
 			if (MIDuse) {
@@ -386,8 +386,17 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 		}
 		qual_score fastqVer = IS->fastQscore();
 
+		if (fqHeadVer) { //some things just need to be done
+			if (tdn[0] == nullptr) {
+				tdn[0] = str2DNA(tmpLines[0], keepPairedHD, fastqVer, 0);
+			}
+			MD->checkFastqHeadVersion(tdn[0]); 
+			fqHeadVer = false; 
+			tdn[0] = nullptr;//delete again, this is a oneoff..
+		}
+
 		cnt++;
-		//check if the PE format is right
+		//decide on MC or single core submission route
 		if (true && doMC) {
 //			if (tdn[0] == nullptr) { cont = false;  break; }
 //			if (fqHeadVer) { MD->checkFastqHeadVersion(tdn[0]); fqHeadVer = false; }
@@ -426,7 +435,7 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 		} else {
 			if (0) {
 				if (tdn[0] == nullptr) { cont = false;  break; }
-				if (fqHeadVer) { MD->checkFastqHeadVersion(tdn[0]); fqHeadVer = false; }
+				//if (fqHeadVer) { MD->checkFastqHeadVersion(tdn[0]); fqHeadVer = false; }
 				cont = read_paired_DNAready(tdn, MIDuse, MD, 0);
 				if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
 			}
@@ -874,7 +883,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
     // Multithreading setup
     //------------------------------------
     bool multithreading = true;
-    ThreadPool *pool = nullptr;
+    //ThreadPool *pool = nullptr;
     int threads = 1;
     if (multithreading) {
         if (cmdArgs.find("-threads") != cmdArgs.end()) {
@@ -1020,7 +1029,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		//**********************
 		
 		if (OutStreamer->isPEseq() == 2) {
-			read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads, pool);
+			read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
 		}else {
 			read_single(cmdArgs, OutStreamer, IS);
 			/*if (threads == 1) {
@@ -1234,7 +1243,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 #endif
 
     // multithreading
-    delete pool;
+    //delete pool;
 	//ReadMerger no longer needed
 	for (size_t x = 0; x < merger.size(); x++) {
 		delete merger[x];
