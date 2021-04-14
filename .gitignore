@@ -12,6 +12,8 @@ sdm
 *.userprefs
 
 Makefile_d
+MakefileD
+MakefileF
 
 # Build results
 [Dd]ebug/

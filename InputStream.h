@@ -178,12 +178,12 @@ public:
 			return false;
 		}
 		for (;;) {
-			char c = keeper[at];
-			at++;
 			if (at >= bufS && !readChunk()) {
 				return false;// read next chunk already
 			}
 
+			char c = keeper[at];
+			at++;
 			switch (c) {
 			case '\n':
 				linesRead++;
@@ -318,12 +318,12 @@ std::ptrdiff_t len_common_prefix_base(char const a[], char const b[]);
 //static mutex output_mtx;
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
-	ofbufstream(size_t bufferS):file("T"), modeIO(ios::app), used(0),
+	ofbufstream(size_t bufferS):file("T"), modeIO(ios::app), used(0), usedW(0),
 		coutW(true), isGZ(false){
 		int x = 0;
 	}
 	ofbufstream(const string IF, int mif, size_t bufferS=20000) :
-		file(IF), modeIO(mif), used(0),
+		file(IF), modeIO(mif), used(0), usedW(0),
 		coutW(false), isGZ(false),primary(nullptr), bufS(bufferS){
 		
 		if (modeIO == ios::out) {
@@ -350,7 +350,9 @@ public:
 
 	~ofbufstream() {
 		if (hasKickoff) { hasKickoff = false; writeKickoff.get(); }
-		writeStream(false);
+		if (used > 0) {
+			writeStream(false);
+		}
 		deactivate();
 		delete[] keeper;
 		delete[] keeperW;
@@ -365,23 +367,45 @@ public:
 				return;
 			}
 			
-			std::unique_lock<std::mutex> lock(append_mtx_);
             size_t lX(X.length());
             //writeStream();
-            if (lX + used > bufS) {
-                writeStream();
-            }
-			//output_mtx.lock_shared();
-            used += lX;
-            memcpy(keeper + used- lX, X.c_str(), lX);
+			append_mtx_.lock();
+			//if (lX > bufS) {
+				size_t at = 0;
+				while (at < lX) {
+					if (used >= bufS) {
+						writeStream();
+					}
+					keeper[used] = X[at];
+					//output_mtx.lock_shared();
+					used++; at++;
+				}
+			/*}
+			else {//faster??
+				if (lX + used > bufS) {
+					writeStream();
+				}
+				//output_mtx.lock_shared();
+				memcpy(keeper + used, X.c_str(), lX);
+				used += lX; 
+			}*/
+			append_mtx_.unlock();
 			//output_mtx.unlock_shared();
         }
     }
+	/* original code
+	if (lX + used > bufS) {
+		writeStream();
+	}
+	//output_mtx.lock_shared();
+	memcpy(keeper + used, X.c_str(), lX);
+	used += lX;*/
 
     // Multithreading through Threadpool
     //void setThreadPool(ThreadPool *pool) {this->pool = pool;}
 	void emptyStream() {
-		used = 0;
+		if (hasKickoff) { hasKickoff = false; writeKickoff.get(); }
+		used = 0; usedW = 0;
 	}
 	void activate() {
 		if (primary != nullptr) {
@@ -404,10 +428,10 @@ public:
 			return;
 		}
 		//primary->close();
-		output_mtx.lock();
+		//output_mtx.lock();
 		delete primary;// ->close();
 		primary = nullptr;
-		output_mtx.unlock();
+		//output_mtx.unlock();
 
 	}
     // end
@@ -417,7 +441,7 @@ private:
 	mutable shared_mutex output_mtx;
 	bool internalWrite(bool closeThis){
 		output_mtx.lock();
-		primary->write(keeperW, used);
+		primary->write(keeperW, usedW);
 		output_mtx.unlock();
 		//delete[] keeperW;//clean up
 		if (closeThis) {
@@ -426,7 +450,7 @@ private:
 		return true;
 	}
 	void writeStream(bool doKickoff=true) {
-        static int counter = 0;
+        //int counter = 0;
         //out << omp_get_thread_num << ": " << (counter++) << endl;
         if (used == 0) {
             return;
@@ -455,7 +479,8 @@ private:
             });
         /**/
 		//multithreading via kickoff
-		if (doKickoff){
+		usedW = used;
+		if (true && doKickoff){
 			writeKickoff = async(std::launch::async, &ofbufstream::internalWrite, 
 				this, closeThis);
 			hasKickoff = true;
@@ -469,7 +494,7 @@ private:
 	char *keeper;
 	char* keeperW;
 	int modeIO;
-	atomic_size_t used;
+	size_t used, usedW;
 	bool coutW, isGZ;
 	ostream* primary;
 	

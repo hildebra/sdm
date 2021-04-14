@@ -2449,6 +2449,7 @@ bool InputStreamer::setupFastq(string path, string fileS, int& pairs, string sub
 	}
 
 	if (simu) {
+
 		return fileExists(p1) && fileExists(p2) && fileExists(midp);
 	}
 

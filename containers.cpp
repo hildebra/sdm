@@ -329,8 +329,8 @@ OutputStreamer::OutputStreamer(Filters* fil, OptContainer& cmdArgs,
 	if (cmdArgs["-o_fastq_noBC"] != "") {
 		openNoBCoutstrean(cmdArgs["-o_fastq_noBC"]);
 	}
-	if (cmdArgs.find("-o_demultiplex") != cmdArgs.end()) {
-		generateDemultiOutFiles(cmdArgs["-o_demultiplex"],fil, writeStatus);
+	if (cmdArgs.find("-o_demultiplex") != cmdArgs.end()) {//demulti: always write mode out
+		generateDemultiOutFiles(cmdArgs["-o_demultiplex"],fil, ios::out);
 	}
 	if (cmdArgs.find("-merge_pairs_filter") != cmdArgs.end()
 		&& cmdArgs["-merge_pairs_filter"] == "1") {
@@ -675,6 +675,7 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 	bool green2(d2->isGreenQual());
 	bool mergeWr(false);
 
+
 	if ((green1 || green2) && b_merge_pairs_demulti_ && d1->merge_seed_pos_ > 0) {
 		shared_ptr<DNA> dna_merged = merger[curThread]->merge(d1, d2);
 		if (dna_merged) {
@@ -696,6 +697,12 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 		(onlyCompletePairsDemulti && !green2)) {
 		return;
 	}
+	/*
+	string x = d2->getShortId();
+	if (x.find("M04428:252:000000000-BM3M5:1:2106:11089:1656") != string::npos) {
+		bool x = true; // DEBUG
+	}
+	/**/
 
 	if (green1) {
 		//cout << "trouble" << endl;
