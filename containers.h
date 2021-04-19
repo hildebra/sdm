@@ -111,7 +111,6 @@ const std::string DEFAULT_pairedRD_HD_out = "1"; //1=write /1 or 1:N:00 etc out,
 
 
 
-bool betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNAunique> ref);
 
 	//functions
 string additionalFileName(const string& in);
@@ -843,10 +842,15 @@ public:
 	void setRefMode(){ RefDBmode = true; RefDBotuStart = (int)oriKey.size(); }//from now on only count adds or ref DB seqs
 private:
 	void addUCdo(string,bool );
+	matrixUnit OTUmatSum() {
+		matrixUnit mcnt = 0;
+		for (int i = 0; i < OTUmat.size(); i++) { for (int j = 0; j < OTUmat[i].size(); j++) { mcnt += OTUmat[i][j]; } } 
+		return mcnt;
+	}
 	void add2OTUmat(const string&, int, matrixUnit);
 	void add2OTUmat(shared_ptr<DNAunique>, int, matrixUnit);
 	bool uclInOldDNA(const string&, const vector<int>&, float, Filters* fil);
-	bool uclInOldDNA_simple(const string&, const vector<int>&);
+	bool uclInOldDNA_simple(const string&, const vector<int>&, int&);
 	bool getUCFlineInfo(string&, string&, float&, vector<int>&, bool addFromHDstring = false);
 	void besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1, shared_ptr<DNA> tdn2, Filters* fil);
 	void setOTUnms();
@@ -855,7 +859,7 @@ private:
 	inline void removeSampleID(string&, const string &);
 	inline void removeSampleID(string&, const string &, string&);
 	void readDerepInfo(const string);
-	void oneDerepLine(shared_ptr<DNAunique>);
+	int oneDerepLine(shared_ptr<DNAunique>);
 
 	//pair_: important to keep track whether to remove BC etc.: -1 to remove BC (454); 0 not to (MID miSeq)
 	int CurSetPair;
@@ -906,7 +910,7 @@ public:
 	//wrStatus controls if this appends or overwrites output
 	OutputStreamer(Filters* filters, OptContainer& cmdArgs,
                    std::ios_base::openmode wrStatus, shared_ptr<ReadSubset>,
-                   string fileExt = "", int numThreads=0, int=-1);
+					int numThreads, string fileExt = "", int=-1);
 	~OutputStreamer();
 	//clean up streams
 	void closeOutFilesDemulti();

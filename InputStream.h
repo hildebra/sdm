@@ -776,7 +776,7 @@ public:
 			bool BinomialErr; bool dblTagFail;
 		QualStats() :
 			maxL(false), PrimerFail(false), AvgQual(false), HomoNT(false),
-			PrimerRevFail(true), minL(false), minLqualTrim(false),
+			PrimerRevFail(false), minL(false), minLqualTrim(false),
 			TagFail(false), MaxAmb(false), QualWin(false),
 			AccErrTrimmed(false), QWinTrimmed(false),
 			fail_correct_BC(false), suc_correct_BC(false),
@@ -890,11 +890,11 @@ class DNAunique : public DNA {//used for dereplication
 	friend class DNA;
 public:
     // Constructors and Destructors
-	DNAunique() : DNA(), count_(0), pair_(0) {}
-	DNAunique(string s, string x) : DNA(s, x), count_(1) {}
+	DNAunique() : DNA(),  pair_(0) {}
+	DNAunique(string s, string x) : DNA(s, x) {  }
 
 	// Mostly used constructor
-	DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), count_(0), 
+	DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d),  
 		best_seed_length_((uint)sequence_.size()), pair_(0) {
         incrementSampleCounter(BC);
 	}
@@ -908,9 +908,15 @@ public:
 
 	//string sequence_;	string id_;
 	void Count2Head(bool);
+	bool betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2);
+	void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, int, bool);
 	void incrementSampleCounter(int sample_id);
 	void writeMap(ofstream & os, const string&, vector<int>&, const vector<int>&);
-	inline int getCount() { return count_; }
+	//inline int getCount() { return count_; }
+	int totalSum() { int ret(0); 
+	for (auto xx : occurence) { ret += xx.second; } 
+	if (ret == 0) { ret = 1; }
+	return ret; }
 	uint getBestSeedLength() { return best_seed_length_; }
 	void setBestSeedLength(uint i) { best_seed_length_ = i; }//DNAuniMTX.lock(); DNAuniMTX.unlock();}
 	void incrementSampleCounterBy(int sample_id, long count);
@@ -945,13 +951,11 @@ public:
 	}
 	void sumQualities(shared_ptr<DNA> dna) {
 		if (dna == nullptr) return;
-		//DNAuniMTX.lock();
 		prepSumQuals();
 		const vector<qual_score> quals = dna->getQual();
 		for (uint i = 0; i < length(); i++) {
 			quality_sum_per_base_[i] += quals[i];
 		}
-		//DNAuniMTX.unlock();
 	}
 
 	void prepareDerepQualities(int ofastQver);
@@ -975,7 +979,7 @@ public:
 
 	//estimates if one sample occurence covers the unique counts required for sample specific derep min counts
 	bool pass_deprep_smplSpc( const vector<int>&);
-	int counts() const { return count_; }
+	//int counts() const { return count_; }
 
 	void takeOver(shared_ptr<DNAunique> dna_unique_old, shared_ptr<DNA> dna2);
 	void takeOverDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2);
@@ -989,7 +993,7 @@ public:
 	
 
 private:
-	int count_;
+	//int count_;
 	//matrixUnit chimeraCnt;
 	int best_seed_length_;
 	

@@ -1235,13 +1235,82 @@ const vector<qual_score> &DNA::getQual() const {
 ///////////////////////////////////////////////////////////////
 //INPUT STREAMER
 
+bool DNAunique::betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2) {
+	//0.2% difference is still ok, but within 0.5% of the best found seed (prevent detoriating sequence match)
+	//float blen = (float)ref->length() + (float)d1->length();
+	shared_ptr<DNAunique> ref2 = this->getPair();
+	uint curL = d1->mem_length();
+	if (d2 != NULL) { curL += d2->mem_length(); }
+	else {
+		if (d1->has2PrimersDetected() && !this->has2PrimersDetected()) { return true; }
+		if (!d1->has2PrimersDetected() && this->has2PrimersDetected()) { return false; }
+	}
+	uint bestL = this->getBestSeedLength();
+	if (d1->getFwdPrimCut() && !this->getFwdPrimCut()) { return true; }//hard reason
+	if (!d1->getFwdPrimCut() && this->getFwdPrimCut()) { return false; }
+
+	if (float(curL) / float(bestL) < BestLengthRatio) { return false; }
+
+	//at least 90% length of "good" hit
+	if (d1->mem_length() / this->mem_length() < RefLengthRatio) { return false; }
+
+	//checks if the new DNA has a better overall quality
+	//1 added to qual, in case no qual DNA is used
+	float thScore = (1 + d1->getAvgQual()) * log((float)d1->mem_length());
+	float rScore = (1 + this->getAvgQual()) * log((float)this->mem_length());
+	if (thScore > rScore) {
+		//also check for stable lowest score
+		if (d1->minQual() > this->minQual() - MinQualDiff && (d2 == NULL || ref2 == NULL)) {
+			if (curL > bestL) { this->setBestSeedLength(curL); }
+			return true;
+		}
+	}
+	if (d2 == NULL || ref2 == NULL) {
+		return false;
+	}
+	if (d2->getRevPrimCut() && !ref2->getRevPrimCut()) { return true; }//hard reason
+	if (!d2->getRevPrimCut() && ref2->getRevPrimCut()) { return false; }//hard reason
+
+	//at least 90% length of "good" hit
+	if (d2->mem_length() / ref2->mem_length() < RefLengthRatio) { return false; }
+
+	//checks if the new DNA has a better overall quality
+	//weigh with average id_ to OTU seed
+	thScore += (1 + d2->getAvgQual()) * log((float)d2->mem_length()) * 97;
+	rScore += (1 + ref2->getAvgQual()) * log((float)ref2->mem_length()) * 97;
+	if (thScore > rScore) {
+		//update best seed length score
+		if (curL > bestL) { this->setBestSeedLength(curL); }
+		return true;
+	}
+
+	return false;
+}
+
+void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, int sample_id, 
+	bool b_derep_as_fasta_){
+	dna->setDereplicated();
+	DNAuniMTX.lock();
+	// increment sample counter
+	incrementSampleCounter(sample_id);
+	if (!b_derep_as_fasta_) { // only improve qualities if we do not replace
+		sumQualities(dna);
+	}
+	// only replace old unique dna with new if it has good quality and its seed is better
+	// betterPreSeed makes sense with uparse/
+	if (dna->isGreenQual() && betterPreSeed(dna, dna2)) {
+		// Uparse does NOT use qualities for clustering, therefore we do not need to calculate average qualities for this dna object
+		// Lotus uses qualities for constructing taxonomy (therefore we do replace dna if theres a better quality read)
+		takeOverDNA(dna, dna2);
+	}
+	DNAuniMTX.unlock();
+}
 
 void DNAunique::incrementSampleCounter(int sample_id) {
 	if (sample_id < 0) {
 		return;
 	}
-	//DNAuniMTX.lock();
-	count_++;
+	//count_++;
 #ifdef _MAPDEREPLICATE
 	auto sample_counter = occurence.find(sample_id);
 	if (sample_counter == occurence.end()) {
@@ -1250,17 +1319,14 @@ void DNAunique::incrementSampleCounter(int sample_id) {
 		sample_counter->second++;
 	}
 #endif
-	//DNAuniMTX.unlock();
 }
 void DNAunique::incrementSampleCounterBy(int sample_id, long count) {
-	//DNAuniMTX.lock();
 	auto sample_counter = occurence.find(sample_id);
 	if (sample_counter == occurence.end()) {
 		occurence[sample_id] = count;
 	} else {
         sample_counter->second += count;
 	}
-	//DNAuniMTX.unlock();
 }
 /*vector<pair_<int, int>> DNAunique::getDerepMapSort2(size_t wh ){
 	typedef std::pair_<int, int> mypair;
@@ -1312,11 +1378,10 @@ bool DNAunique::pass_deprep_smplSpc(const vector<int>& cv) {
 
 
 void DNAunique::transferOccurence(const shared_ptr<DNAunique> dna_unique) {
-	//DNAuniMTX.lock();
 
 	if (occurence.size() == 0) {
 		occurence = dna_unique->occurence;
-        count_ = dna_unique->count_;
+        //count_ = dna_unique->count_;
 	} else {
 		//which sample contains this dna?
 		read_occ dereplication_map = dna_unique->getDerepMap();
@@ -1330,9 +1395,8 @@ void DNAunique::transferOccurence(const shared_ptr<DNAunique> dna_unique) {
 			}
 		}
 		//size track
-		count_ += dna_unique->count_;
+		//count_ += dna_unique->count_;
 	}
-	//DNAuniMTX.unlock();
 }
 
 
@@ -1374,17 +1438,17 @@ void DNAunique::writeMap(ofstream & os, const string &hd, vector<int> &counts_pe
 	}
 	os << endl;
 	
-	if (total_count != count_) {
+	/*if (total_count != count_) {
 		cerr << "Unequal counts in Map(" << total_count << ") and HeadCnt(" << count_ << "):" << endl << this->getId() << endl;
 		exit(82);
-	}
+	}*/
 }
 void DNAunique::Count2Head(bool usFmt) {
 	//string tmp = this->getShortId();
 	if (!usFmt) {
-        new_id_ += "_" + itos(count_);
+        new_id_ += "_" + itos(totalSum());
 	} else {
-        new_id_ += ";size=" + itos(count_) + ";";
+        new_id_ += ";size=" + itos(totalSum()) + ";";
 	}
     id_fixed_ = true;
 }
@@ -1400,7 +1464,6 @@ void DNAunique::takeOver(shared_ptr<DNAunique> const dna_unique_old, shared_ptr<
 }
 void DNAunique::takeOverDNA(shared_ptr<DNA> const dna_unique_old, shared_ptr<DNA> const dna2) {
 
-	//DNAuniMTX.lock();
 	
 	if (dna2 != nullptr) {
 		this->attachPair(make_shared<DNAunique>(dna2, -1));
@@ -1433,7 +1496,6 @@ void DNAunique::takeOverDNA(shared_ptr<DNA> const dna_unique_old, shared_ptr<DNA
 	
 	
 	this->saveMem();
-	//DNAuniMTX.unlock();
 }
 
 uint64_t * DNAunique::transferPerBaseQualitySum() {
@@ -1451,7 +1513,7 @@ void DNAunique::prepareDerepQualities(int ofastQver) {
 
     unsigned int i = 0;
     for (; i < length(); i++) {
-        int newbase = (int)round((double)quality_sum_per_base_[i]/(double)count_) + ofastQver;
+        int newbase = (int)round((double)quality_sum_per_base_[i]/(double)totalSum()) + ofastQver;
         qualities_avg_[i] = char(newbase);
     }
     qualities_avg_[i] = '\0';
@@ -2287,7 +2349,7 @@ shared_ptr<DNA> InputStreamer::getDNA(int pos){
 		return NULL;
 	}
 	shared_ptr<DNA> ret;
-	bool corrupt(true); //corrupt state isn't implemented for fnaread
+	bool corrupt(false); //corrupt state isn't implemented for fnaread
 	bool repairInStream(false);
 	if (isFasta) {//get DNA from fasta + qual_ files
 		vector<string>tmpStr(3, "");
@@ -2347,7 +2409,7 @@ shared_ptr<DNA> InputStreamer::getDNA(int pos){
 		getDNAlines(tmpLines,pos);
 		ret = str2DNA(tmpLines, keepPairHD, fastQver,pos);
 
-		if (!stillMore || fastq_istreams[pos]->eof() || (!*(fastq_istreams[pos])) ) {
+		if (!stillMore || fastq_istreams[pos]->eof() ) {
 			if (ret != NULL) { if (!ret->seal() || ret->isEmpty()) { ret = NULL; } } //delete ret;
 			stillMore = false;
 		} else if (ret == NULL || !ret->seal() || ret->isEmpty()) {

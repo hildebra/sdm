@@ -989,7 +989,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 
 		//OutputStreamer also contains subfilters for MC processing and logging of reads
 		shared_ptr<OutputStreamer> OutStreamer = make_shared<OutputStreamer>(filter, cmdArgs, 
-			writeStatus, RDSset, "", threads);
+			writeStatus, RDSset, threads,"");
 		OutStreamer->attachDereplicator(dereplicator);
 		OutStreamer->attachReadMerger(merger);
 		OutStreamer->setBPwrittenInSR(accumBPwrite);
@@ -1105,6 +1105,8 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
             ucl->finishUCfile(mainFilter, cmdArgs["-ucAdditionalCounts"], true);//with smplHead (.mid)
             ucl->finishUCfile(mainFilter, cmdArgs["-ucAdditionalCounts1"], false);//without smplHead (.rest)
         }
+
+
         if (cmdArgs["-ucAdditionalCounts_refclust"] != ""){
             //reference based clustering has some high qual_ seqs (no replacement with reads..)
             //takeOver even found high qual_ hits with these default seeds..
@@ -1136,7 +1138,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
         }
         //polished OTU seeds need to be written after OTU matrix (renaming scheme)
         shared_ptr<OutputStreamer> MDx = make_shared<OutputStreamer>(mainFilter, cmdArgs, 
-			ios::app, RDSset);
+			ios::app, RDSset,0);
 		vector<ReadMerger*> DerepM = vector<ReadMerger*>(1,NULL);
 		DerepM[0] = new ReadMerger(false);
 		MDx->attachReadMerger(DerepM);
@@ -1144,7 +1146,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
         ucl->writeNewSeeds(MDx, mainFilter, false);
         //new fastas also need to be written..
         MDx.reset(new OutputStreamer(mainFilter, cmdArgs, 
-			ios::app, RDSset, ".ref", 1));//force fna output
+			ios::app, RDSset,1,".ref"));//force fna output
         mainFilter->setMultiDNA(MDx );
         ucl->writeNewSeeds(MDx, mainFilter, true, true);
         //delete MDx;
