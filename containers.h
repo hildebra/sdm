@@ -723,6 +723,14 @@ class DNAuniqSet {
 public:
 	DNAuniqSet():bestDNU(nullptr), bestSet(false),totalCnts(0){}
 	~DNAuniqSet() {}
+	void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, 
+		int MrgPos1, int sample_id) {
+		dna->setMidQual(false); dna->setDereplicated();
+		shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
+		new_dna_unique->saveMem();
+		if (dna2 != nullptr) { new_dna_unique->attachPair(make_shared<DNAunique>(dna2, sample_id)); }
+		DNUs[MrgPos1] = new_dna_unique;
+	}
 	shared_ptr<DNAunique> &operator[] (int x) {
 		return DNUs[x];
 	}
@@ -745,12 +753,12 @@ public:
 		return bestDNU;
 	}
 
+	mutex lockMTX;
 private:
 	map<int, shared_ptr<DNAunique>> DNUs;
 	shared_ptr<DNAunique> bestDNU;
 	bool bestSet;
 	int totalCnts;
-	mutex lockMTX;
 };
 
 typedef robin_hood::unordered_node_map<string, DNAuniqSet> HashDNA;

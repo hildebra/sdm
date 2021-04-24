@@ -2044,27 +2044,34 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 	//HashDNA::iterator TrackerEnd = Tracker.end();
 	if (dna_unique1 != Tracker.end()) {// found something
 		new_insert = false;
+		dna_unique1->second.lockMTX.lock();
 		dna_unique = dna_unique1->second.find(MrgPos1);
 		//truly dereplicated? at least overlap should fit..
 		if (dna_unique == dna_unique1->second.end()) {
-			new_insert = true;
-		}
+			//new_insert = true;
+			dna_unique1->second.addNewDNAuniq(dna, dna2, MrgPos1, sample_id);
+		} else { // compare to existing DNA
+			dna_unique->second->matchedDNA(dna, dna2, sample_id, b_derep_as_fasta_);
+		} 
+		dna_unique1->second.lockMTX.unlock();//just to be on safe side, lock entire section
 	}
 	drpMTX.unlock_shared();//lock for hash
-    if (!new_insert) {// found something
-		dna_unique->second->matchedDNA(dna, dna2, sample_id, b_derep_as_fasta_);
-    } 
-	
+
 	if (new_insert && pass) {
+		drpMTX.lock(); 
+		Tracker[srchSeq].addNewDNAuniq(dna, dna2, MrgPos1, sample_id);
+		drpMTX.unlock();
         // Create new dna_unique object
 		//cdbg("set new DNAderep ");
-        dna->setMidQual(false); dna->setDereplicated();
+        /*
+		dna->setMidQual(false); dna->setDereplicated();
 		shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
         new_dna_unique->saveMem();
         if (dna2 != nullptr) {new_dna_unique->attachPair(make_shared<DNAunique>(dna2, sample_id));} 
 		drpMTX.lock();
 		Tracker[srchSeq][MrgPos1] = new_dna_unique;
 		drpMTX.unlock();
+		*/
     }
 	//drpMTX.unlock();
     return new_insert;//didn't do a thing..

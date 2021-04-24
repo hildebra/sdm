@@ -16,7 +16,7 @@ program_LIBRARY_DIRS := ${CPATH}
 program_LIBRARIES :=
 
 
-CPPFLAGS += -O1 -std=c++17 -lz -g
+CPPFLAGS += -O2 -std=c++17 -lz 
 CPPFLAGS += $(foreach includedir,$(program_INCLUDE_DIRS),-I$(includedir))
 LDFLAGS += -pthread $(foreach librarydir,$(program_LIBRARY_DIRS),-L$(librarydir))
 LDFLAGS += $(foreach library,$(program_LIBRARIES),-l$(library))

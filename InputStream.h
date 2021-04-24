@@ -94,7 +94,8 @@ bool fileExists(const std::string& name, int i=-1,bool extiffail=true);
 class ifbufstream {//: private std::streambuf, public std::ostream {
 public:
 	ifbufstream(const string& inF, size_t buf1=20000,bool test=false) :
-		file(inF),modeIO(ios::in),at(0),isGZ(false), atEnd(false), hasKickoff(false), bufS(buf1)
+		file(inF),modeIO(ios::in),at(0),isGZ(false), atEnd(false), hasKickoff(false), 
+		bufS(buf1), bufSW(buf1)
 	{
 		if (bufS < 10) {
 			cerr << "Buffer size chosen too small: " << bufS << endl << "class ifbufstream\n";
@@ -254,12 +255,15 @@ private:
 			if (keeperW != nullptr) { delete[] keeperW; }
 			keeperW = nullptr;
 			atEnd = true;
-			bufS = primary->gcount()+1;
+			//bufS = primary->gcount()+1;
 			//keeperW[XX] = char_traits<char>::eof();
 			return false;
 		}
 		input_mtx.lock();
 		primary->read(keeperW, bufS);	
+		if (!*(primary)) {
+			bufSW = primary->gcount() + 1;
+		}
 		input_mtx.unlock();
 		return true;
 	}
@@ -294,6 +298,7 @@ private:
 		char* tmp = keeper;
 		keeper = keeperW;
 		keeperW = tmp;
+		bufS=bufSW;//replace length of read string
 		//memcpy(keeper, keeperW, bufS);
 
 		at = 0;
@@ -310,10 +315,23 @@ private:
 	bool  isGZ, atEnd, hasKickoff;
 	istream* primary;
 	future<bool> readKickoff;
-	size_t bufS ;
+	size_t bufS, bufSW ;
 	mutex localMTX;
 	mutex input_mtx;
 };
+
+
+
+
+
+
+
+
+
+
+
+
+
 std::ptrdiff_t len_common_prefix_base(char const a[], char const b[]);
 //static mutex output_mtx;
 class ofbufstream {//: private std::streambuf, public std::ostream {
