@@ -4097,7 +4097,7 @@ void Filters::scanForBarcode(shared_ptr<DNA> d, int& start, int& stop, int& idx,
 
 void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_err,
 	int scanRegion, string& presentBC, bool fwdStrand) {
-	if (stop <= start) { return; }
+	if (d->length() < minBCLength1_) { return; }
     bool leaveFunction = false;
 
 
