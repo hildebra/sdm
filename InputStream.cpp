@@ -1198,9 +1198,7 @@ void DNA::setPassed(bool b){
         mid_quality_ = false;
 	}
 }
-int DNA::getBarcodeNumber() const {
-	return sample_id_;
-}
+
 
 void DNA::prepareWrite(int ofastQver) {
 	uint len = length();
@@ -2453,7 +2451,9 @@ void InputStreamer::openMIDseqs(string p,string in){
 
 	string file_type = "MID specific fastq";
 	string tmp = (p + in);
-	fastq_istreams[2] = new ifbufstream(tmp);
+	bool doMC = num_threads > 1;
+
+	fastq_istreams[2] = new ifbufstream(tmp,20000,doMC);
 	if (fastq_istreams[2]->eof()) {
 		cerr << "\nCouldn't find " << file_type << " " << tmp << "!\n Aborting..\n";		exit(4);
 	}
@@ -2584,11 +2584,13 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 
 	size_t bufS = 50000;
 
+	bool doMC = num_threads > 1;
+
 	//        INPUT   files
 	if (!p1.empty()){ // first file exists
 		file_type = "fastq file 1";
 		//setup buffer of different sizes for p1,p2 to avoid simultaneous read
-		fastq_istreams[0] = new ifbufstream(p1, bufS*0.8);
+		fastq_istreams[0] = new ifbufstream(p1, bufS*0.8, doMC);
 		if (fastq_istreams[0]->eof()){ 
 			cerr << "\nCouldn't find " << file_type << " " << p1 << "!\n Aborting..\n";		exit(4); 
 		}
@@ -2596,7 +2598,7 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 	//second pair_
 	if (!p2.empty()){
 		file_type = "fastq file 2";
-		fastq_istreams[1] = new ifbufstream(p2, bufS * 1.2);
+		fastq_istreams[1] = new ifbufstream(p2, bufS * 1.2, doMC);
 		if (fastq_istreams[1]->eof()) {
 			cerr << "\nCouldn't find " << file_type << " " << p2 << "!\n Aborting..\n";		exit(4);
 		}
@@ -2682,10 +2684,11 @@ bool InputStreamer::setupFastaQual(string path, string sequenceFile, string qual
 }
 bool InputStreamer::setupFastaQual2(string sequenceFile, string qualityFile, string fileType) {
 	string file_typeq = "quality file";
-	
+	int iBufS = 20000;
+	bool doMC = num_threads > 1;
 	//        INPUT   file
 	if (sequenceFile != "") { // sequence not empty
-		fasta_istreams[0] = new ifbufstream(sequenceFile.c_str());
+		fasta_istreams[0] = new ifbufstream(sequenceFile.c_str(), iBufS, doMC);
 
 		if (fasta_istreams[0]->eof()) {
 		    cerr << "\nCouldn't find " << fileType << " file \"" << sequenceFile << "\"!\n Aborting..\n";
@@ -2694,7 +2697,7 @@ bool InputStreamer::setupFastaQual2(string sequenceFile, string qualityFile, str
 	}
 	//quality file
 	if (!qualityFile.empty()) {
-		quality_istreams[0] = new ifbufstream(qualityFile);
+		quality_istreams[0] = new ifbufstream(qualityFile, iBufS,doMC);
 		if (quality_istreams[0]->eof()) {
 			cerr << "\nCouldn't find " << file_typeq << " file \"" << qualityFile << "\"!\n Running in no qual_ filter mode\n";
 			qualAbsent = true;

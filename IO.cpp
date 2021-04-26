@@ -132,22 +132,26 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	curFil->preFilterSeqStat(tdn[0], 0);
 	curFil->preFilterSeqStat(tdn[1], 1);
 
+
 	//prep some variables
 	int BCoffs = curFil->getBCoffset();
 	bool checkBC2ndRd = curFil->checkBC2ndRd();
 	bool dualBCs = curFil->doubleBarcodes();
 	bool doBCsAtAll = curFil->doBarcodes();
-	bool checkReversedRead = curFil->checkRevRd();
+	//bool checkReversedRead = curFil->checkRevRd();
 
 	int tagIdx(-2); int tagIdx2(-2);
 	string presentBC(""); int c_err(0);
 	bool isReversed(false);//was a reversion detected?
 
 	if (MIDuse && tdn[2] != nullptr) {
-		tagIdx = curFil->cutTag(tdn[2], presentBC, c_err, true); 
+		tagIdx = curFil->detectCutBC(tdn[2], presentBC, c_err, true); 
 //		delete tdn[2]; 
 		tdn[0]->setBCnumber(tagIdx, BCoffs);
 	}
+	//routine checks, and reverses/swaps DNA objects
+	bool reversedDNA = curFil->swapReverseDNApairs(tdn);
+
 
     if (checkBC2ndRd ) {
 		if (!dualBCs) {
@@ -157,14 +161,6 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 			int chkRev1(-1), chkRev2(-1);
 			tagIdx = curFil->findTag(tdn[0], presentBC, c_err, true, chkRev1);
 			tagIdx2 = curFil->findTag(tdn[1], presentBC, c_err, true, chkRev2);
-			if ( true &&checkReversedRead && (tagIdx2 < 0 && tagIdx < 0) ) {
-				tdn[0]->reverse_transcribe(); tdn[1]->reverse_transcribe();
-				Pr1 = curFil->findPrimer(tdn[0], 0, false, 0);
-				Pr2 = curFil->findPrimer(tdn[1], 0, false, 0);
-				tagIdx = curFil->findTag(tdn[0], presentBC, c_err, true, chkRev1);
-				tagIdx2 = curFil->findTag(tdn[1], presentBC, c_err, true, chkRev2);
-				revT = true;
-			}
 			if ((tagIdx2 >= 0 && tagIdx < 0 && !Pr1) || (Pr2 && !Pr1)) { //swap first & second read
 				swap(tdn[0], tdn[1]);
 				tdn[0]->constellationPairRev(true); tdn[1]->constellationPairRev(true);
@@ -188,53 +184,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	bool ch1(false); if (tdn[0] != NULL) { ch1 = tdn[0]->isGreenQual(); }
 	bool ch2(false); bool ch2n(false);
 
-	//this is all about barcodes..
-	if (checkReversedRead  && tdn[0] != NULL && tagIdx < 0) {
-		if (!MIDuse) { tagIdx = -2; }
-//		curFil->sTotalMinus(0);
-		tdn[0]->reverse_transcribe();
-		MD->analyzeDNA(tdn[0], -1, 0, tagIdx, curThread);
-		ch1 = tdn[0]->isGreenQual();
-		isReversed = ch1;
-		if (!isReversed) {//reset
-			tdn[0]->reverse_transcribe();
-		}
-	}
 
-	//test for reverse complemented reads (mohammad samples), when BC not found (NOT dual BC)
-	//in that case, this is the first read
-	if (false &&checkBC2ndRd && tagIdx < 0 && tdn[1] != NULL) {// && !tdn[0]->getBarcodeDetected() ) {
-											   //dnaTemp2->reverse_transcribe();
-		if (!MIDuse) { tagIdx = -2; }
-//		curFil->sTotalMinus(0);
-		MD->analyzeDNA(tdn[1], -1, 0, tagIdx, curThread);
-		ch2n = tdn[1]->isGreenQual();
-		if (!ch2n && checkReversedRead) {
-			if (!MIDuse) { tagIdx = -2; }
-//			curFil->sTotalMinus(0);
-			tdn[1]->reverse_transcribe();
-			MD->analyzeDNA(tdn[1], -1, 0, tagIdx, curThread);
-			ch2n = tdn[1]->isGreenQual();
-			isReversed = ch2n;
-			if (!ch2n) { tdn[1]->reverse_transcribe(); }//reset to ori
-		}
-		if (ch2n) {//passed ch2 through BC filter, now really reverse
-				   //1st, now 2nd pair_
-			tdn[1]->setpairFWD();
-			ch1 = ch2n;
-			if (tdn[0] != NULL) {
-				//tdn[0]->reverse_transcribe(); 
-				tdn[0]->setpairREV();
-				tdn[0]->reset();
-				if (!dualBCs) { tagIdx2 = tdn[0]->getBarcodeNumber(); } // no 2nd BC, thus no BC search in 2nd read
-				MD->analyzeDNA(tdn[0], -1, 1, tagIdx2, curThread);
-				ch2 = tdn[0]->isGreenQual();
-			}
-			swap(tdn[0], tdn[1]);
-			tdn[0]->reverse_transcribe(); tdn[1]->reverse_transcribe();
-		}
-
-	}
 
 	//if ( ch1 ) {	cerr << cnt << " \n";	}
 	//normal case for check 2nd read

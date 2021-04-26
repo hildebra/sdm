@@ -16,17 +16,19 @@ program_LIBRARY_DIRS := ${CPATH}
 program_LIBRARIES :=
 
 
-CPPFLAGS += -O2 -std=c++17 -lz 
+CPPFLAGS += -O1 -std=c++17 -g
 CPPFLAGS += $(foreach includedir,$(program_INCLUDE_DIRS),-I$(includedir))
+CXXFLAGS=-D__STDC_CONSTANT_MACROS
 LDFLAGS += -pthread $(foreach librarydir,$(program_LIBRARY_DIRS),-L$(librarydir))
 LDFLAGS += $(foreach library,$(program_LIBRARIES),-l$(library))
+LDLIBS += -lz
 
 .PHONY: all clean distclean
 
 all: $(program_NAME)
 
 $(program_NAME): $(program_OBJS)
-	$(LINK.cc) $(program_OBJS) -o $(program_NAME)
+	$(LINK.cc) $(program_OBJS) -o $(program_NAME) $(LDLIBS) -static
 
 clean:
 	@- $(RM) $(program_NAME)

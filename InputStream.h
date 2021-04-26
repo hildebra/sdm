@@ -93,9 +93,9 @@ bool fileExists(const std::string& name, int i=-1,bool extiffail=true);
 
 class ifbufstream {//: private std::streambuf, public std::ostream {
 public:
-	ifbufstream(const string& inF, size_t buf1=20000,bool test=false) :
+	ifbufstream(const string& inF, size_t buf1=20000,bool isMC=false,bool test=false) :
 		file(inF),modeIO(ios::in),at(0),isGZ(false), atEnd(false), hasKickoff(false), 
-		bufS(buf1), bufSW(buf1)
+		doMC(isMC),	bufS(buf1), bufSW(buf1)
 	{
 		if (bufS < 10) {
 			cerr << "Buffer size chosen too small: " << bufS << endl << "class ifbufstream\n";
@@ -160,6 +160,7 @@ public:
 		delete primary;
 		primary = new ifstream(file, modeIO);
 	}
+	void setMC(bool b) { doMC = b; }
 	bool eof() {
 		return atEnd && at >= bufS;
 	}
@@ -268,7 +269,7 @@ private:
 		return true;
 	}
 	bool kickOff() {
-		if (true ) {//do MC?
+		if (doMC) {//do MC?
 			if (!atEnd) {
 				assert(!hasKickoff);
 				//
@@ -312,7 +313,7 @@ private:
 	char* keeper; char* keeperW;
 	ios_base::openmode modeIO;
 	size_t at;
-	bool  isGZ, atEnd, hasKickoff;
+	bool  isGZ, atEnd, hasKickoff, doMC;
 	istream* primary;
 	future<bool> readKickoff;
 	size_t bufS, bufSW ;
@@ -337,12 +338,12 @@ std::ptrdiff_t len_common_prefix_base(char const a[], char const b[]);
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
 	ofbufstream(size_t bufferS):file("T"), modeIO(ios::app), used(0), usedW(0),
-		coutW(true), isGZ(false){
+		coutW(true), isGZ(false), doMC(false){
 		int x = 0;
 	}
-	ofbufstream(const string IF, int mif, size_t bufferS=20000) :
+	ofbufstream(const string IF, int mif, bool isMC=false, size_t bufferS=20000) :
 		file(IF), modeIO(mif), used(0), usedW(0),
-		coutW(false), isGZ(false),primary(nullptr), bufS(bufferS){
+		coutW(false), isGZ(false), doMC(isMC), primary(nullptr), bufS(bufferS){
 		
 		if (modeIO == ios::out) {
 			remove(file.c_str());
@@ -498,7 +499,7 @@ private:
         /**/
 		//multithreading via kickoff
 		usedW = used;
-		if (true && doKickoff){
+		if (doMC && doKickoff){
 			writeKickoff = async(std::launch::async, &ofbufstream::internalWrite, 
 				this, closeThis);
 			hasKickoff = true;
@@ -513,7 +514,8 @@ private:
 	char* keeperW;
 	int modeIO;
 	size_t used, usedW;
-	bool coutW, isGZ;
+	//write to cout? gzip input? do multicore?
+	bool coutW, isGZ, doMC;
 	ostream* primary;
 	
     size_t bufS;
@@ -754,8 +756,10 @@ public:
 	    }
 	}
 	
-	
-	int getBarcodeNumber() const;//always return BC tag IDX global (no local filter idx accounted for, use getBCoffset() to correct)
+	//always return BC tag IDX global (no local filter idx accounted for, use getBCoffset() to correct)
+	int getBarcodeNumber() const {
+		return sample_id_;
+	}
 
 	void prepareWrite(int fastQver);
 	void reset();

@@ -436,6 +436,8 @@ public:
 	void setMultiDNA(shared_ptr<OutputStreamer> m) { lMD = m; }
 	//stats... probably mutexed functions
 	bool doReversePrimers() { return bPrimerR; }
+	//routine checks, and reverses/swaps DNA objects
+	bool swapReverseDNApairs(vector< shared_ptr<DNA>>&);
 	void preFilterSeqStat(shared_ptr<DNA> d,int pair);
 //    void preFilterSeqStatMT(shared_ptr<DNA> d, data_MT *data, int pair_);
 	inline void updateMaxSeqL(int x);
@@ -497,7 +499,7 @@ public:
 	//return a vector that says entry x (from invec) corresponds to group y
 	vector<int> combiSmplConvergeVec(const vector<string>&);
 //public version of BC finder..
-	int cutTag(shared_ptr<DNA> d, string&, int&,bool);//returns id_, important for cutPrimer()
+	int detectCutBC(shared_ptr<DNA> d, string&, int&,bool);//returns id_, important for cutPrimer()
 	int findTag(shared_ptr<DNA> d, string&, int&, bool, 
 		int& revChecks);//returns id_, important for cutPrimer()
 	inline bool doubleBarcodes() { return bDoBarcode2; }
@@ -508,7 +510,7 @@ public:
 	bool findPrimer(shared_ptr<DNA> d, int primerID, bool, int);
 
 	//-1= no HIT; -5=reverse hits
-	int cutTag(shared_ptr<DNA> d, bool);//returns id_, important for cutPrimer()
+	int detectCutBC(shared_ptr<DNA> d, bool);//returns id_, important for cutPrimer()
 
 	// Multithreading
 	void setThreads(size_t threads) {
@@ -946,8 +948,11 @@ public:
 		string newHeader="",int curThread=0, bool elseWriteD1=false);
 //bool saveForWriteMT(shared_ptr<DNA> dna, int thread, int pair = 1);
 	Filters* getFilters(int w = -1) { 
-		if (w == -1) { return  MFil; 
-		} else { return subFilter[w]; } 
+		if (w <= -1) { return  MFil; 
+		} else { 
+			assert(w < subFilter.size());
+			return subFilter[w]; 
+		} 
 	}
 	int isPEseq() { return pairedSeq; }
 	//ofstream::app, ios_base::out
