@@ -892,13 +892,16 @@ void DNA::reset() {
 	this->resetTruncation();
 }
 
-void DNA::reverse_transcribe() {
+void DNA::reverse_transcribe(bool reset) {
 	reverseTS(sequence_);
 	std::reverse(qual_.begin(), qual_.end());
+    reversed_ = !reversed_;
+	if (!reset) {
+		return;
+	}
     accumulated_error_ = 0.; good_quality_ = false; mid_quality_ = false;
     avg_qual_ = -1.f; quality_sum_ = 0; tempFloat = 0.f;
     qual_traf_ = "";
-    reversed_ = !reversed_;
 	
 }
 

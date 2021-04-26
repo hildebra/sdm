@@ -712,7 +712,7 @@ public:
 	bool cutSeqPseudo(int start) { return cutSeq(start, -1, true); }
 	bool HomoNTRuns(int);
 	int matchSeq(string, int, int, int);
-	void reverse_transcribe();
+	void reverse_transcribe(bool reset=true);
 	int matchSeqRev(string, int, int, int=0);
 	int matchSeq_tot(string, int, int, int&);
 	void writeSeq(ostream&, bool singleLine = false);

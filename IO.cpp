@@ -150,7 +150,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 		tdn[0]->setBCnumber(tagIdx, BCoffs);
 	}
 	//routine checks, and reverses/swaps DNA objects
-	bool reversedDNA = curFil->swapReverseDNApairs(tdn);
+	//bool reversedDNA = curFil->swapReverseDNApairs(tdn);
 
 
     if (checkBC2ndRd ) {
@@ -217,16 +217,19 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 			exit(835);
 		}
 	}
-	else if (tagIdx >= 0) {
-		if (MIDuse&&ch1) { curFil->BCintoHead(tagIdx, tdn[0], presentBC, c_err, true); }
-		else { curFil->setBCdna(tagIdx, tdn[0]); }
-		if (ch2) { curFil->BCintoHead(tagIdx, tdn[1], presentBC, c_err, true); }
-	}
+	
 
 	
 	if (tagIdx == -1 || tagIdx2 == -1) {
 		tdn[0]->setBarcodeDetected(false);
 		tdn[1]->setBarcodeDetected(false);
+	}	else  {
+		curFil->setBCdna(tagIdx, tdn[0]);
+		if (ch2) { curFil->setBCdna(tagIdx, tdn[1]); }
+		if (MIDuse && ch1) {
+			curFil->BCintoHead(tagIdx, tdn[0], presentBC, c_err, true);
+			if (ch2) { curFil->BCintoHead(tagIdx, tdn[1], presentBC, c_err, true); }
+		}
 	}
 
 
@@ -847,8 +850,9 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 
 	//set up a read merger for each thread..
 	merger.resize(threads, nullptr);
+	bool detailedMergeStats(false);
 	for (int x = 0; x < threads; x++) {
-		merger[x] = new ReadMerger(true);
+		merger[x] = new ReadMerger(detailedMergeStats);
 	}
 
 

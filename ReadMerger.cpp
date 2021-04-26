@@ -387,7 +387,7 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 
 
 	if (read2->reversed_merge_) {
-		read2->reverse_transcribe();
+		read2->reverse_transcribe(false);
 	}
 	// This checks if there are dovetails. When read 2 is reverse transcribed and read1 is offset, 
 	//then the only constellation is that there are dovetails
@@ -556,7 +556,7 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 
 	//backtranslate to make sure correct read again
 	if (read2->reversed_merge_) {
-		read2->reverse_transcribe();
+		read2->reverse_transcribe(false);
 	}
 
 	//filter for Ns
