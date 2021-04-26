@@ -28,7 +28,7 @@ LDLIBS += -lz
 all: $(program_NAME)
 
 $(program_NAME): $(program_OBJS)
-	$(LINK.cc) $(program_OBJS) -o $(program_NAME) $(LDLIBS) -static
+	$(LINK.cc) $(program_OBJS) -o $(program_NAME) $(LDLIBS) 
 
 clean:
 	@- $(RM) $(program_NAME)
