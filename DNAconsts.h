@@ -103,7 +103,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif // _WIN32
 
 
-static const float sdm_version = 1.82f;
+static const float sdm_version = 1.83f;
 static const char* sdm_status = "beta";
 
 
