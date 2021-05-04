@@ -16,10 +16,10 @@ program_LIBRARY_DIRS := ${CPATH}
 program_LIBRARIES :=
 
 
-CPPFLAGS += -O1 -std=c++17 -g
+CPPFLAGS += -O3 -std=c++17 -lrt
 CPPFLAGS += $(foreach includedir,$(program_INCLUDE_DIRS),-I$(includedir))
 CXXFLAGS=-D__STDC_CONSTANT_MACROS
-LDFLAGS += -pthread $(foreach librarydir,$(program_LIBRARY_DIRS),-L$(librarydir))
+LDFLAGS +=   $(foreach librarydir,$(program_LIBRARY_DIRS),-L$(librarydir)) -pthread -Wl,--whole-archive -lpthread -Wl,--no-whole-archive
 LDFLAGS += $(foreach library,$(program_LIBRARIES),-l$(library))
 LDLIBS += -lz
 
@@ -28,7 +28,7 @@ LDLIBS += -lz
 all: $(program_NAME)
 
 $(program_NAME): $(program_OBJS)
-	$(LINK.cc) $(program_OBJS) -o $(program_NAME) $(LDLIBS) 
+	$(LINK.cc) $(program_OBJS) -o $(program_NAME) $(LDLIBS) -static
 
 clean:
 	@- $(RM) $(program_NAME)
