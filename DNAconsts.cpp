@@ -64,7 +64,10 @@ void ini_DNAconstants() {
     DNA_amb['c'] = 0;
     DNA_amb['g'] = 0;
     
-    memset(NT_POS, 5, 256);
+    for (int i = 0; i < 256; i++) {
+        NT_POS[i] = 5;
+    }
+//    memset(NT_POS, 5, 256);
     
     NT_POS['A'] = 0;
     NT_POS['T'] = 1;

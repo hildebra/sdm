@@ -3870,9 +3870,9 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 	int scanRegion=4; //dna region to scan for Tag sequence_
 	
 	if (!d->getTA_cut() && isPair1){//no technical adapter found / given by user: scan wider region for barcode
-		scanRegion = 16; //arbitary value
+		scanRegion = 22; //arbitary value
 	}
-	if (d->isMIDseq()){	
+	if (d->isMIDseq() || d->length() < scanRegion){
 		scanRegion = d->length() - minBCLength1_ + 1;
 	}
 
@@ -5353,8 +5353,8 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx){
 	dblTagFail += cs->dblTagFail;
 	DerepAddBadSeq += cs->DerepAddBadSeq;
 	total2 += cs->total2; totalSuccess += cs->totalSuccess;
-	PostFilt->addStats(cs->PostFilt);
-	PreFilt->addStats(cs->PreFilt);
+	PostFilt->addRepStats(cs->PostFilt);
+	PreFilt->addRepStats(cs->PreFilt);
 }
 
 void collectstats::reset(){
@@ -5513,31 +5513,31 @@ void ReportStats::printStats2(ostream& give, float remSeqs,int pair){
 }
 
 //add the stats from a different ReportStats object
-void ReportStats::addStats(const ReportStats& RepoStat){
+void ReportStats::addRepStats(const ReportStats* RepoStat){
 	//report stats:
-	rstat_NTs += RepoStat.rstat_NTs; rstat_totReads += RepoStat.rstat_totReads;
-	rstat_qualSum += RepoStat.rstat_qualSum;
-	rstat_accumError += RepoStat.rstat_accumError;
+	rstat_NTs += RepoStat->rstat_NTs; rstat_totReads += RepoStat->rstat_totReads;
+	rstat_qualSum += RepoStat->rstat_qualSum;
+	rstat_accumError += RepoStat->rstat_accumError;
 	for ( uint i = 0; i < 6; i++ ) {
-		QperNT[i] += RepoStat.QperNT[i];
-		NTcounts[i] += RepoStat.NTcounts[i];
+		QperNT[i] += RepoStat->QperNT[i];
+		NTcounts[i] += RepoStat->NTcounts[i];
 	}
 	if (bMedianCalcs){
 		//vectors for median calcs
-		if (rstat_VQmed.size() < RepoStat.rstat_VQmed.size()){
-			rstat_VQmed.resize(RepoStat.rstat_VQmed.size(),0);
+		if (rstat_VQmed.size() < RepoStat->rstat_VQmed.size()){
+			rstat_VQmed.resize(RepoStat->rstat_VQmed.size(),0);
 			assert(rstat_VQmed.size() < 10000);
 		}
-		for (unsigned int i=0; i<RepoStat.rstat_VQmed.size(); i++){
-			rstat_VQmed[i] += RepoStat.rstat_VQmed[i];
+		for (unsigned int i=0; i<RepoStat->rstat_VQmed.size(); i++){
+			rstat_VQmed[i] += RepoStat->rstat_VQmed[i];
 		}
-		if (rstat_VSmed.size() < RepoStat.rstat_VSmed.size()){
-			rstat_VSmed.resize(RepoStat.rstat_VSmed.size(),0);
+		if (rstat_VSmed.size() < RepoStat->rstat_VSmed.size()){
+			rstat_VSmed.resize(RepoStat->rstat_VSmed.size(),0);
 			//times change.. wrong assert here
 			//assert(rstat_VSmed.size() < 10000);
 		}
-		for (unsigned int i=0; i<RepoStat.rstat_VSmed.size(); i++){
-			rstat_VSmed[i] += RepoStat.rstat_VSmed[i];
+		for (unsigned int i=0; i<RepoStat->rstat_VSmed.size(); i++){
+			rstat_VSmed[i] += RepoStat->rstat_VSmed[i];
 		}
 	}
 }

@@ -397,6 +397,7 @@ DNA::DNA(vector<string> fas):DNA() {
 	uint lsize = fas[1].length();
 	vector<qual_score> Iqual(lsize, 11);
 	if (fas[2].length() > 0) {
+		tqual = fas[2];
 		rtrim(tqual);
 		const char* lQ = tqual.c_str();
 		uint ii(0);
@@ -505,6 +506,7 @@ int DNA::numNonCanonicalDNA(bool all) {
 }
 int DNA::numACGT(){
 	int DNAch = 0;
+	uint maxL = length();
 	for (unsigned int i = 0; i < length(); i++){
 		DNAch += DNA_amb[(int) sequence_[i]];
 	}

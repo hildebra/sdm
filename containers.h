@@ -157,7 +157,7 @@ public:
 	ReportStats(bool MedianDo) :
 		bMedianCalcs(MedianDo), rstat_totReads(0), rstat_NTs(0), rstat_qualSum(0),
 		rstat_Qmed(0), rstat_Smed(0), RSQS(0.f), USQS(0.f), rstat_accumError(0.f),
-		QperNT(1000, 0), NTcounts(1000, 0),
+		QperNT(6, 0), NTcounts(6, 0),
 		rstat_VQmed(0), rstat_VSmed(0)
 	{}
 	ReportStats() :
@@ -190,17 +190,21 @@ public:
 
 	// TEST IF PRODUCES SAME RESULTS
 	void addNtSpecQualScores(shared_ptr<DNA> dna) {
-        size_t sql = dna->getSequence().length();
+       
+		size_t sql = dna->getSequence().length();
+		/*
 
         if (QperNT.size() < sql) {
             QperNT.resize(sql,0);
         }
         if (NTcounts.size() < sql) {
             NTcounts.resize(sql,0);
-        }
+        }*/
+		vector<qual_score> quals = dna->getQual();
+		string seq = dna->getSequence();
         for (uint i = 0; i < sql; i++ ) {
-            short p = NT_POS[(int) dna->getSequence()[i]];
-            QperNT[p] += dna->getQual()[i];
+            short p = NT_POS[(int) seq[i]];
+            QperNT[p] += (long)quals[i];
             NTcounts[p]++;
         }
 	}
@@ -209,7 +213,7 @@ public:
 	unsigned int highest(const vector<uint>& in);
 	void printStats2(ostream& give, float remSeqs, int pair);
 	void printGCstats(ostream& give);
-	void addStats(const ReportStats&);
+	void addRepStats(const ReportStats*);
 	bool bMedianCalcs;
 	const vector<unsigned int> &get_rstat_Vmed(int x) {
 		if (x == 1) { return rstat_VQmed; }
