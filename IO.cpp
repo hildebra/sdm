@@ -25,7 +25,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //#include "IOMultithreaded.h"
 
 
-void read_single(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, shared_ptr<InputStreamer> IS){
+/*void read_single(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, 
+	shared_ptr<InputStreamer> IS, int Nthreads){
+	cdbg("Read single routine\n");
+
 	Filters* curFil = MD->getFilters();
     curFil->singReadBC2();
     int chkDerep(0);
@@ -58,7 +61,7 @@ void read_single(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, shared_pt
 /*			if (tagIdx < 0) { //check if on reversed_ read
 				dnaTemp1->reverse_transcribe();
 				tagIdx = curFil->findTag(dnaTemp1, presentBC, c_err, true);
-			}*/
+			}
             
             if (chkRev==0) {//no? undo revTranscr
 				tdn[0]->reverse_transcribe();
@@ -91,8 +94,8 @@ void read_single(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, shared_pt
 	}
 	MD->closeOutStreams();
 }
-
-
+*/
+//converts str to DNA
 bool read_paired_STRready(vector< vector< string>> tmpLines,
 	bool MIDuse, shared_ptr<OutputStreamer> MD, int curThread, 
 	bool keepPairHd, qual_score FastqVer ) {
@@ -105,7 +108,6 @@ bool read_paired_STRready(vector< vector< string>> tmpLines,
 
 	return read_paired_DNAready(ret, MIDuse, MD, curThread);
 }
-static mutex testreadpair;
 //is called from a while loop, that reads the DNA pairs
 bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	bool MIDuse, shared_ptr<OutputStreamer> MD, int curThread) {
@@ -118,7 +120,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 		cerr << "Missing MID read pair.\n";
 		exit(4);
 	}
-	if (tdn[1] == nullptr && tdn[0] != nullptr) {
+	if (tdn[1] == nullptr && tdn[0] != nullptr && MD->isPEseq() == 2) {
 		cerr << "Second provided file has not the same number of entries as first file.\n";
 		exit(5);
 	}
@@ -188,7 +190,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 	//if ( ch1 ) {	cerr << cnt << " \n";	}
 	//normal case for check 2nd read
-	if (!ch2 && tdn[1] != NULL) { //ch1&&
+	if (!ch2 && tdn[1] != nullptr) { //ch1&&
 								//dnaTemp2->setBCnumber(tdn[0]->getBarcodeNumber());
 		if (doBCsAtAll && !dualBCs) { //only check in read1 for BC, if not dual BCing!!
 			tagIdx2 = tdn[0]->getBarcodeNumber();  // no 2nd BC, thus no BC search in 2nd read
@@ -222,7 +224,9 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	
 	if (tagIdx == -1 || tagIdx2 == -1) {
 		tdn[0]->setBarcodeDetected(false);
-		tdn[1]->setBarcodeDetected(false);
+		if (tdn[1] != nullptr) {
+			tdn[1]->setBarcodeDetected(false);
+		}
 	}	else  {
 		curFil->setBCdna(tagIdx, tdn[0]);
 		if (ch2) { curFil->setBCdna(tagIdx, tdn[1]); }
@@ -982,15 +986,16 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		//heavy reading routine
 		//**********************
 		
-		if (OutStreamer->isPEseq() == 2) {
+		//if (OutStreamer->isPEseq() == 2 || true) {
+		//completely switch to this routine to reduce maintenance workload
 			read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
-		}else {
-			read_single(cmdArgs, OutStreamer, IS);
+		//}else {
+			//read_single(cmdArgs, OutStreamer, IS, threads);
 			/*if (threads == 1) {
 			}	else if (threads >= 2) {
 				readSingleTp(cmdArgs, OutStreamer, IS, pool);
 			}*/
-		}
+		//}
 		//debug
 		//std::cout << "asdlkjsdlkjsad> " << filter->statistics_[0].main_read_stats_[0]->total << std::endl;
 		

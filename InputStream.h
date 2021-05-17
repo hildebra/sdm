@@ -174,7 +174,7 @@ public:
 		}
 	}
 	//specific function that gets fasta line looking for pattern '\n>'
-	bool getlines(string& ret,int & linesRead) {
+	bool getlines(string& ret,int & linesRead, bool nwlRspace=false) {
 		ret.clear();
 		if (atEnd && at >= bufS) {
 			return false;
@@ -189,6 +189,9 @@ public:
 			switch (c) {
 			case '\n':
 				linesRead++;
+				if (nwlRspace) {
+					ret += ' ';
+				}
 				if (keeper[at] == '>') {
 					return true;
 				}
@@ -196,6 +199,9 @@ public:
 			case '\r':
 				if (keeper[at] == '\n') {
 					linesRead++;
+					if (nwlRspace) {
+						ret += ' ';
+					}
 					at += 1;
 					if (at < bufS && keeper[at] == '>') {
 						return true;

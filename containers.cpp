@@ -611,6 +611,7 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 	if (!this->Demulti2Fls()) {
 		return;
 	}
+	
 	bool demultFini = demultiBPperSR > 0 && BPwrittenInSR > demultiBPperSR;
 	bool demultMrgFini = demultiBPperSR > 0 && BPwrittenInSRmerg > demultiBPperSR;
 	if (demultFini && demultMrgFini) {
@@ -622,11 +623,14 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 		return;
 	}
 	bool green1(d1->isGreenQual());
-	bool green2(d2->isGreenQual());
+	bool green2(false);
+	if (d2 != nullptr) {
+		green2 = d2->isGreenQual();
+	}
 	bool mergeWr(false);
 
-
-	if ((green1 || green2) && b_merge_pairs_demulti_ && d1->merge_seed_pos_ > 0) {
+	//merging attempts/prep, requires paired reads
+	if (this->isPEseq() ==2 && (green1 || green2) && b_merge_pairs_demulti_ && d1->merge_seed_pos_ > 0) {
 		shared_ptr<DNA> dna_merged = merger[curThread]->merge(d1, d2);
 		if (dna_merged) {
 			// write out merged DNA

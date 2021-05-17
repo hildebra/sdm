@@ -2314,7 +2314,7 @@ void InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 		lnCnt[pos] += lnRd;
 		if (quality_istreams[pos] != nullptr) {
 			stillMore = quality_istreams[pos]->getline(ret[2]);//qual
-			stillMore = quality_istreams[pos]->getlines(ret[2], lnRd);//qual
+			stillMore = quality_istreams[pos]->getlines(ret[2], lnRd, true);//qual
 		}
 	}
 	else {
