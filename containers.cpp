@@ -3578,7 +3578,7 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 			d->QualCtrl.MaxAmb = true; //statAddition.MaxAmb++;
 			d->failed(); return false;
 		} else {
-			d->isYellowQual();
+			d->setMidQual(true);
 		}
 	}
 	if (maxHomonucleotide!=0 && !d->HomoNTRuns(maxHomonucleotide)){
