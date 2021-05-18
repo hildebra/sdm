@@ -357,6 +357,7 @@ string detectSeqFmt(const string inF) {
 	*/
 
 void DNA::fixQ0(void) {
+	return;//still depends on sequencer what is actually returned..
 	for (uint i = 0; i < qual_.size(); i++) {
 		if (qual_[i] <= 0) {
 			sequence_.replace(i, 1, "N");
@@ -1121,7 +1122,7 @@ string DNA::writeFastQ(bool newHD) {
 	} else {
 		ret += "@" + id_ + "\n";
 	}
-	ret += sequence_.substr(0, length()) + "\n";
+	ret += sequence_.substr(0, this->length()) + "\n";
 	ret += "+\n" ;//new_id_<<endl;
 	//char* qual_traf_ = new char[qual_.size()+1];
 	ret += qual_traf_ + "\n";

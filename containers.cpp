@@ -295,6 +295,10 @@ OutputStreamer::OutputStreamer(Filters* fil, OptContainer& cmdArgs,
 	}
 	setSubfilters(Nthrds);
 
+	if (this->pairedSeq != 2) {
+		onlyCompletePairsDemulti = false;
+	}
+
 	//threads = futures(num_threads);
 	//if (pairedSeq){cerr<<"paired MFil\n";}
 }
@@ -630,7 +634,8 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 	bool mergeWr(false);
 
 	//merging attempts/prep, requires paired reads
-	if (this->isPEseq() ==2 && (green1 || green2) && b_merge_pairs_demulti_ && d1->merge_seed_pos_ > 0) {
+	if (this->isPEseq() == 2 && 
+		(green1 || green2) && b_merge_pairs_demulti_ && d1->merge_seed_pos_ > 0) {
 		shared_ptr<DNA> dna_merged = merger[curThread]->merge(d1, d2);
 		if (dna_merged) {
 			// write out merged DNA
@@ -3568,9 +3573,12 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 	int ambNTs = d->numACGT();
 	if (MaxAmb!=-1 && ambNTs > MaxAmb){
 		d->QualCtrl.MaxAmb = true;
+		
 		if (alt_MaxAmb!=-1 && ambNTs>= alt_MaxAmb){
 			d->QualCtrl.MaxAmb = true; //statAddition.MaxAmb++;
 			d->failed(); return false;
+		} else {
+			d->isYellowQual();
 		}
 	}
 	if (maxHomonucleotide!=0 && !d->HomoNTRuns(maxHomonucleotide)){
