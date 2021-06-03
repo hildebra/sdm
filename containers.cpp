@@ -1524,12 +1524,7 @@ void OutputStreamer::closeOutStreams(bool wr){
 #endif
 
 }
-/*void OutputStreamer::resetOutStreams(){
-	if(qFile){qFile.seekp(qFilePos);}if(sFile){sFile.seekp(sFilePos);}if(fqFile){fqFile.seekp(fqFilePos); }
-	if(qFile2){qFile2.seekp(qFile2Pos);}if(sFile2){sFile2.seekp(sFile2Pos);}if(fqFile2){fqFile2.seekp(fqFile2Pos); }
-	if(qFileS){qFileS.seekp(qFileSPos);}if(sFileS){sFileS.seekp(sFileSPos);}if(fqFileS){fqFileS.seekp(fqFileSPos); }
-	if(qFileS2){qFileS2.seekp(qFileS2Pos);}if(sFileS2){sFileS2.seekp(sFileS2Pos);}if(fqFileS2){fqFileS2.seekp(fqFileS2Pos); }
-}*/
+
 void OutputStreamer::openOFstream(const string opOF, std::ios_base::openmode wrMode, int p1, int p2, string errMsg, bool onlyPrep, int wh) {
 	switch (wh) {
 	case 1:
@@ -1563,11 +1558,6 @@ void OutputStreamer::openOFstreamFQ(const string opOF, std::ios_base::openmode w
 	}
 	bool doMC = Nthrds > 1;
 
-	//if ((int)fqFileStr.size() - 1 <= p1) {		fqFileStr.resize(p1 + 1, vector<string>(4, ""));	}
-	//fqFileStr[p1][p2] = opOF;
-	//if (onlyPrep) { return; }
-	//if (p1 == 1 && !b_writeYellowQual ){ return; }//p1==1: mid passed suppressOutWrite >= 2
-	//if (p1 == 0 && !b_writeGreenQual){ return; }//suppressOutWrite == 1
 	fqFile[p1][p2] = new ostr(opOF, wrMode,doMC);
 	if (!onlyPrep) {
 		fqFile[p1][p2]->activate();
@@ -1780,6 +1770,7 @@ void OutputStreamer::openOutStreams(OptContainer& cmdArgs,int fileIt,
 			if (cmdArgs.find("-o_fastq2") != cmdArgs.end() && cmdArgs["-o_fastq2"].length()>1) { //write fastq
 				openOFstreamFQ(applyFileIT(cmdArgs["-o_fastq2"] + fileExt, fileIt).c_str(), wrMode, 1, 0, "the additional");
 			}
+			else { b_writeYellowQual = false; }
 		}
 
 		return;
@@ -1922,7 +1913,7 @@ void DNAuniqSet::setBest() {
 Dereplicate::Dereplicate(OptContainer& cmdArgs, Filters* mf):
         barcode_number_to_sample_id_(0), b_usearch_fmt(true), b_singleLine(true), b_pairedInput(false),
         minCopies(1,0), minCopiesStr("0"), //default minCopies accepts every derep
-		totSize(0), tmpCnt(0), curBCoffset(0), b_derep_as_fasta_(true), b_derepPerSR(false),
+		tmpCnt(0), curBCoffset(0), b_derep_as_fasta_(true), b_derepPerSR(false),
 		b_wroteMapHD(false), b_merge_pairs_derep_(false),merger(nullptr),
 		mapF(""), outHQf(""), outHQf_p2(""), outRest(""),
 		mainFilter(mf)
@@ -2110,7 +2101,8 @@ void Dereplicate::BCnamesAdding(Filters* fil) {
 void Dereplicate::reset() {
 //	for (size_t i = 0; i < Dnas.size(); i++) { delete Dnas[i]; }
 //	Dnas.resize(0);
-	totSize = 0; tmpCnt = 0;
+	//passedSize = 0; 
+	tmpCnt = 0;
 	//barcode_number_to_sample_id_.resize(0);
 	Tracker.clear();
 }
@@ -2121,7 +2113,8 @@ bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r) {
 void Dereplicate::finishMap() {
 	//at this point we can onl be sure that barcode_number_to_sample_id_ is finished
 	//hence now it the point to add this to map
-	totSize = 0; tmpCnt = 0;
+	//passedSize = 0; 
+	tmpCnt = 0;
 	Tracker.clear();
 	std::ifstream inputFile(mapF.c_str(),ios::in);
 	std::ofstream outputFile((mapF+"t").c_str(), ios::out);
@@ -2234,12 +2227,13 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	}
 //	bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r) {	return l->getCount() < r->getCount();}
 	sort(dereplicated_dnas.begin(), dereplicated_dnas.end() , DNAuPointerCompare);
-	totSize = 0; size_t passed_hits(0);
+	size_t passedSize = 0; size_t notPassedSize = 0; size_t passed_hits(0);
 	//bool thrHit = false;
 
 	//sanity check
 	vector<int> counts_per_sample(barcode_number_to_sample_id_.size(), 0);
 	int total_count(0);
+	int passed_count(0);
 	ofstream* derepNowOut;
 	//print unique DNAs
 	for (size_t i = 0; i < dereplicated_dnas.size(); i++) {
@@ -2253,7 +2247,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 			//we do have a real derep that needs to be clustered..
 			
 			passed_hits++;
-			totSize += dna->totalSum();
+			passedSize += dna->totalSum();
 
 			//only do merge here, because these are known good dereps already
 			if (b_merge_pairs_derep_ && dna->merge_seed_pos_ >= 0) {
@@ -2261,6 +2255,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 			}
 			derepNowOut = &of;
         } else {
+			notPassedSize += dna->totalSum();
 			//dna->writeSeq(ofRest, b_singleLine);
 			derepNowOut = &ofRest;
 		}
@@ -2304,20 +2299,26 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 			}
 		}
 	}
-//	if (tmpCnt != totSize) {
-//		cerr << "Counting failed\n" << tmpCnt << " " << totSize<<endl;
+//	if (tmpCnt != passedSize) {
+//		cerr << "Counting failed\n" << tmpCnt << " " << passedSize<<endl;
 //	}
 	of.close(); omaps.close();  ofRest.close();
-	float avgSize = (float)totSize / (float)(passed_hits);
+	float avgSize = (float)passedSize / (float)(passed_hits);
 	string report = "";
-	report += "Dereplication:\nAccepted " + intwithcommas((int)passed_hits) + " unique sequences ( "
-              + itos(total_count) + " counts, " + minCopiesStr;
-	if (dereplicate_sample_specific) { report += " & sample specific restrictions"; }
-	report += " )";
-	if (passed_hits > 0) {
-		report += "; average size in this set is " + ftos(avgSize) + ".\nUniques with insufficient abundance : " + intwithcommas(int(Tracker.size() - passed_hits)) + " not passing derep conditions\n";
+	string N_notPassed = intwithcommas(int(Tracker.size() - passed_hits));
+	string N_total = intwithcommas(int(Tracker.size() ));
+	string N_passed = intwithcommas((int)passed_hits);
+	report += "Dereplication: " + N_passed +
+		" unique sequences (avg size " + ftos(avgSize, 2) + ", "+ intwithcommas(passedSize) + " counts)\n";
+	
+		if (passed_hits > 0) {
+		report += N_notPassed + "/" + N_total + " not passing derep conditions (" + intwithcommas(notPassedSize) + " counts, "+ minCopiesStr;
+		if (dereplicate_sample_specific) { report += " & sample specific restrictions"; }
+	report += ")";
 	}
-	//cerr << tmpCnt << endl;
+
+		
+		
 	cerr << "\n" << report << endl << endl;
 	if (this->b_derepPerSR) {
 		return report;
@@ -3515,9 +3516,6 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
 			}
 		}
 	}
-	if (check_lengthXtra(d)){
-		d->failed(); return false;
-	}
 
 	//if seq needs to be cut, than here
 	if (TruncSeq>0){
@@ -4311,7 +4309,7 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d,int primerID,bool RC){
 	if (d->QualCtrl.PrimerRevFail) {
 		return false;
 	}
-	if (d->getRevPrimCut()){
+	if (d->getRevPrimCut() || PrimerR.size()==0){
 		return true;
 	}
 

@@ -64,9 +64,9 @@ std::string itos(int number) {
 	ss << number;
 	return ss.str();
 }
-std::string ftos(float number) {
+std::string ftos(float number,int digits) {
 	std::stringstream ss;
-	ss << number;
+	ss << std::setprecision(digits)<< number;
 	return ss.str();
 }
 bool isGZfile(const string fi) {

@@ -239,20 +239,22 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 
 	int idx1 = 1; int idx2 = 2;
-	if (ch1 && !ch2) {
-		idx1 = 3; idx2 = 4;
-		if (tdn[1] != NULL) { tdn[1]->failed(); }
-		//		delete dnaTemp2;
-	}
-	else if (ch2 && !ch1) {
-		idx2 = 4; idx1 = 3;
-		if (tdn[0] != NULL) { tdn[0]->failed(); }
-		//		delete tdn[0];
-	}
-	else if (!ch1 && !ch2) { //nothing passes
-		if (tdn[0] != NULL) { tdn[0]->failed(); }
-		if (tdn[1] != NULL) { tdn[1]->failed(); }
-		//		delete tdn[0]; delete dnaTemp2;
+	if (MD->isPEseq() == 2) {
+		if (ch1 && !ch2) {
+			idx1 = 3; idx2 = 4;
+			if (tdn[1] != NULL) { tdn[1]->failed(); }
+			//		delete dnaTemp2;
+		}
+		else if (ch2 && !ch1) {
+			idx2 = 4; idx1 = 3;
+			if (tdn[0] != NULL) { tdn[0]->failed(); }
+			//		delete tdn[0];
+		}
+		else if (!ch1 && !ch2) { //nothing passes
+			if (tdn[0] != NULL) { tdn[0]->failed(); }
+			if (tdn[1] != NULL) { tdn[1]->failed(); }
+			//		delete tdn[0]; delete dnaTemp2;
+		}
 	}
 
 	//pre-merge step

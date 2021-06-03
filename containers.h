@@ -812,7 +812,7 @@ private:
 	vector<int> minCopies;
 	size_t minCopiesSiz;
 	string minCopiesStr;
-	int totSize;
+	//int passedSize;
 	int tmpCnt;
 	int curBCoffset;
 	// Output as fasta or fastq

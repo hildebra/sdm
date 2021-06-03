@@ -53,7 +53,7 @@ int digitsInt(int x);
 int digitsFlt(float x);
 string intwithcommas(int value);
 std::string itos(int number);
-std::string ftos(float number);
+std::string ftos(float number, int digits=4);
 bool isGZfile(const string fileS);//test if file is gzipped input
 
 
