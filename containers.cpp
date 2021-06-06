@@ -2309,10 +2309,10 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	string N_total = intwithcommas(int(Tracker.size() ));
 	string N_passed = intwithcommas((int)passed_hits);
 	report += "Dereplication: " + N_passed +
-		" unique sequences (avg size " + ftos(avgSize, 2) + ", "+ intwithcommas(passedSize) + " counts)\n";
+		" unique sequences (avg size " + ftos(avgSize, 2) + "; "+ intwithcommas(passedSize) + " counts)\n";
 	
 		if (passed_hits > 0) {
-		report += N_notPassed + "/" + N_total + " not passing derep conditions (" + intwithcommas(notPassedSize) + " counts, "+ minCopiesStr;
+		report += N_notPassed + "/" + N_total + " not passing derep conditions (" + intwithcommas(notPassedSize) + " counts; "+ minCopiesStr;
 		if (dereplicate_sample_specific) { report += " & sample specific restrictions"; }
 	report += ")";
 	}

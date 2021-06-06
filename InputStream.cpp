@@ -435,7 +435,7 @@ DNA::DNA(vector<string> fq, qual_score fastQver):DNA(){
 	this->setHeader(fq[0].substr(1));
 	sequence_ = fq[1];
 	sequence_length_ = sequence_.size();
-	if (fq[2] != "+") {
+	if (fq[2][0] != '+') {
 		cerr<<"Error input line " + fq[2] + ": Could not find \'+\' when expected (file likely corrupt, aborting):\n" + fq[0];// << endl;
 		delself();
 		return;
