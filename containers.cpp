@@ -6211,7 +6211,7 @@ bool UClinks::getUCFlineInfo(string& segs, string& segs2,float& perID,
 			} else {//cluster exists
 				curCLID[kk] = ((*itCL).second);
 			}
-			bestDNA[curCLID[kk]]->totalSum();
+			//bestDNA[curCLID[kk]]->totalSum();
 #ifdef matrix_sum
 			if ( addFromHDstring ) {
 				//cerr << segs << "\t" << segs2 << endl;

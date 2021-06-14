@@ -188,6 +188,9 @@ public:
 			at++;
 			switch (c) {
 			case '\n':
+				if (at >= bufS && !readChunk()) {
+					return false;// read next chunk already
+				}
 				linesRead++;
 				if (nwlRspace) {
 					ret += ' ';
@@ -197,12 +200,18 @@ public:
 				}
 				break;
 			case '\r':
+				if (at >= bufS && !readChunk()) {
+					return false;// read next chunk already
+				}
 				if (keeper[at] == '\n') {
 					linesRead++;
 					if (nwlRspace) {
 						ret += ' ';
 					}
 					at += 1;
+					if (at >= bufS && !readChunk()) {
+						return false;// read next chunk already
+					}
 					if (at < bufS && keeper[at] == '>') {
 						return true;
 					}
@@ -941,10 +950,12 @@ public:
 	void incrementSampleCounter(int sample_id);
 	void writeMap(ofstream & os, const string&, vector<int>&, const vector<int>&);
 	//inline int getCount() { return count_; }
-	int totalSum() { int ret(0); 
-	for (auto xx : occurence) { ret += xx.second; } 
-	if (ret == 0) { ret = 1; }
-	return ret; }
+	int totalSum() { 
+		int ret(0); 
+		for (auto xx : occurence) { ret += xx.second; } 
+		if (ret == 0) { ret = 1; }
+		return ret; 
+	}
 	uint getBestSeedLength() { return best_seed_length_; }
 	void setBestSeedLength(uint i) { best_seed_length_ = i; }//DNAuniMTX.lock(); DNAuniMTX.unlock();}
 	void incrementSampleCounterBy(int sample_id, long count);
