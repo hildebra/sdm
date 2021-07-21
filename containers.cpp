@@ -1053,7 +1053,10 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair, int thr) {
 		else {
 			return !stopAll;
 		}
+	} else {
+		d->prepareWrite(fastQoutVer);
 	}
+	
 	//sqfqostrMTX.lock();
 	if (BWriteFastQ) {//write in fastq format
 		*fqFile[Cstream][Pair-1] << d->writeFastQ();
@@ -2996,6 +2999,9 @@ Filters* Filters::filterPerBCgroup(const vector<int> idxi) {
 	cdbg("filterPerBCgroup::check 4 doubles\n");
 	//sanity check no double barcodes..
 	filter->checkDoubleBarcode();
+	filter->singReadBC2();
+
+
 	return filter;
 }
 
@@ -3463,8 +3469,9 @@ bool Filters::check(shared_ptr<DNA> d, bool doSeeding, int pairPre,
 }
 //DNA qual_ check, and some extra parameters
 //should be safe to call from different threads
-bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx) {
-
+bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, 
+	int &tagIdx) {
+	int tagIdx2(-2);
 	unsigned int hindrance = 0;
 	int pair = max(0, pairPre);//corrects for -1 (undefined pair_) to set to 0
 	
@@ -3677,15 +3684,18 @@ bool Filters::remove_adapter(shared_ptr<DNA> d){ //technical adapter
 	return true;
 }
 //only identifies based on dual BCding
-void Filters::dblBCeval(int& tagIdx, int& tagIdx2, string presentBC, shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2) {
+void Filters::dblBCeval(int& tagIdx, int& tagIdx2, string presentBC, 
+	shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2) {
 	//bool BCfail = false;// , BCfail2 = false;
-	if ( tagIdx < 0 || tagIdx2 < 0 || !tdn->getBarcodeDetected() || !tdn2->getBarcodeDetected()) {
+
+	if ( tagIdx < 0 || tagIdx2 < 0 || !tdn->getBarcodeDetected() || 
+		(tdn2 != nullptr && !tdn2->getBarcodeDetected()) ) {
 		tagIdx = -1; tagIdx2 = -1;
-		if (tdn != NULL) { 
+		if (tdn != nullptr) {
 			tdn->setPassed(false); /*BCfail = true; */
 			tdn->setBCnumber(tagIdx, BCoffset); tdn->setMidQual(false);
 		} 
-		if (tdn2 != NULL) { tdn2->setPassed(false); tdn2->setMidQual(false); tdn2->setBCnumber(tagIdx2, BCoffset);}
+		if (tdn2 != nullptr) { tdn2->setPassed(false); tdn2->setMidQual(false); tdn2->setBCnumber(tagIdx2, BCoffset);}
 		
 		collectStatistics[0]->dblTagFail++;
 		return;
@@ -3693,18 +3703,22 @@ void Filters::dblBCeval(int& tagIdx, int& tagIdx2, string presentBC, shared_ptr<
 	string BC1 = Barcode[tagIdx];
 	string BC2 = Barcode2[tagIdx2];
 	bool hit(false);
-	//this routine finds two matching barcodes (as several combinations are possible)
-	for ( uint i = 0; i < Barcode.size(); i++ ) {
-		if ( Barcode[i] == BC1 && Barcode2[i] == BC2 ) {
-			tagIdx = i; tagIdx2 = i; hit = true; break;
+	if (tagIdx == tagIdx2) {
+		hit = true;
+	} else {
+		//this routine finds two matching barcodes (as several combinations are possible)
+		for (uint i = 0; i < Barcode.size(); i++) {
+			if (Barcode[i] == BC1 && Barcode2[i] == BC2) {
+				tagIdx = i; tagIdx2 = i; hit = true; break;
+			}
 		}
 	}
 
 	if ( !hit ) {
 		//no BC, useless
 		tagIdx = -1; tagIdx2 = -1;
-		if (tdn != NULL) { tdn->setPassed(false); tdn->setMidQual(false); tdn->setBCnumber(tagIdx, BCoffset);	}
-		if (tdn2 != NULL) { tdn2->setPassed(false); tdn2->setMidQual(false); tdn2->setBCnumber(tagIdx2, BCoffset);	}
+		if (tdn != nullptr) { tdn->setPassed(false); tdn->setMidQual(false); tdn->setBCnumber(tagIdx, BCoffset);	}
+		if (tdn2 != nullptr) { tdn2->setPassed(false); tdn2->setMidQual(false); tdn2->setBCnumber(tagIdx2, BCoffset);	}
 		return;
 	}
 	presentBC = BC1 + "|" + BC2;
@@ -3776,8 +3790,19 @@ int Filters::detectCutBC(shared_ptr<DNA> d, string&presentBC, int& c_err, bool i
 	return idx;
 }
 
+//2nd BC on same DNA sequence (from the 3' end)
+int Filters::findTag2(shared_ptr<DNA> d, string& presentBC, int& c_err,
+	bool isPair1, int revChecks) {
+	cerr << "findTag2\n"; exit(2316);
+	int start(-1), stop(-1);
+	int idx(-1);
+	int scanRegion = 34; //dna region to scan for Tag sequence_
+
+	scanBC_back(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1,true);
+	return -1;
+}
 int Filters::findTag(shared_ptr<DNA> d, string&presentBC, int& c_err, 
-			bool isPair1, int& revChecks) {
+			bool isPair1, int revChecks) {
     
     //cout << "FIND TAG DO HEAD " << bDoHeadSmplID << endl;
 	if (bDoHeadSmplID) {
@@ -3835,7 +3860,7 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 	    return -1;
 	}
 	//already detected barcode
-	if (d->getBarcodeCut()) {
+	if (d->getBarcodeCut()){// && !scndBC) {
 		return d->getBarcodeNumber() - BCoffset;
 	}
 	if ((isPair1 && !bDoBarcode) || (!isPair1 && !bDoBarcode2)) {
@@ -3889,6 +3914,7 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 	// needs to be locked when multithreaded
 	scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1);
 
+
     
 	if ( !BCdFWDREV[!isPair1].b_BCdirFix ) {
 		if (start == -1){//check reverse transcription
@@ -3909,29 +3935,44 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 	if (start < 0) {
 		return (-1);
 	}
+	if (BcutTag && !d->isMIDseq()) {
+		//remove tag from DNA
+		d->cutSeq(0, stop);
+		d->setBarcodeCut();
+
+		// needs to be locked when multithreaded
+		BCintoHead(idx, d, presentBC, c_err, isPair1);
+
+	}
 
 	//check also for reverse BC on same read??? (PacBio)
-	int startX(-1), stopX(-1);
-	string presentBCX(""); int c_errX(0);
-	int scanRegionX = 4;
-	int idxX = -2;
 	if (bDoBarcode2Rd1) {
-		scanBC_rev(d, startX, stopX, idxX, c_errX, scanRegionX, presentBCX, isPair1);
+		int startX(-1), stopX(-1);
+		string presentBCX(""); int c_errX(0);
+		int scanRegionX = 44;
+		int idxX = -2;
+		scanBC_back(d, startX, stopX, idxX, c_errX, scanRegionX, presentBCX, false,true);
+		if (idxX >= 0 && BcutTag) {
+			d->cutSeq(startX);
+		}
+
+
+		dblBCeval(idx, idxX, presentBC, d, nullptr);
+		c_err = -1;
+
+		//check a second time that barcode was correctly identified, just to be double sure...
+		if (idx != idxX ) {
+			cerr << "(2) Unequal BC numbers:" << idx << " : " << idxX << "; in object: " << d->getBarcodeNumber() << endl;
+			cerr << "In read:" << d->getId() << endl;
+			exit(835);
+		}
+
         //cout << "scanBCrev: " << start << "," << stop << "," << idx << "," << c_err << "," << presentBC << endl;
 	}
 	
 
 	d->setBCnumber(idx, BCoffset);
 
-	if (BcutTag && !d->isMIDseq()) {
-		//remove tag from DNA
-		d->cutSeq(start, stop);
-		d->setBarcodeCut();
-
-		// needs to be locked when multithreaded
-		BCintoHead(idx, d, presentBC, c_err, isPair1);
-        
-    }
 	return idx;
 }
 
@@ -4021,41 +4062,45 @@ bool Filters::eval_reversingBC(bool fwd){
 	return true;
 }
 
+
+void Filters::reverse_all_BC() {
+
+	if (Barcode2.size() != 0 && revBarcode2.size() == 0) {
+		revBarcode2 = Barcode2;
+		for (size_t i = 0; i < Barcode2.size(); i++) {
+			reverseTS(revBarcode2[i]);
+		}
+	}
+	if (Barcode.size() != 0 && revBarcode.size() == 0) {
+		revBarcode = Barcode;
+		for (size_t i = 0; i < Barcode.size(); i++) {
+			reverseTS(revBarcode[i]);
+		}
+	}
+
+}
+
 void Filters::scanBC_rev(shared_ptr<DNA> d,int& start,int& stop,int& idx,int c_err, 
 					 int scanRegion,string & presentBC,
 					 bool fwdStrand) {
-	vector<string> emptyV(0), emptyV2(0);
-
-	vector<string>& localBarcodesRev(emptyV2);
-	vector<string>&  locBC(emptyV);
+	if (d->length() < minBCLength1_) { return; }
+	//vector<string> emptyV(0), emptyV2(0);
+	reverse_all_BC();
+	vector<string>* localBarcodesRev;
 	if ( !fwdStrand ) {
-        localBarcodesRev = revBarcode2;
-		locBC = Barcode2;
+        localBarcodesRev = &(revBarcode2);
 	} else {
-        localBarcodesRev = revBarcode;
-		locBC = Barcode;
+        localBarcodesRev = &(revBarcode);
 	}
-	int BCs = (int) localBarcodesRev.size();
-	
-	if (BCs==0){
-        localBarcodesRev = locBC;
-		BCs = (int)localBarcodesRev.size();
-		for (int i=0; i< BCs; i++){
-			reverseTS(localBarcodesRev[i]);
-		}
-		if ( !fwdStrand ) {//copy over BC
-			revBarcode2 = localBarcodesRev;
-		} else {
-			revBarcode = localBarcodesRev;
-		}
-	}
+	int BCs = (int) localBarcodesRev->size();	
+
 	//check each possible BC for a match
 	if (barcodeErrors_ == 0){
 		for (idx=0; idx< BCs; idx++){
-			start = d->matchSeq_tot(localBarcodesRev[idx], 0, scanRegion, c_err);
+			start = d->matchSeq_tot((*localBarcodesRev)[idx], 0, scanRegion, c_err);
 			if (start!=-1){
-				presentBC = localBarcodesRev[idx];
-				stop = start+ (int)localBarcodesRev[idx].length();
+				presentBC = (*localBarcodesRev)[idx];
+				stop = start+ (int)(*localBarcodesRev)[idx].length();
 				break;
 			}
 		}
@@ -4064,11 +4109,11 @@ void Filters::scanBC_rev(shared_ptr<DNA> d,int& start,int& stop,int& idx,int c_e
 		bool zeroErr = false;
 		//this version tries all BC's and if there are more than one possible match, will reject all matches
 		for (idx=0; idx< BCs; idx++){
-			start = d->matchSeq_tot(localBarcodesRev[idx], barcodeErrors_, scanRegion, c_err);
+			start = d->matchSeq_tot((*localBarcodesRev)[idx], barcodeErrors_, scanRegion, c_err);
 			if (start!=-1){
 				if (c_err==0){
-					stop = start+ (int) localBarcodesRev[idx].length();
-					presentBC = localBarcodesRev[idx];
+					stop = start+ (int) (*localBarcodesRev)[idx].length();
+					presentBC = (*localBarcodesRev)[idx];
 					zeroErr = true;
 					break;
 				}
@@ -4089,10 +4134,90 @@ void Filters::scanBC_rev(shared_ptr<DNA> d,int& start,int& stop,int& idx,int c_e
 			//sTagCorrected(pair_);// collectStatistics.suc_correct_BC++;
 			start = stars[0];
 			idx = idxses[0];
-			stop = start+(int)localBarcodesRev[idx].length();
+			stop = start+(int)(*localBarcodesRev)[idx].length();
 			presentBC = d->getSubSeq(start,stop);
 		}
+	}
+	if (start == -1) {
+		idx = -1;
+	}
 
+}
+
+void Filters::scanBC_back(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_err,
+	int scanRegion, string& presentBC,
+	bool useBC1, bool revBC) {
+	if (d->length() < minBCLength1_) { return; }
+	//vector<string> emptyV(0), emptyV2(0);
+	if (revBC) {
+		reverse_all_BC();
+	}
+	vector<string>* locBC;
+	if (!useBC1) {
+		if (revBC) {
+			locBC = &(revBarcode2);
+		} else {
+			locBC = &(Barcode2);
+		}
+	}
+	else {
+		if (revBC) {
+			locBC = &(revBarcode);
+		}
+		else {
+			locBC = &(Barcode);
+		}
+	}
+	int BCs = (int)locBC->size();
+
+	//check each possible BC for a match
+	if (barcodeErrors_ == 0) {
+		for (idx = 0; idx < BCs; idx++) {
+			start = d->matchSeqRev((*locBC)[idx], 0, scanRegion, c_err);
+			if (start != -1) {
+				presentBC = (*locBC)[idx];
+				stop = start + (int)(*locBC)[idx].length();
+				break;
+			}
+		}
+	}
+	else {
+		vector<int> stars(0), idxses(0);
+		bool zeroErr = false;
+		//this version tries all BC's and if there are more than one possible match, will reject all matches
+		for (idx = 0; idx < BCs; idx++) {
+			start = d->matchSeqRev((*locBC)[idx], barcodeErrors_, scanRegion, c_err);
+			if (start != -1) {
+				if (c_err == 0) {
+					stop = start + (int)(*locBC)[idx].length();
+					presentBC = (*locBC)[idx];
+					zeroErr = true;
+					break;
+				}
+				stars.push_back(start);
+				idxses.push_back(idx);
+			}
+		}
+		if (!zeroErr && stars.size() > 0) {
+			//int pair_ = (int)!fwdStrand;//d->getReadMatePos();
+			if (stars.size() > 1) {//too many matches, thus true seq can't be found
+				//currently only have only one BC, could be changed in future
+				//sTagNotCorrected(pair_);
+				d->QualCtrl.fail_correct_BC = true;
+				idx = -1; start = -1;
+				return;
+			}
+			d->QualCtrl.suc_correct_BC = true;
+			//sTagCorrected(pair_);// collectStatistics.suc_correct_BC++;
+			start = stars[0];
+			idx = idxses[0];
+			stop = start + (int)(*locBC)[idx].length();
+			presentBC = d->getSubSeq(start, stop);
+		}
+
+	}
+	if (start == -1) {
+		idx = -1;
 	}
 }
 
@@ -4219,6 +4344,10 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
             
         }
     }
+	if (start == -1) {
+		idx = -1;
+	}
+
     
     return;
 }

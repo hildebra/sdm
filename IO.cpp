@@ -135,11 +135,13 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	curFil->preFilterSeqStat(tdn[1], 1);
 
 
+
 	//prep some variables
 	int BCoffs = curFil->getBCoffset();
 	bool checkBC2ndRd = curFil->checkBC2ndRd();
 	bool dualBCs = curFil->doubleBarcodes();
 	bool doBCsAtAll = curFil->doBarcodes();
+	int pairedRd = curFil->isPaired();
 	//bool checkReversedRead = curFil->checkRevRd();
 
 	int tagIdx(-2); int tagIdx2(-2);
@@ -157,12 +159,13 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
     if (checkBC2ndRd ) {
 		if (!dualBCs) {
+			//use this routine to set the BC inside the DNA object
 			bool revT = false;
 			bool Pr1 = curFil->findPrimer(tdn[0], 0, false, 0);
 			bool Pr2 = curFil->findPrimer(tdn[1], 0, false, 0);
-			int chkRev1(-1), chkRev2(-1);
-			tagIdx = curFil->findTag(tdn[0], presentBC, c_err, true, chkRev1);
-			tagIdx2 = curFil->findTag(tdn[1], presentBC, c_err, true, chkRev2);
+			//int chkRev1(-1), chkRev2(-1);
+			tagIdx = curFil->findTag(tdn[0], presentBC, c_err, true, -1);
+			tagIdx2 = curFil->findTag(tdn[1], presentBC, c_err, true, -1);
 			if ((tagIdx2 >= 0 && tagIdx < 0 && !Pr1) || (Pr2 && !Pr1)) { //swap first & second read
 				swap(tdn[0], tdn[1]);
 				tdn[0]->constellationPairRev(true); tdn[1]->constellationPairRev(true);
@@ -207,13 +210,17 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 	//set up BC in DNA header
 	//remember that dual BCs are only valid after this step!
-	if (dualBCs) {
-		//tagIdx2 = -2; //reset just to be sure
+	if (dualBCs && pairedRd == 2) {
+		//in case of single reads (PB) with double BCs
+		//if (dualBCs && tagIdx2 < 0 && pairedRd == 1) {
+		//	tagIdx2 = curFil->findTag2(tdn[0], presentBC, c_err, false, -1);
+		//}
+
 		curFil->dblBCeval(tagIdx, tagIdx2, presentBC, tdn[0], tdn[1]);
 		c_err = -1;
 
 		//check a second time that barcode was correctly identified, just to be double sure...
-		if (tagIdx != tagIdx2 || tdn[0]->getBarcodeNumber() != tdn[1]->getBarcodeNumber()) {
+		if ( tagIdx != tagIdx2 || tdn[0]->getBarcodeNumber() != tdn[1]->getBarcodeNumber()) {
 			cerr << "Unequal BC numbers:" << tagIdx << " : " << tagIdx2 << "; in object: " << tdn[0]->getBarcodeNumber() << " : " << tdn[1]->getBarcodeNumber() << endl;
 			cerr << "In read:" << tdn[0]->getId() << endl;
 			exit(835);
@@ -813,7 +820,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 	for (auto uFX: uniqueFastxFiles) {
 			int tarID = idx[uFX.second][0]; string tmp;
 		string x = testFiles->setupInput(path, tarID, uFX.first, FastqF, FastaF,
-			QualF, MIDfq, mainFilter->isPaired(), cmdArgs["-onlyPair"], tmp, true);
+			QualF, MIDfq, mainFilter->setPaired(), cmdArgs["-onlyPair"], tmp, true);
 	}
 	mainFilter->SRessentials((int)uniqueFastxFiles.size());
 //	delete testFiles;
@@ -927,7 +934,8 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		lastSRblock = mainFilter->SequencingRun[tarID];
 
 		string mainFileShort;
-		mainFile = IS->setupInput(path, tarID, uFX.first, FastqF, FastaF, QualF, MIDfq, filter->isPaired(),
+		mainFile = IS->setupInput(path, tarID, uFX.first, FastqF, FastaF, QualF, 
+					MIDfq, filter->setPaired(),
 			cmdArgs["-onlyPair"], mainFileShort, false);
 		if (!IS->qualityPresent()) {
 			filter->deactivateQualFilter();
@@ -990,8 +998,30 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		
 		//if (OutStreamer->isPEseq() == 2 || true) {
 		//completely switch to this routine to reduce maintenance workload
+
+
+
+
+
+
+
+
 			read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
-		//}else {
+		
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			
+			//}else {
 			//read_single(cmdArgs, OutStreamer, IS, threads);
 			/*if (threads == 1) {
 			}	else if (threads >= 2) {

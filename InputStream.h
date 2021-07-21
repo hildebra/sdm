@@ -728,8 +728,8 @@ public:
 	bool HomoNTRuns(int);
 	int matchSeq(string, int, int, int);
 	void reverse_transcribe(bool reset=true);
-	int matchSeqRev(string, int, int, int=0);
-	int matchSeq_tot(string, int, int, int&);
+	int matchSeqRev(const string&, int, int, int=0);
+	int matchSeq_tot(const string&, int, int, int&);
 	void writeSeq(ostream&, bool singleLine = false);
 	string writeSeq( bool singleLine = false);
 	void writeQual(ostream&, bool singleLine = false);

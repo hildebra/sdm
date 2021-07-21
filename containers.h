@@ -465,7 +465,8 @@ public:
 	int getuserReqFastqOutVer(void){ return userReqFastqOutVer; }
 	//input file
 	int getuserReqFastqVer(void){ return userReqFastqVer; }
-	int & isPaired(){ return  pairedSeq; }
+	int isPaired() { return  pairedSeq; }
+	int & setPaired() { return  pairedSeq; }
 	int FQheadV(){ return PEheaderVerWr; }
 	inline bool consistentPairs(){ return bCompletePairs; }
 	bool doDemultiplex(){ return bDoMultiplexing; }
@@ -505,7 +506,9 @@ public:
 //public version of BC finder..
 	int detectCutBC(shared_ptr<DNA> d, string&, int&,bool);//returns id_, important for cutPrimer()
 	int findTag(shared_ptr<DNA> d, string&, int&, bool, 
-		int& revChecks);//returns id_, important for cutPrimer()
+		int revChecks);//returns id_, important for cutPrimer()
+	//2nd BC on same DNA sequence (from the 3' end)
+	int findTag2(shared_ptr<DNA> d, string&, int&, bool,int revChecks);
 	inline bool doubleBarcodes() { return bDoBarcode2; }
 	inline bool doBarcodes() { return bDoBarcode; }
 
@@ -561,7 +564,9 @@ public:
 		return collectStatistics[0]->totalSuccess;
 	}
 	void singReadBC2() {
-		if (Barcode2.size() > 0) { bDoBarcode2Rd1 = true; }
+		if (Barcode2.size() > 0 && doubleBarcodes() && isPaired() == 1) {
+			bDoBarcode2Rd1 = true; 
+		}
 	}
 
 //    void addToStatistics(shared_ptr<DNA> d, Statistics &statistics);
@@ -605,8 +610,12 @@ protected:
 
 	inline void scanBC(shared_ptr<DNA> d,int& start,int& stop,int& idx,int c_err, int scanRegion,
 		string & presentBC, bool fwdStrand);
-	inline void scanBC_rev(shared_ptr<DNA> d,int& start,int& stop,int& idx,int c_err, int scanRegion,
-		string & presentBC, bool fwdStrand);
+	//reverse BC scan on end of read
+	inline void scanBC_rev(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_err, int scanRegion,
+		string& presentBC, bool fwdStrand);
+	//just scan the back of read with normal BCs
+	inline void scanBC_back(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_err, int scanRegion,
+		string& presentBC, bool useBC1, bool revBC);
 
 	void extractMap(int k, int cnt, int tbcnt, string & segments, bool);
 	void fakeEssentials(void);
@@ -647,6 +656,9 @@ protected:
 	//specialized function for LotuS, which doesn't need all the huge output files..
 	//BCs are in mid file
 	//bool bHasMidSeq;
+
+	//reverse all BCs and save for later use
+	void reverse_all_BC();
 
 	//filter related
 	int min_l, alt_min_l;

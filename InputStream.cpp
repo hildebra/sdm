@@ -909,7 +909,7 @@ void DNA::reverse_transcribe(bool reset) {
 }
 
 //match from end of sequence_ to find rev primer
-int DNA::matchSeqRev(std::string PrSt,int Err, int check_l,
+int DNA::matchSeqRev(const string& PrSt,int Err, int check_l,
 				  int coverage){
 	//fail::ret -1
 	int PrL = (int) PrSt.length();
@@ -952,7 +952,7 @@ int DNA::matchSeqRev(std::string PrSt,int Err, int check_l,
 	return endPos;
 }
 // looks through total DNA seq
-int DNA::matchSeq_tot(std::string Pr, int error, int maxPos, int& c_err){
+int DNA::matchSeq_tot(const string& Pr, int error, int maxPos, int& c_err){
 	int PrL = (int) Pr.length();
 	int pos(0), Prp(0), Prp2(0);
 	bool success(false);
