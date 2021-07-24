@@ -60,7 +60,7 @@ typedef ofbufstream ostr;
 
 typedef std::map<std::string, std::string> OptContainer;
 typedef std::unordered_map<std::string, int> ClusterIdx;
-typedef std::unordered_map<std::string, int> BarcodeMap;//links directly to entry number in Barcode vector
+typedef robin_hood::unordered_map<std::string, int> BarcodeMap;//links directly to entry number in Barcode vector
 //typedef std::base_map<std::string, int, ltstr> ClusterIdx;
 //used in UCF file
 typedef std::unordered_map<string, int>::iterator DNAidmapsIT;
@@ -246,12 +246,13 @@ public:
 		PrimerRevFail(0), minL(0), minLqualTrim(0),
 		TagFail(0), MaxAmb(0), QualWin(0),
 		Trimmed(0), AccErrTrimmed(0), QWinTrimmed(0),
-		total(0), totalRejected(0),
+		total(0), totalMid(0), totalRejected(0),
 		fail_correct_BC(0), suc_correct_BC(0),
 		failedDNAread(0), adapterRem(0), RevPrimFound(0),
 		total2(0), totalSuccess(0),
 		DerepAddBadSeq(0), BinomialErr(0),
 		dblTagFail(0),
+		reversedRds(0), swappedRds(0),
 		singleton(0), BarcodeDetected(0), BarcodeDetectedFail(0),
 		PostFilt(NULL),PreFilt(NULL)
 	{
@@ -270,7 +271,7 @@ public:
 	unsigned int maxL, PrimerFail,AvgQual, HomoNT;
 	unsigned int PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)
 	unsigned int minL,minLqualTrim, TagFail, MaxAmb, QualWin;
-	unsigned int Trimmed, AccErrTrimmed, QWinTrimmed, total, totalRejected;
+	unsigned int Trimmed, AccErrTrimmed, QWinTrimmed, total, totalMid, totalRejected;
 	unsigned int fail_correct_BC, suc_correct_BC,failedDNAread;
 	unsigned int adapterRem, RevPrimFound;
 	uint total2, totalSuccess;
@@ -278,6 +279,9 @@ public:
 	//binomial error model
 	unsigned int BinomialErr;
 	uint dblTagFail;
+	//swapping/reversing reads
+	uint reversedRds;
+	uint swappedRds;
 	//recovered singletons within pairs
 	unsigned int singleton;
 	vector<int> BarcodeDetected;
@@ -447,8 +451,9 @@ public:
 	inline void updateMaxSeqL(int x);
 	bool betterSeed(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, float, uint, int,bool);
 	bool secondaryOutput(){return bAdditionalOutput;}
-	inline bool checkBC2ndRd() { return b2ndRDBcPrimCk; }
+	inline bool checkSwitchedRdPairs() { return b2ndRDBcPrimCk; }
 	inline bool checkRevRd() { return bRevRdCk; }
+	
 	bool synRdPairs() { return bChkRdPrs; }
 	int writtenReads(){return ReadsWritten;}
 	int maxReadsOutput(){return maxReadsPerOFile;}
@@ -476,12 +481,12 @@ public:
 	//*************************
 	//DNA statistic collection
 	void prepStats();
-	void revConstellationCnts(int x) { revConstellationN += x; }//number of read pairs, where pair1/2 are changed (mo)
+	//void revConstellationCnts(int x) { revConstellationN += x; }//number of read pairs, where pair1/2 are changed (mo)
 	void addDNAtoCStats(shared_ptr<DNA> d,int);
 	void sTotalPlus(int pair) {  
-		csMTX[pair]->lock();
+		//csMTX[pair]->lock();
 		collectStatistics[pair]->total++; //collectStatistics[pair_].totalRejected++;
-		csMTX[pair]->unlock();
+		//csMTX[pair]->unlock();
 	}
 	void addStats(Filters* fil, vector<int>& idx);
 
@@ -577,6 +582,10 @@ public:
     void addStatsMT(Filters* fil, vector<int> &idx);
 	int currentBCnumber() { return curBCnumber; }//only used in "one sample per file" cases
 
+	//quick check if a rev Primer seq matches correct position -> reverse this seq
+	bool checkIfRevPrimerHits(shared_ptr<DNA> d, int primerID, int pair = 0);
+	bool checkIfPrimerHits(shared_ptr<DNA> d, int primerID, int pair = 0);
+
 protected:
 	bool check_lengthXtra(shared_ptr<DNA> d, int hindrance=0, int leng=-1){
 		if (min_l > 0) {
@@ -584,13 +593,12 @@ protected:
 				leng = d->length();
 			}
 			if (leng - hindrance < min_l) {
+				d->QualCtrl.minL = true;
 				if (leng - hindrance >= alt_min_l) {
 					d->setMidQual(true);
-					d->QualCtrl.minL = false;
 					return false;
 				}
 				//statAddition.minL++;
-				d->QualCtrl.minL = true;
 				return true;
 			}
 		}
@@ -607,6 +615,8 @@ protected:
 	}
 	bool cutPrimer(shared_ptr<DNA> d, int primerID, bool, int);
 	bool cutPrimerRev(shared_ptr<DNA> d,int primerID,bool);
+
+
 
 	inline void scanBC(shared_ptr<DNA> d,int& start,int& stop,int& idx,int c_err, int scanRegion,
 		string & presentBC, bool fwdStrand);
@@ -691,7 +701,7 @@ protected:
 	
 	//paired end sequencing related
 	int pairedSeq; //1= single read, 2= PE, 3= PE + 1 file with barcodes
-	int revConstellationN;//number of read pairs, where pair1/2 are changed (mo)
+	//int revConstellationN;//number of read pairs, where pair1/2 are changed (mo)
 
 
 	//flow control bools
@@ -991,7 +1001,7 @@ public:
 	void createWriteThread() { writeThreadStatus = 1; }
 	void setOneLinerFastaFmt(bool b) { b_oneLinerFasta = b; }
 	//void printStorage() { cerr << "Size of MD DNA P1:" << DNAsP1.size() << " P2: " << DNAsP2.size() << endl; }
-	void revConstellationCnts(int x) { MFil->revConstellationCnts(x); }
+	//void revConstellationCnts(int x) { MFil->revConstellationCnts(x); }
 	//dereplication of DNA seqs
 	void attachDereplicator(shared_ptr<Dereplicate> de);
 	//void dereplicateDNA(shared_ptr<DNA>);
@@ -1091,7 +1101,7 @@ private:
 
 	//asynchronous threads
 	//std::vector<std::future<ulong>> threads; 
-	int Nthrds,thrdsCnt; bool thrdsActive;
+	int Nthrds;  int thrdsCnt; bool thrdsActive;
 	//controls output file size
 	int maxReadsPerOFile;
 	atomic_int ReadsWritten;

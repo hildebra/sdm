@@ -850,13 +850,16 @@ void Filters::addDNAtoCStats(shared_ptr<DNA> d,int Pair) {
 	//here should be the only place to count Barcodes!
 	int easyPair = Pair < 3 ? Pair - 1 : Pair - 3;
 	
-	csMTX[easyPair]->lock();
+	//csMTX[easyPair]->lock();
 	collectStatistics[easyPair]->total2++;
 
 
 	if (d->isGreenQual() || d->isYellowQual()) {
 		this->DNAstatLQ(d, easyPair, d->isYellowQual());
 		collectStatistics[easyPair]->totalSuccess++;
+		if (d->isYellowQual()) {
+			collectStatistics[easyPair]->totalMid++;
+		}
 	} else {
 		collectStatistics[easyPair]->totalRejected++;
 	}
@@ -892,7 +895,7 @@ void Filters::addDNAtoCStats(shared_ptr<DNA> d,int Pair) {
 
 //exit(0);
 	
-	if (d->isGreenQual() || d->isYellowQual()) {
+	if (d->isGreenQual() ){//|| d->isYellowQual()) {
 		countBCdetected(d->getBarcodeNumber(), easyPair, false);
 		//and register as success
 	} else {
@@ -928,7 +931,7 @@ void Filters::addDNAtoCStats(shared_ptr<DNA> d,int Pair) {
 			this->statAddDerepBadSeq(d->getBarcodeNumber());
 		}
 	}
-	csMTX[easyPair]->unlock();
+	//csMTX[easyPair]->unlock();
 }
 
 
@@ -2454,7 +2457,7 @@ Filters::Filters(OptContainer& cmdArgs1) :
         userReqFastqVer(0), userReqFastqOutVer(33), maxAccumQP(-1),
         alt_maxAccumQP(-1),
         pairedSeq(-1),
-        revConstellationN(0),
+        //revConstellationN(0),
         BCdFWDREV(2),
         Xreads(-1),
         restartSet(false), b_optiClusterSeq(false),
@@ -2809,7 +2812,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
         alt_maxAccumQP(of->alt_maxAccumQP),
         //BChit, BCrevhit initialize to 0 - new set, new luck
         pairedSeq(of->pairedSeq),
-        revConstellationN(0),
+        //revConstellationN(0),
         BCdFWDREV(of->BCdFWDREV),
         restartSet(false),
         b_optiClusterSeq(of->b_optiClusterSeq), b_subselectionReads(of->b_subselectionReads),
@@ -3158,11 +3161,50 @@ void Filters::reverseTS_all_BC2() {
 
 }
 bool Filters::swapReverseDNApairs(vector< shared_ptr<DNA>>& tdn){
-	if (!this->checkRevRd()) {
+	if (!checkRevRd() && !checkSwitchedRdPairs()) {
 		return false;
 	}
 	int tagIdx = 0;//just try
 
+	//method 1: just check if primer is found reversed, most basic and seems to work fine..
+	//simple check if fwd rev primer is in reverse position: then reverse transcribe
+	
+	bool fwdRd1Primer = checkIfPrimerHits(tdn[0], 0, 0);
+	if (fwdRd1Primer) {
+		return false;
+	}
+	if ( checkIfRevPrimerHits(tdn[0], 0, 0)) {
+		tdn[0]->reverse_transcribe();
+		if (tdn[1] != nullptr) { tdn[1]->reverse_transcribe(); }
+		collectStatistics[0]->reversedRds++;
+		
+		//take stats on this
+
+	}
+	else if (checkSwitchedRdPairs() && isPaired() == 2 && tdn[1] != nullptr) {
+		//more complex: check if second pair has reversed primer: whole pair swap
+		if (checkIfRevPrimerHits(tdn[1], 0, 0)) {//switched pairs && reversed
+			tdn[0]->reverse_transcribe();
+			tdn[1]->reverse_transcribe(); 
+			swap(tdn[1], tdn[0]);
+			tdn[1]->setpairREV();		tdn[0]->setpairFWD();
+			collectStatistics[0]->swappedRds++;
+			collectStatistics[0]->reversedRds++;
+			//but redundant logging..
+			tdn[1]->constellationPairRev(true);
+			tdn[0]->constellationPairRev(true);
+		}
+		else if (checkIfPrimerHits(tdn[1], 0, 0)) {//switched pairs only
+			swap(tdn[1], tdn[0]);
+			tdn[1]->setpairREV();		tdn[0]->setpairFWD();
+			collectStatistics[0]->swappedRds++;
+
+		}
+	}
+
+
+
+	/*
 	if (BcutPrimer) {
 		//1test if fwd read has primer 1
 		if (cutPrimer(tdn[0], PrimerIdx[tagIdx], false, 0) ||
@@ -3196,7 +3238,7 @@ bool Filters::swapReverseDNApairs(vector< shared_ptr<DNA>>& tdn){
 	tagIdx = -2;
 	string presentBC = ""; int c_err = 0; int chkRev1=false;
 	tagIdx = findTag(tdn[0], presentBC, c_err, true, chkRev1);
-
+	*/
 
 	/*
 	if (true && checkReversedRead && (tagIdx2 < 0 && tagIdx < 0)) {
@@ -4351,6 +4393,52 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
     
     return;
 }
+
+bool Filters::checkIfRevPrimerHits(shared_ptr<DNA> d, int primerID, int pair) {
+	if (PrimerL.size() == 0 || PrimerL[0].length() == 0) { return true; }
+	if (d->getFwdPrimCut()) {
+		return true;
+	}
+	int start(-1), stop(-1);
+	int tolerance(30), startSearch(0);
+	int QS = d->length(); int limit = max(QS >> 1, QS - 150); stop = QS;
+	if (pair == 1) {
+		start = d->matchSeqRev(PrimerR_RC[primerID], PrimerErrs, limit, startSearch);
+	}
+	else {
+		start = d->matchSeqRev(PrimerL_RC[primerID], PrimerErrs, limit, startSearch);
+	}
+
+	if (start != -1) {
+		return true;
+	}
+
+	return false;
+
+}
+bool Filters::checkIfPrimerHits(shared_ptr<DNA> d, int primerID, int pair) {
+	if (PrimerL.size() == 0 || PrimerL[0].length() == 0) { return true; }
+	if (d->getFwdPrimCut()) {
+		return true;
+	}
+	int start(-1), stop(-1);
+	int tolerance(30), startSearch(0);
+	int QS = d->length(); int limit = max(QS >> 1, QS - 150); stop = QS;
+	if (pair == 1) {
+		start = d->matchSeq(PrimerR[primerID], PrimerErrs, tolerance, startSearch);
+	}
+	else {
+		start = d->matchSeq(PrimerL[primerID], PrimerErrs, tolerance, startSearch);
+	}
+
+	if (start != -1) {
+		return true;
+	}
+
+	return false;
+
+}
+
 //cuts primers, tags
 bool Filters::cutPrimer(shared_ptr<DNA> d,int primerID,bool RC,int pair){
 	//only adapted to singular BC
@@ -4372,8 +4460,13 @@ bool Filters::cutPrimer(shared_ptr<DNA> d,int primerID,bool RC,int pair){
 		start = d->matchSeq(PrimerL[primerID], PrimerErrs, tolerance, startSearch);
 		stop = start + (int)PrimerL[primerID].length();
 	} else {
+	//if (1 && start == -1){
 		int QS = d->length();int limit = max(QS >> 1, QS - 150); stop = QS;
 		start = d->matchSeqRev(PrimerL_RC[primerID], PrimerErrs, limit, startSearch);
+//		start = d->matchSeq(PrimerL_RC[primerID], PrimerErrs, tolerance, startSearch);
+		if (0 && start != -1) {
+			int y = 0;//debug
+		}
 	}
 	if (start == -1){//failed to match primer
 		d->QualCtrl.PrimerFail = true;
@@ -5194,13 +5287,15 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 		give << "No valid Filter file provided; no filtering done on files\n";
 		return;
 	}
-	if (!greenQualStats) {
+	/*if (!greenQualStats) {
 		give << "Statistics of reads that passed the mid qual filter\n";
 	} else {
 		give << "Statistics of high quality reads\n";
-	}
+	}*/
 	float remSeqs = float (cst->total-cst->totalRejected);
+	
 	give << endl;
+	
 	if (!greenQualStats){
 		give << "Reads not High qual_: " << intwithcommas((int)cst->totalRejected);
 	} else {
@@ -5210,16 +5305,40 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 		}
 	}
 	give << endl;
+	if (cst->reversedRds > 0 || cst->swappedRds > 0) {
+		if (cst->reversedRds > 0) {
+			give << cst->reversedRds;
+			if (p2stat) {				give << ";" << cst2->reversedRds;			}
+			give<<  " reads reverse-translated";
+			if (cst->swappedRds > 0) {
+				give << ", ";
+			}
+		}
+		if (cst->swappedRds > 0) {
+			give << cst->swappedRds << " read pairs swapped";
+		}
+		give << endl;
+	}
+
 	//int numAccept = (int)(cst->total - cst->totalRejected);
-	int numAccept = (int)(cst->totalSuccess );
+	int numAccept = (int)(cst->totalSuccess - cst->totalMid);
+	int numMid = (int)cst->totalMid;
 	if (!greenQualStats){
-		give << "Rejected:" << intwithcommas((int)(collectStatistics[0]->totalRejected - numAccept)) << endl << "Accepted (Mid+High qual): " << intwithcommas((int)numAccept) << " (" << intwithcommas((int)cst->Trimmed) << " were end-trimmed";
+		give << "Rejected:" << intwithcommas((int)(cst->totalRejected)) << endl;
+		give << "Accepted (High qual): " << intwithcommas((int)numAccept) << " (" << intwithcommas((int)cst->Trimmed) << " end-trimmed)\n";
+		give << "Accepted (Mid qual): " << intwithcommas(numMid) << endl;
 	} else {
 		if (p2stat) {
-			give << "Rejected: " << intwithcommas((int)cst->totalRejected) << "; " << intwithcommas((int)cst2->totalRejected) << endl << "Accepted (Mid+High qual): " << intwithcommas((int)numAccept) << "; " << intwithcommas((int)cst2->totalSuccess) << " (" << intwithcommas((int)cst->Trimmed) << "; " << intwithcommas((int)cst2->Trimmed) << " were end-trimmed";
+			int numMid2 = (int)cst2->totalMid;
+			int numAccept2 = int(cst2->totalSuccess - cst2->totalMid);
+			give << "Rejected: " << intwithcommas((int)cst->totalRejected) << "; " << intwithcommas((int)cst2->totalRejected) << endl;
+			give << "Accepted (High qual): " << intwithcommas((int)numAccept) << "; " << intwithcommas((int)numAccept2) << " (" << intwithcommas((int)cst->Trimmed) << "; " << intwithcommas((int)cst2->Trimmed) << " end-trimmed)\n";
+			give << "Accepted (Mid qual): " << intwithcommas(numMid) << ";" << intwithcommas(numMid2)<< endl;
 		}
 		else {
-			give << "Rejected: " << intwithcommas((int)cst->totalRejected) << endl << "Accepted (Mid+High qual): " << intwithcommas((int)numAccept) << " (" << intwithcommas((int)cst->Trimmed) << " were end-trimmed";
+			give << "Rejected: " << intwithcommas((int)cst->totalRejected) << endl;
+			give << "Accepted (High qual): " << intwithcommas((int)numAccept) << " (" << intwithcommas((int)cst->Trimmed) << " end-trimmed)\n";
+			give << "Accepted (Mid qual): " << intwithcommas(numMid) << endl;
 		}
 	}
 
@@ -5227,7 +5346,6 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 	if ( false && bPrimerR ) { //confusing collectStatistics
 		give << ", with rev. primer: " << intwithcommas((int)cst->RevPrimFound); if ( p2stat ) { give << "; " << intwithcommas((int)cst2->RevPrimFound); }
 	}
-	give<<")"<<endl;
 
 	if (pairedSeq>1) {
 		give <<"Singletons among these: " << intwithcommas((int)cst->singleton) << "; " << intwithcommas((int)cst2->singleton) << endl;
@@ -5237,12 +5355,11 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 	if ( bShortAmplicons ) {
 		give << "Short amplicon mode.\n";
 	}
-
-	if ( checkBC2ndRd() ) {
-		give << "Looked for switched read pairs (" << intwithcommas(revConstellationN) << " detected)" << endl;
+	if ( checkSwitchedRdPairs() ) {
+		//give << "Looked for switched read pairs (" << intwithcommas(revConstellationN) << " detected)" << endl;
 	}
 	if (greenQualStats) {
-		collectStatistics[0]->PostFilt->printStats2(give, remSeqs,0);
+		cst->PostFilt->printStats2(give, remSeqs,0);
 		collectStatistics[1]->PostFilt->printStats2(give, remSeqs,1);
 	} else {
 		statAddition[0]->PostFilt->printStats2(give,remSeqs,0);
@@ -5460,7 +5577,7 @@ void Filters::addStats(Filters* fil, vector<int>& idx){
 	maxReadsPerOFile = fil->maxReadsPerOFile;
 	ReadsWritten = fil->writtenReads();//the idea here is to have a number of reads in CURRENT file, not total reads
 	OFileIncre = fil->getFileIncrementor();
-	revConstellationN += fil->revConstellationN;
+	//revConstellationN += fil->revConstellationN;
 }
 
 
@@ -5478,6 +5595,7 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx){
 	}
 	maxL += cs->maxL;	PrimerFail += cs->PrimerFail ;
 	AvgQual += cs->AvgQual; HomoNT += cs->HomoNT;
+	totalMid += cs->totalMid;
 	PrimerRevFail += cs->PrimerRevFail;
 	minL += cs->minL ; minLqualTrim+= cs->minLqualTrim; TagFail += cs->TagFail;
 	MaxAmb += cs->MaxAmb ; QualWin += cs->QualWin;
@@ -5492,8 +5610,10 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx){
 	dblTagFail += cs->dblTagFail;
 	DerepAddBadSeq += cs->DerepAddBadSeq;
 	total2 += cs->total2; totalSuccess += cs->totalSuccess;
+	swappedRds += cs->swappedRds; reversedRds += cs->reversedRds;
 	PostFilt->addRepStats(cs->PostFilt);
 	PreFilt->addRepStats(cs->PreFilt);
+
 }
 
 void collectstats::reset(){

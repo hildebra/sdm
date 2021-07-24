@@ -85,6 +85,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "include/robin_set.h"
 #include "include/robin_hood.h"
 
+//#include "include/ssw_cpp.h"
+
 
 #ifdef _gzipread
 #include "gzstream.h"
@@ -103,7 +105,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif // _WIN32
 
 
-static const float sdm_version = 1.88f;
+static const float sdm_version = 1.89f;
 static const char* sdm_status = "beta";
 
 

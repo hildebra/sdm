@@ -138,7 +138,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 	//prep some variables
 	int BCoffs = curFil->getBCoffset();
-	bool checkBC2ndRd = curFil->checkBC2ndRd();
+	bool checkSwitchedRdPairs = curFil->checkSwitchedRdPairs();
 	bool dualBCs = curFil->doubleBarcodes();
 	bool doBCsAtAll = curFil->doBarcodes();
 	int pairedRd = curFil->isPaired();
@@ -146,7 +146,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 	int tagIdx(-2); int tagIdx2(-2);
 	string presentBC(""); int c_err(0);
-	bool isReversed(false);//was a reversion detected?
+	//bool isReversed(false);//was a reversion detected?
 
 	if (MIDuse && tdn[2] != nullptr) {
 		tagIdx = curFil->detectCutBC(tdn[2], presentBC, c_err, true); 
@@ -157,7 +157,11 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	//bool reversedDNA = curFil->swapReverseDNApairs(tdn);
 
 
-    if (checkBC2ndRd ) {
+	//manage reversed / swapped reads by detecting where the fwd primer is
+	curFil->swapReverseDNApairs(tdn);
+
+
+    /*if (checkBC2ndRd) {
 		if (!dualBCs) {
 			//use this routine to set the BC inside the DNA object
 			bool revT = false;
@@ -171,9 +175,9 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 				tdn[0]->constellationPairRev(true); tdn[1]->constellationPairRev(true);
 				//revConstellation++;
 			}
-			/*else if (tagIdx2 < 0 && tagIdx < 0) {
-				int x = 0;
-			}*/
+			//else if (tagIdx2 < 0 && tagIdx < 0) {
+			//	int x = 0;
+			//}
 			if (revT) {
 				tdn[0]->reverse_transcribe(); tdn[1]->reverse_transcribe();
 			}
@@ -181,9 +185,11 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 		tagIdx2 = -2; tagIdx = -2;
 		tdn[1]->setpairREV();		tdn[0]->setpairFWD();
 	}
+	*/
 
     
 	//tdn[0]->reverse_transcribe();
+	//actually important routine
 	MD->analyzeDNA(tdn[0], -1, 0, tagIdx, curThread);
 	//tdn[0]->matchSeqRev
 	bool ch1(false); if (tdn[0] != NULL) { ch1 = tdn[0]->isGreenQual(); }
@@ -203,7 +209,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 				cerr << "tagidx2 wrongly truncated to " << tagIdx2 << endl;
 			}
 		}
-		if (isReversed) { tdn[1]->reverse_transcribe(); }
+		//if (isReversed) { tdn[1]->reverse_transcribe(); }
 		MD->analyzeDNA(tdn[1], -1, 1, tagIdx2, curThread);
 		ch2 = tdn[1]->isGreenQual();
 	}
@@ -316,7 +322,7 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 	int DNAinMem(0);
 	bool cont(true),cont2(true),cont3(true);
 	bool keepPairedHD = IS->keepPairedHD();
-	int revConstellation(0);
+	//int revConstellation(0);
 	int cnt(0); 
 	bool switching(true); // important to keep track of this, to fix swapped read pairs
 
@@ -403,7 +409,7 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 				if (tdn[0] == nullptr) { cont = false;  break; }
 				//if (fqHeadVer) { MD->checkFastqHeadVersion(tdn[0]); fqHeadVer = false; }
 				cont = read_paired_DNAready(tdn, MIDuse, MD, 0);
-				if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
+				//if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
 			}
 			else {
 				cont = read_paired_STRready(tmpLines, MIDuse, MD, 0, 
@@ -423,7 +429,7 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 
 	
 	//close shop
-	MD->revConstellationCnts(revConstellation);
+	//MD->revConstellationCnts(revConstellation);
 	MD->closeOutStreams();
 	return true;
 }

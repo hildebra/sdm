@@ -2,6 +2,8 @@
 
 
 void mergeStats::printHisto(string File) {
+	int maxVS = max((int)matchFwd.size(), (int)matchRev.size());
+	if (maxVS <= 0) { return; }
 	cout << "Print Merge error log of S="<< matchFwd.size()<<endl;
 	if (matchFwd.size() == 0 && matchRev.size() == 0) { return; }
 	prepStats();
@@ -10,7 +12,6 @@ void mergeStats::printHisto(string File) {
 	if (!temp) { cerr << "Could not open outstream to read merger stat file:\n" << File << endl; exit(478); }
 
 	temp << "Pos\tFracFwd\tmismatchFwd\tmatchFwd\tFracRev\tmismatchRev\tmatchRev\n";
-	int maxVS = max((int)matchFwd.size(), (int)matchRev.size());
 	for (int i = 0; i < maxVS; i++) {
 		temp << i << "\t";
 		if (i < matchFwd.size()) {
@@ -26,6 +27,7 @@ void mergeStats::printHisto(string File) {
 
 }
 void mergeStats::prepStats() {
+	if (matchFwd.size() == 0) {	return;	}
 	percFwd.resize(matchFwd.size(), 0.f); percRev.resize(mismatchRev.size(), 0.f);
 	maxF = 0.f; maxR = 0.f;
 	for (size_t i = 0; i < matchFwd.size(); i++) {
