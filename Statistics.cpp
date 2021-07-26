@@ -147,7 +147,7 @@ inline float Statistics::calc_median(vector<unsigned int> &in, float perc) {
 ////    }
 //
 //    //some general stats that always apply:
-//    if (d->QualCtrl.PrimerFail) {
+//    if (d->QualCtrl.PrimerFwdFail) {
 //        PrimerFail++;
 //    }
 //    if (d->QualCtrl.PrimerRevFail) {

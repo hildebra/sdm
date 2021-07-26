@@ -780,9 +780,17 @@ public:
 	void reset();
 	void resetTruncation() { sequence_length_ = sequence_.length(); }
 	void setPassed(bool b);
-	void setMidQual(bool b) { mid_quality_ = b; }
-	bool isGreenQual(void){return good_quality_;}
-	bool isYellowQual(void){return mid_quality_;}
+	void setYellowQual(bool b) { 
+		mid_quality_ = b; 
+	}
+	bool isGreenQual(void) {
+		if (mid_quality_) { return false; } 
+		return good_quality_;
+	}
+	bool isYellowQual(void){
+		if (good_quality_) { return false; }
+		return mid_quality_;
+	}
 	string getSubSeq(int sta, int sto){return sequence_.substr(sta, sto);}
 	void resetQualOffset(int off, bool solexaFmt);
 	
@@ -801,7 +809,7 @@ public:
 	//void setSeedScore(float i) { tempFloat = (float)i; }
 
 	struct QualStats {
-		bool maxL; bool PrimerFail; bool AvgQual; //sAvgQual
+		bool maxL; bool PrimerFwdFail; bool AvgQual; //sAvgQual
 			bool HomoNT; bool PrimerRevFail; bool minL; 
 			bool minLqualTrim; //<-sMinQTrim trimmed due to quality
 			bool TagFail; bool MaxAmb; bool QualWin;//sQualWin 
@@ -812,7 +820,7 @@ public:
 			bool RevPrimFound; 
 			bool BinomialErr; bool dblTagFail;
 		QualStats() :
-			maxL(false), PrimerFail(false), AvgQual(false), HomoNT(false),
+			maxL(false), PrimerFwdFail(false), AvgQual(false), HomoNT(false),
 			PrimerRevFail(false), minL(false), minLqualTrim(false),
 			TagFail(false), MaxAmb(false), QualWin(false),
 			AccErrTrimmed(false), QWinTrimmed(false),

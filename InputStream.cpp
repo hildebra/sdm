@@ -1199,10 +1199,18 @@ bool DNA::sameHead(const string& oID) {
 
 
 void DNA::setPassed(bool b){
-    good_quality_=b;
+	//once mid qual is active, there is no more good qual possible
+	if (mid_quality_) {
+		good_quality_ = false;
+	}
+	else {
+		good_quality_ = b;
+	}
+ /*   good_quality_ = b;
 	if (good_quality_ && mid_quality_) {
         mid_quality_ = false;
 	}
+	*/
 }
 
 

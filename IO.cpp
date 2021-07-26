@@ -252,23 +252,34 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 
 	int idx1 = 1; int idx2 = 2;
-	if (MD->isPEseq() == 2) {
-		if (ch1 && !ch2) {
+	if (MD->isPEseq() == 2 ) {
+		if (tdn[1] != nullptr && tdn[0] != nullptr &&
+			(tdn[0]->isGreenQual() && tdn[1]->isGreenQual()) ||
+			(tdn[0]->isYellowQual() && tdn[1]->isYellowQual())
+			) {
+			//only this case allows for paired reads out
+			idx1 = 1;  idx2 = 2;
+		}
+		else {
 			idx1 = 3; idx2 = 4;
-			if (tdn[1] != NULL) { tdn[1]->failed(); }
+		}
+		/*if (ch1 && !ch2) {
+			idx1 = 3; idx2 = 4;
+			//if (tdn[1] != NULL) { tdn[1]->failed(); }
 			//		delete dnaTemp2;
 		}
 		else if (ch2 && !ch1) {
 			idx2 = 4; idx1 = 3;
-			if (tdn[0] != NULL) { tdn[0]->failed(); }
+			//if (tdn[0] != NULL) { tdn[0]->failed(); }
 			//		delete tdn[0];
 		}
-		else if (!ch1 && !ch2) { //nothing passes
+		/*else if (!ch1 && !ch2) { //nothing passes
 			if (tdn[0] != NULL) { tdn[0]->failed(); }
 			if (tdn[1] != NULL) { tdn[1]->failed(); }
 			//		delete tdn[0]; delete dnaTemp2;
-		}
+		}*/
 	}
+	
 
 	//pre-merge step
 	if ( MD->mergeReads()) {MD->findSeedForMerge(tdn[0], tdn[1],curThread);	}
@@ -285,7 +296,9 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
     }*/
 	//testreadpair.unlock();
 	//save for later .. and collect stats
-	if (!MD->saveForWrite(tdn[0], idx1, curThread) || !MD->saveForWrite(tdn[1], idx2, curThread)) {
+	bool owr1 = MD->saveForWrite(tdn[0], idx1, curThread);
+	bool owr2 = MD->saveForWrite(tdn[1], idx2, curThread);
+	if (!owr1 || (!owr2 && tdn[1] != nullptr)) {
 		return false;
 	}
 	return true;

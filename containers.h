@@ -386,8 +386,8 @@ public:
 
 	//pair_:-1: no Pair-sequence_, 0,1=pair_ 1/2 (assumes MID BC)
 	//doSeeding: extract longes Seed //false, -1, -2
-	bool check(shared_ptr<DNA> in, bool doSeeding, int pair, int &tagIdx);// , bool checkBC = true);
-	bool checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx );
+	//bool check(shared_ptr<DNA> in, bool doSeeding, int pair, int &tagIdx);// , bool checkBC = true);
+	bool checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, int &tagIdx ,bool doSeeding);
 	//vector<bool> check_pairs(shared_ptr<DNA>p1, shared_ptr<DNA>p2, shared_ptr<DNA>mid, vector<bool>, bool changePHead);
 	void setSeqLength(float minL, int maxL);
 	void setMaxAmb(int x) { MaxAmb = x; };
@@ -595,7 +595,7 @@ protected:
 			if (leng - hindrance < min_l) {
 				d->QualCtrl.minL = true;
 				if (leng - hindrance >= alt_min_l) {
-					d->setMidQual(true);
+					d->setYellowQual(true);
 					return false;
 				}
 				//statAddition.minL++;
@@ -753,7 +753,7 @@ public:
 	~DNAuniqSet() {}
 	void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, 
 		int MrgPos1, int sample_id) {
-		dna->setMidQual(false); dna->setDereplicated();
+		dna->setDereplicated();//dna->setYellowQual(false);
 		shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
 		new_dna_unique->saveMem();
 		if (dna2 != nullptr) { new_dna_unique->attachPair(make_shared<DNAunique>(dna2, sample_id)); }
