@@ -887,11 +887,14 @@ private:
 	void add2OTUmat(shared_ptr<DNAunique>, int, matrixUnit);
 	bool uclInOldDNA(const string&, const vector<int>&, float, Filters* fil);
 	bool uclInOldDNA_simple(const string&, const vector<int>&, int&);
-	bool getUCFlineInfo(string&, string&, float&, vector<int>&, bool addFromHDstring = false);
+	bool getMAPPERline(string&, string&, float&, vector<int>&, bool addFromHDstring = false);
 	void besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1, shared_ptr<DNA> tdn2, Filters* fil);
 	void setOTUnms();
+	void resetMarks();//reset the uc file format, in case of cd-hit/vsearch input
 
 	inline void removeSizeStr(string&);
+	inline void removeSeqStr(string&);
+	inline void removeCentrStr(string&);
 	inline void removeSampleID(string&, const string &);
 	inline void removeSampleID(string&, const string &, string&);
 	void readDerepInfo(const string);
@@ -923,6 +926,9 @@ private:
 	bool UCread,pairsMerge,MAPread;
 	bool b_derepAvailable;//has sdm been run in demultiplexer mode?
 	bool UPARSE8up, UPARSE9up, UPARSE11up, UpUcFnd;
+	bool cdhit, repFound;
+	bool vsearch;
+	bool ucispaf;
 	string otuTerm,otuOUTterm;
 	bool RefDBmode;
 	int RefDBotuStart;
@@ -935,6 +941,9 @@ private:
 	bool doChimeraCnt;
 	bool OTUnumFixed; // can new OTUs be added, after inital reading of DNA OTU.fna?
 	long totalDerepCnt;
+
+	float qCovThr, perIDmatch;
+
 	bool b_merge_pairs_optiSeed_;
 	ReadMerger* merger;
 };

@@ -5919,14 +5919,16 @@ UClinks::UClinks( OptContainer& cmdArgs):
 	UCread(false), pairsMerge(false), MAPread(false),
 	b_derepAvailable(false),
 	UPARSE8up(false), UPARSE9up(false), UPARSE11up(false),
-	UpUcFnd(false),
+	UpUcFnd(false), cdhit(false), vsearch(false),
+	ucispaf(false),
 	otuTerm("OTU"), otuOUTterm("OTU_"),
 	RefDBmode(false), RefDBotuStart(-1),
 	SeedsAreWritten(false),
 	OTUmat(0), unregistered_samples(false),
 	doChimeraCnt(false), OTUnumFixed(true),
-	b_merge_pairs_optiSeed_(false),merger(nullptr),
-	totalDerepCnt(0)
+	totalDerepCnt(0),
+	qCovThr(0.8f), perIDmatch(97.f),
+	b_merge_pairs_optiSeed_(false),merger(nullptr)
 
 {
 	//read in UC file and assign clusters
@@ -5942,6 +5944,12 @@ UClinks::UClinks( OptContainer& cmdArgs):
 	if (cmdArgs.find("-derep_map") != cmdArgs.end()) {
 		derepMapFile = cmdArgs["-derep_map"];
 	}
+	if (cmdArgs.find("-minQueryCov") != cmdArgs.end()) {
+		qCovThr = atof(cmdArgs["-minQueryCov"].c_str());
+	}
+	if (cmdArgs.find("-id") != cmdArgs.end()) {
+		perIDmatch = atof(cmdArgs["-id"].c_str());
+	}
 	if (cmdArgs.find("-count_chimeras") != cmdArgs.end() &&
 		cmdArgs["-count_chimeras"] == "T") {
 		doChimeraCnt = true;
@@ -5950,13 +5958,19 @@ UClinks::UClinks( OptContainer& cmdArgs):
 		cmdArgs["-merge_pairs_seed"] == "1") {
 		b_merge_pairs_optiSeed_ = true;
 	}
+
+	//set version of mapping/clustering
 	if (cmdArgs["-uparseVer"] != "") {
 		if (cmdArgs["-uparseVer"] == "N11") {//UNOISE v11
 			UPARSE8up = true;
 			otuTerm = "Zot";
 			otuOUTterm = "Zotu";
 		}
-		else {
+		else if (cmdArgs["-uparseVer"] == "cdhit") {
+			cdhit = true; UpUcFnd = true; UPARSE8up = true;
+		} else if (cmdArgs["-uparseVer"] == "vsearch") {
+			UpUcFnd = true; vsearch = true;
+		} else {
 			int upVer = atoi(cmdArgs["-uparseVer"].c_str());
 			if (upVer >= 8 && upVer < 9) {
 				UPARSE8up = true; UpUcFnd = true;
@@ -5964,10 +5978,14 @@ UClinks::UClinks( OptContainer& cmdArgs):
 			else if (upVer >= 9 && upVer < 11) {
 				UPARSE8up = true; UPARSE9up = true; UpUcFnd = true;
 			}
+			else if (upVer == 9966) {//cdhit code
+				cdhit = true; UpUcFnd = true;
+			}
 			else if (upVer >= 11) {
 				UPARSE8up = true; UPARSE9up = true; UPARSE11up = true; UpUcFnd = true;
 				otuTerm = "otu";
 			}
+			
 		}
 	}
 }
@@ -6166,28 +6184,28 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 	shared_ptr<DNAunique> match(NULL); shared_ptr<DNA>  match2(NULL);
 	bool cont(true);//,cont2(true);
 	string segs("");
-	string segs2;
+	string segs2("");
 	float perID;
 	vector<int> curCLID(0,0);
 	//bool sync(false); // syncing of 2 read pairs; not implemented for this function yet
 
-	while ( getUCFlineInfo(segs, segs2, perID, curCLID, !b_derepAvailable) ) {
+	//goes through UC file
+	while ( getMAPPERline(segs, segs2, perID, curCLID, !b_derepAvailable) ) {
 		//int subcnt = 0;
 		if ( curCLID.size() == 0 ) { continue; }
 		if ( uclInOldDNA(segs, curCLID, perID, fil) ) {
 			curCLID.resize(0);
 			continue;
 		}
-		//goes through UC file
-		while(cont){
+		while(cont){//match to DNA
 			shared_ptr<DNA> tmpDNA = IS->getDNA(0);
+			match2 = IS->getDNA(1);
 			if (tmpDNA == NULL) { cont = false; break; }//signal that at end of file
-			match.reset( new DNAunique(tmpDNA, -1));
-			//delete tmpDNA;
+			
+			match = make_shared<DNAunique> (tmpDNA, -1);
 			//assummes in original implementation, that we can get derep.map lines with the same 
 			//ordering as fq derep (which works normally, just not for dada2 mode)
 			UCcnt+= oneDerepLine(match);
-			match2 = IS->getDNA(1);
 			string curID = match->getId();
 			curID = curID.substr(0,curID.find_first_of(' '));
 			//check if dnaTemp1 a) matches id_ b) is better
@@ -6231,7 +6249,7 @@ void UClinks::finishUCfile(Filters* fil, string addUC, bool bSmplHd){
 	float perID(0.f);
 	vector<int> curCLID(0);
 
-	while ( getUCFlineInfo(segs, segs2, perID, curCLID, !b_derepAvailable) ) {
+	while ( getMAPPERline(segs, segs2, perID, curCLID, !b_derepAvailable) ) {
 		if ( uclInOldDNA(segs, curCLID, perID, fil) ) {
 			curCLID.resize(0);
 			continue;
@@ -6251,6 +6269,10 @@ void UClinks::addUCdo(string addUC,bool SmplHd) {
 	float perID;
 	int cntsAddUC=0;
 	vector<int> curCLID(0);
+	ucispaf = false;
+	if (addUC.find(".paf") != string::npos) {
+		ucispaf = true; UpUcFnd = true;
+	}
 	ucf.open(addUC.c_str(), ios::in);
 	if (!ucf) {
 		UCread = true;
@@ -6260,14 +6282,14 @@ void UClinks::addUCdo(string addUC,bool SmplHd) {
 	}
 	UCread = false;
 	if (SmplHd){
-		while (getUCFlineInfo(segs, segs2, perID, curCLID, SmplHd)) { 
+		while (getMAPPERline(segs, segs2, perID, curCLID, SmplHd)) { 
 			if (curCLID.size() > 0) { cntsAddUC++; }
 			curCLID.resize(0); 
 		}
 		
 	}else {//complicated..
 		int cnt(0);
-		while (getUCFlineInfo(segs, segs2, perID, curCLID, SmplHd)) { 
+		while (getMAPPERline(segs, segs2, perID, curCLID, SmplHd)) { 
 			//find segs in remaining dereps
 			cnt++; //if (cnt < 61403) { continue; }
 			if (curCLID.size() == 0) { continue; }
@@ -6333,19 +6355,25 @@ bool UClinks::uclInOldDNA(const string& segs,const vector<int>& curCLID, float p
 	return false;
 }
 
-bool UClinks::getUCFlineInfo(string& segs, string& segs2,float& perID, 
-	vector<int>& curCLID,  bool addFromHDstring) {
-	//reads UC file line by line
-	//can also be used to delineate UC's
-
-
-	if (UCread){return false;}
-	//close all file streams
-	if (ucf.eof()){
-		UCread=true;
-		ucf.close();
-		return false;
+void UClinks::resetMarks() {
+	if (cdhit || vsearch) {
+		UpUcFnd = false;
 	}
+}
+
+bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID, 
+	vector<int>& curCLID,  bool addFromHDstring) {
+	//converts derep reads mapping to OTUs to counts
+	//seg: read ID, segs2: OTU repr read, perID: match to repr read
+
+
+	//close all file streams
+	if (UCread) { resetMarks(); UpUcFnd = false; return false; }
+	if (ucf.eof()){
+		resetMarks();
+		UCread=true;		ucf.close();		return false;
+	}
+	float qCov = 1.f;
 	string line; 
 	std::unordered_map<string, int>::iterator itCL;
 	while (getline(ucf, line, '\n')) {
@@ -6353,7 +6381,11 @@ bool UClinks::getUCFlineInfo(string& segs, string& segs2,float& perID,
 		uclines++;
 		if (line.length() <= 1){ continue; }	
 		if (!UpUcFnd){
-			if (line.substr(1, 1) == "\t"){ UPARSE8up = false; 
+			//reset
+			vsearch = false;cdhit = false; UPARSE8up = false; UPARSE9up = false; UPARSE11up = false;
+			if (line[0] == '>') {
+				cdhit = true;
+			} else if (line.substr(1, 1) == "\t"){ UPARSE8up = false; 
 			}else {	UPARSE8up = true;	}
 
 			if (UPARSE8up){//could also be uparse9
@@ -6370,85 +6402,166 @@ bool UClinks::getUCFlineInfo(string& segs, string& segs2,float& perID,
 			}
 			UpUcFnd = true;
 		}
-		
-		stringstream ss;
-		ss << line;
 		bool chimera = false;
 		vector<string>tarsV; //saves hits to OTUs
-		//2 ways to get to a) hit info b) query & otu
-		if (!UPARSE8up){ //uparse 7
-			if ( (line.substr(0, 1) != "H")) {
-				continue;
+
+		if (cdhit) {
+			if (line[0] == '>') {
+				getline(ucf, line, '\n');
+				repFound = false;
+				segs2 = "";
 			}
-			for (uint i = 0; i < 4; i++){//jump to pos X
-				getline(ss, segs, '\t');
-			}
-			perID = (float)atof(segs.c_str());
-			for (uint i = 0; i < 5; i++){//jump to pos X
-				getline(ss, segs, '\t');
-			}
-			getline(ss, segs2, '\t');
-		} else if (!UPARSE9up){ // uparse 8
-			//query first entry
-			string tmp;
-			getline(ss, segs, '\t');//0
-			getline(ss, tmp, '\t');//1
-			//should be "match"
-			if ( tmp == "chimera") {
-				if ( !doChimeraCnt ) {continue;}
-				chimera = true; }// segs = ""; continue;}
-			if (tmp == "otu"){
+			size_t pos = line.find("nt, >");
+			size_t pos2 = line.find("...", pos + 4);
+			//string gene = line.substr(pos + 5, pos2 - pos - 5);
+			segs = line.substr(pos + 5, pos2 - pos - 5);
+
+			//meachnism has to be slightly different for cdhit, have to save segs2 between lines
+			if (!repFound  ){//&& line.back() == '*') {//report representative gene
+				repFound = true;
 				segs2 = segs;
 				perID = 100.f;
 			} else {
-				getline(ss, tmp, '\t');//2
-				perID = (float)atof(tmp.c_str());
-				//indicator if hit
-				//OTU last entry
-				getline(ss, segs2, '\t');//3
-				getline(ss, segs2, '\t');//4
+				//find ID
+				pos = line.find("at +/", pos2 + 3);
+				string ID = line.substr(pos + 5, line.length() - pos - 6);
+				perID = stof(ID);
+				//cerr << line << " " << ID << endl;
 			}
-		} else { //UP9, uparse 10, uparse 11, dada2 fake .uc
-				 //query first entry
-			string tmp;
-			getline(ss, segs, '\t');//0
-			getline(ss, tmp, '\t');//1
-								   //should be "match"
-			if (tmp == "chimera" ) {
-				continue;
-			} else if ( tmp == "noisy_chimera" ||  tmp == "good_chimera") { //tmp == "perfect_chimera" ||
-				if (!doChimeraCnt) { continue; }
-				chimera = true;
-			}else if (tmp == "perfect_chimera") {
-				removeSizeStr(segs);
-				perfectChims.insert(segs);
-				continue;
-			}// segs = ""; continue;}
-			if (tmp.substr(0,3) == otuTerm ){
-				segs2 = segs;
-				perID = 100.f;
-			} 
-			else {//match or perfect_chimera case
-				getline(ss, tmp, '\t');//2
-				//dqt=1;top=GZV0ATA01ANJXZ;size=14;(99.6%);
-				size_t p1(tmp.find("top=")+4);//4
-				size_t p2(tmp.find(";(", p1)+2);
-				size_t p3(tmp.find("%);", p2));
-				segs2 = tmp.substr(p1, p2 - p1-1);
-				//string xx = tmp.substr(p2, p3 - p2);
-				perID = (float)atof(tmp.substr(p2,p3-p2).c_str());
-				if (false && chimera) {//just use up9 top hit
-//					p1(tmp.find(";top=") + 5,p2);
-//					p2(tmp.find(";(", p1) + 2);
+		} else {
 
+			stringstream ss;
+			ss << line;
+			//2 ways to get to a) hit info b) query & otu
+			if (ucispaf) {
+				getline(ss, segs, '\t');
+				string query = segs;
+				getline(ss, segs, '\t');
+				float qLen = atof(segs.c_str());
+				for (uint i = 0; i < 3; i++) {//jump to pos X
+					getline(ss, segs, '\t');
+				}
+				getline(ss, segs2, '\t');//tarname
+				getline(ss, segs, '\t');
+				float tLen = atof(segs.c_str());
+				for (uint i = 0; i < 2; i++) {//jump to pos X
+					getline(ss, segs, '\t');
+				}
+				getline(ss, segs, '\t');
+				float matches = atof(segs.c_str());
+				getline(ss, segs, '\t');
+				float mapLen = atof(segs.c_str());
+				perID = matches / mapLen *100.f;
+
+				qCov = mapLen / qLen;
+				
+				if (perID < perIDmatch || qCov < qCovThr) {
+					//reject this hit
+					return true;
+				}
+				segs = query;
+			} else if (vsearch) {
+				bool isSeed = line.substr(0, 1) == "S";
+				if (line.substr(0, 1) != "H" && !isSeed) {
+					continue;
+				}
+				for (uint i = 0; i < 4; i++) {//jump to pos X
+					getline(ss, segs, '\t');
+				}
+				perID = (float)atof(segs.c_str());
+				for (uint i = 0; i < 5; i++) {//jump to pos X
+					getline(ss, segs, '\t');
+				}
+				getline(ss, segs2, '\t');
+				if (isSeed) { segs2 = segs; perID = 100.f; }
+
+			} else if (!UPARSE8up) { //uparse 7
+				if (line.substr(0, 1) != "H" ) {
+					continue;
+				}
+				for (uint i = 0; i < 4; i++) {//jump to pos X
+					getline(ss, segs, '\t');
+				}
+				perID = (float)atof(segs.c_str());
+				for (uint i = 0; i < 5; i++) {//jump to pos X
+					getline(ss, segs, '\t');
+				}
+				getline(ss, segs2, '\t');
+			}
+			else if (!UPARSE9up) { // uparse 8
+			 //query first entry
+				string tmp;
+				getline(ss, segs, '\t');//0
+				getline(ss, tmp, '\t');//1
+				//should be "match"
+				if (tmp == "chimera") {
+					if (!doChimeraCnt) { continue; }
+					chimera = true;
+				}// segs = ""; continue;}
+				if (tmp == "otu" || tmp == "OTU") {
+					segs2 = segs;
+					perID = 100.f;
+				}
+				else {
+					getline(ss, tmp, '\t');//2
+					perID = (float)atof(tmp.c_str());
+					//indicator if hit
+					//OTU last entry
+					getline(ss, segs2, '\t');//3
+					getline(ss, segs2, '\t');//4
+				}
+
+			}
+			else { //UP9, uparse 10, uparse 11, dada2 fake .uc
+				  //query first entry
+				string tmp;
+				getline(ss, segs, '\t');//0
+				getline(ss, tmp, '\t');//1
+									   //should be "match"
+				if (tmp == "chimera") {
+					continue;
+				}
+				else if (tmp == "noisy_chimera" || tmp == "good_chimera") { //tmp == "perfect_chimera" ||
+					if (!doChimeraCnt) { continue; }
+					chimera = true;
+				}
+				else if (tmp == "perfect_chimera") {
+					removeSizeStr(segs);
+					perfectChims.insert(segs);
+					continue;
+				}// segs = ""; continue;}
+				if (tmp.substr(0, 3) == otuTerm) {
+					segs2 = segs;
+					perID = 100.f;
+				}
+				else {//match or perfect_chimera case
+					getline(ss, tmp, '\t');//2
+					//dqt=1;top=GZV0ATA01ANJXZ;size=14;(99.6%);
+					size_t p1(tmp.find("top=") + 4);//4
+					size_t p2(tmp.find(";(", p1) + 2);
+					size_t p3(tmp.find("%);", p2));
+					segs2 = tmp.substr(p1, p2 - p1 - 1);
+					//string xx = tmp.substr(p2, p3 - p2);
+					perID = (float)atof(tmp.substr(p2, p3 - p2).c_str());
+					if (false && chimera) {//just use up9 top hit
+	//					p1(tmp.find(";top=") + 5,p2);
+	//					p2(tmp.find(";(", p1) + 2);
+
+					}
 				}
 			}
 		}
+
+
+
+		//convert mapping to otu information
 		//remove spaces
 		segs = segs.substr(0,segs.find_first_of(' '));
 		//also remove sample identifier in string
 		string smplID = "";
 		removeSampleID(segs, SEP, smplID);
+
+		//finished parsing, now reformat to get matching sample
 
 		if ( chimera && UPARSE8up) {
 			tarsV = splitByComma(segs2, false, '+');
@@ -6467,6 +6580,8 @@ bool UClinks::getUCFlineInfo(string& segs, string& segs2,float& perID,
 			segs2 = oriClKey;
 			//remove ;size= argument
 			removeSizeStr(segs2);
+			removeSeqStr(segs2);
+			removeCentrStr(segs2);
 			removeSampleID(segs2, SEP);
 			itCL = seq2CI.find(segs2);
 
@@ -6593,6 +6708,10 @@ void UClinks::setupDefSeeds(shared_ptr<InputStreamer> FA, const vector<string>& 
 		removeSizeStr(segs2);
 		//also remove sample identifier in string
 		removeSampleID(segs2, SEP);
+		if (vsearch) {
+			removeSeqStr(segs2);
+			removeCentrStr(segs2);
+		}
 
 		//cluster should not exist, test
 		std::unordered_map<string, int>::iterator itCL;
@@ -6643,6 +6762,10 @@ void UClinks::addDefSeeds(shared_ptr<InputStreamer> FA, Filters* fil) {
 		//remove ;size= argument
 		removeSizeStr(segs2);
 		removeSampleID(segs2, SEP);
+		if (vsearch) {
+			removeCentrStr(segs2);
+			removeSeqStr(segs2);
+		}
 
 		//cluster should not exist, test
 		std::unordered_map<string, int>::iterator itCL;
@@ -6749,10 +6872,21 @@ void UClinks::removeSampleID(string& w, const string &SEP, string & SMplID) {
 }
 void UClinks::removeSizeStr(string& w) {
 	size_t idx = w.find(";size=");
-	/*#ifdef matrix_sum   //not required, sanity check that is not really working out with usearch mappings
-	int OTUsize = atoi( segs2.substr(idx+6).substr(0,-1).c_str() );
-	#endif*/
-	w = w.substr(0, idx);
+	if (idx != std::string::npos) {
+		w = w.substr(0, idx);
+	}
+}
+void UClinks::removeSeqStr(string& w) {
+	size_t idx = w.find(";seqs=");
+	if (idx != std::string::npos) {
+		w = w.substr(0, idx);
+	}
+}
+void UClinks::removeCentrStr(string& w) {
+	size_t idx = w.find("centroid=");
+	if (idx != std::string::npos) {
+		w = w.substr(idx + 9);
+	}
 }
 
 void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, Filters* fil, 
