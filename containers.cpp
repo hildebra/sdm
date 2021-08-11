@@ -5935,6 +5935,9 @@ UClinks::UClinks( OptContainer& cmdArgs):
 	SEP = cmdArgs["-sample_sep"];
 	string str = cmdArgs["-optimalRead2Cluster"];
 	
+	if (str.find(".paf") != string::npos) {
+		ucispaf = true; UpUcFnd = true;
+	}
 
 	ucf.open(str.c_str(),ios::in);
 	if (!ucf){
@@ -6146,6 +6149,7 @@ void UClinks::finishMAPfile(){
 			exit(67);//DEBUG
 		}
 		finishMapCnt += curCnt;
+		totalDerepCnt += curCnt2;
 
 		//add d to oldDNA
 		string curID = d->getId();
@@ -6161,7 +6165,7 @@ void UClinks::finishMAPfile(){
 		MAPread = true;
 	}
 
-	cerr << "Found " << finishMapCnt << " counts derep map\n";
+	cerr << "Found " << totalDerepCnt<< " counts in derep.map, "<< finishMapCnt<<" counts secondary\n";
 
 }
 
@@ -6358,6 +6362,7 @@ bool UClinks::uclInOldDNA(const string& segs,const vector<int>& curCLID, float p
 void UClinks::resetMarks() {
 	if (cdhit || vsearch) {
 		UpUcFnd = false;
+		cdhit = false; vsearch = false;
 	}
 }
 
