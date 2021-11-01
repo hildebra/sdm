@@ -280,7 +280,17 @@ OutputStreamer::OutputStreamer(Filters* fil, OptContainer& cmdArgs,
 		openNoBCoutstrean(cmdArgs["-o_fastq_noBC"]);
 	}
 	if (cmdArgs.find("-o_demultiplex") != cmdArgs.end()) {//demulti: always write mode out
-		generateDemultiOutFiles(cmdArgs["-o_demultiplex"],fil, ios::out);
+		bool gzDemulti = false;
+		if (cmdArgs.find("-o_demultiplex_gz") != cmdArgs.end()) {
+			if (cmdArgs["-o_demultiplex_gz"] == "1") {
+				gzDemulti = true;
+				//cerr << "Gzip demulti output\n";
+			}
+			else {
+				//cerr << "\n\nNo Gzip demulti output\n";
+			}
+		}
+		generateDemultiOutFiles(cmdArgs["-o_demultiplex"],fil, ios::out, gzDemulti);
 	}
 	if (cmdArgs.find("-merge_pairs_filter") != cmdArgs.end()
 		&& cmdArgs["-merge_pairs_filter"] == "1") {
@@ -711,12 +721,19 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d, int p, int BCoffset) {//th
 }
 
 
-void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil, std::ios_base::openmode writeStatus) {
+void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil, 
+	std::ios_base::openmode writeStatus, bool demulti2gz) {
 	//fill in demultiSinglFiles vector
 	vector<ofbufstream*> empVec(2, NULL);
 	//vector<string> empVec2(2, "");
 
 	bool doMC = Nthrds > 1;
+	string gzSuffiz = "";
+	string gzReport = "";
+	if (demulti2gz) {
+		gzSuffiz = ".gz";
+		gzReport = "gzipped ";
+	}
 
 	struct stat info;
 	if (stat(path.c_str(), &info) != 0) {
@@ -724,7 +741,7 @@ void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil, std::ios
 		exit(833);
 	}
 	else if (info.st_mode & S_IFDIR) { // S_ISDIR() doesn't exist on my windows 
-		cerr << "Writing demultiplexed files to: " << path << endl;// printf("%s is a directory\n", path);
+		cerr << "\nWriting "<< gzReport<<"demultiplexed files to : " << path << endl;// printf(" % s is a directory\n", path);
 	}
 	else {
 		cerr << path << " is no directory\n"; exit(834);
@@ -734,7 +751,10 @@ void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil, std::ios
 	bDoDemultiplexIntoFiles = true;
 	bool openOstreams = true; uint ostrCnt(0);
 	size_t bufS = 30000;
+	//save as .gz? -> no for dada2..
 	
+
+
 	demultiSinglFiles.resize(fil->SampleID.size(), empVec);
 	demultiMergeFiles.resize(fil->SampleID.size(), nullptr);
 	//demultiSinglFilesF.resize(fil->SampleID.size(), empVec2);
@@ -742,19 +762,19 @@ void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil, std::ios
 		//actually needs to know if paired files..
 		//if (ostrCnt > maxFileStreams) {openOstreams = false;}
 		if (pairedSeq == 1 || pairedSeq == -1) {
-			string nfile = path + fil->SampleID[i] + ".fq";
+			string nfile = path + fil->SampleID[i] + ".fq" + gzSuffiz;
 			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, doMC, bufS); }
 			//demultiSinglFilesF[i][0] = nfile;
 			ostrCnt++;
 		}
 		else {
-			string nfile = path + fil->SampleID[i] + ".1.fq";
+			string nfile = path + fil->SampleID[i] + ".1.fq" + gzSuffiz;
 			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, doMC,bufS*0.8); }
 			//demultiSinglFilesF[i][0] = nfile;
-			nfile = path + fil->SampleID[i] + ".2.fq";
+			nfile = path + fil->SampleID[i] + ".2.fq" + gzSuffiz;
 			if (openOstreams) { demultiSinglFiles[i][1] = new ofbufstream(nfile.c_str(), writeStatus, doMC,bufS*1.2); }
 			//demultiSinglFilesF[i][1] = nfile;
-			nfile = path + fil->SampleID[i] + ".merg.fq";
+			nfile = path + fil->SampleID[i] + ".merg.fq" + gzSuffiz;
 			if (openOstreams) { demultiMergeFiles[i] = new ofbufstream(nfile.c_str(), writeStatus, doMC, bufS); }
 			
 			ostrCnt += 2;
@@ -5411,7 +5431,7 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 	if (val == -1.f) {val = min_l_p;}
 	if (!greenQualStats){ val = (float)alt_min_l; }
 
-	give << "  < min sequence_ length (" << val << ")  : " << spaceX(18 - digitsFlt(val)) << intwithcommas((int)cst->minL);
+	give << "  < min Sequence length (" << val << ")  : " << spaceX(18 - digitsFlt(val)) << intwithcommas((int)cst->minL);
 	if (p2stat) { give << "; " << intwithcommas((int)cst2->minL); } give << endl;
 	if (cst->minLqualTrim>0){//this is failed because seq was too short after trimming
 		give << "       -after Quality trimming : " << spaceX(10) << intwithcommas((int)cst->minLqualTrim);
@@ -5422,7 +5442,7 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 	if (p2stat) { give << "; " << intwithcommas((int)cst2->AvgQual); } give << endl;
 	give << "  < window (" << FQWwidth << " nt) avg. Quality (" << FQWthr << ")  : " << spaceX(5 - digitsInt(FQWwidth)) << intwithcommas((int)cst->QualWin);
 	if (p2stat) { give << "; " << intwithcommas((int)cst2->QualWin); } give << endl;
-	give << "  > max sequence_ length (" << max_l << ")  : " << spaceX(18 - digitsInt(max_l)) << intwithcommas((int)cst->maxL);
+	give << "  > max Sequence length (" << max_l << ")  : " << spaceX(18 - digitsInt(max_l)) << intwithcommas((int)cst->maxL);
 	if (p2stat) { give << "; " << intwithcommas((int)cst2->maxL); } give << endl;
 	give << "  > (" << maxHomonucleotide << ") homo-nt run  : " << spaceX(21 - digitsInt(maxHomonucleotide)) << intwithcommas((int)cst->HomoNT);
 	if (p2stat) { give << "; " << intwithcommas((int)cst2->HomoNT); } give << endl;
@@ -7038,7 +7058,7 @@ void UClinks::printStats(ostream& os){
 	std::sort(accums.begin(), accums.end());
 	std::sort(sims.begin(), sims.end());
 	os << "Stats of Seed sequences (0th/10th/50th/90th/100th) percentile:\n";
-	if (lengths.size() > 0) { os << "\n     - sequence_ Length :   " << minL << "/" << calc_median2(lengths, 0.1f) << "/" << calc_median2(lengths, 0.5f) << "/" << calc_median2(lengths, 0.9f) << "/" << maxL; }
+	if (lengths.size() > 0) { os << "\n     - Sequence Length :   " << minL << "/" << calc_median2(lengths, 0.1f) << "/" << calc_median2(lengths, 0.5f) << "/" << calc_median2(lengths, 0.9f) << "/" << maxL; }
 	if (quals.size() > 0) { os << "\n     - Quality :      " << minQ << "/" << calc_median2(quals, 0.1f) << "/" << calc_median2(quals, 0.5f) << "/" << calc_median2(quals, 0.9f) << "/" << maxQ; }
 	if (accums.size() > 0) { os << "\n     - Accum. Error : " << minA << "/" << calc_median2(accums, 0.1f) << "/" << calc_median2(accums, 0.5f) << "/" << calc_median2(accums, 0.9f) << "/" << maxA;	}
 	if (sims.size() > 0) {	os << "\n     - Sim2Consensus: " << minS << "/" << calc_median2(sims, 0.1f) << "/" << calc_median2(sims, 0.5f) << "/" << calc_median2(sims, 0.9f) << "/" << maxS;		}

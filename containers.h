@@ -1024,7 +1024,7 @@ public:
 	void write2Demulti(shared_ptr<DNA>, int, int BCoffset);
 	//write DNA to demultiplexed files, is threadsafe
 	void write2Demulti(shared_ptr<DNA>, shared_ptr<DNA>, int BCoffset,int curThread);
-	void generateDemultiOutFiles(string, Filters*, std::ios_base::openmode=ios::out);
+	void generateDemultiOutFiles(string, Filters*, std::ios_base::openmode=ios::out,bool=false);
 	
 	bool mergeReads() {
 		return b_merge_pairs_;
