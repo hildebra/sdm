@@ -356,8 +356,6 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 				}
 				IS->getDNAlines(tmpLines[i], i);
 			}
-			
-		
 		} else {
 			//tdn.resize(3, nullptr);
 			tdn[0] = IS->getDNA(0);
@@ -383,18 +381,6 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 		cnt++;
 		//decide on MC or single core submission route
 		if (true && doMC) {
-//			if (tdn[0] == nullptr) { cont = false;  break; }
-//			if (fqHeadVer) { MD->checkFastqHeadVersion(tdn[0]); fqHeadVer = false; }
-
-			//work with threadpool instead 
-			/*
-			if (thrCnt >= Nthreads) { thrCnt = 0; }
-			pool->enqueue([tdn, MIDuse, MD, thrCnt]
-				{ read_paired_DNAready(tdn, MIDuse, MD, 0); }
-			);
-			thrCnt++;
-			/**/
-			
 			bool notSubm(true);
 			while (notSubm) {//go over possible submission slots
 				if (thrCnt >= Nthreads) {thrCnt = 0;}
@@ -404,10 +390,7 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 					cont = slots[thrCnt].job.get();
 				}
 				if (slots[thrCnt].inUse == false) {
-					//cdbg("submit readPairRdy ");
-//					slots[thrCnt].job = async(std::launch::async, read_paired_DNAready,
-//						tdn, MIDuse, MD, thrCnt);
-					slots[thrCnt].job = async(std::launch::async, read_paired_STRready,
+						slots[thrCnt].job = async(std::launch::async, read_paired_STRready,
 						tmpLines, MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
 					slots[thrCnt].inUse = true;
 					notSubm = false;
@@ -415,8 +398,6 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 				thrCnt++;
 			}
 			if (!cont) { break; }
-			/**/
-
 		} else {
 			if (0) {
 				if (tdn[0] == nullptr) { cont = false;  break; }
@@ -817,25 +798,13 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 			idx[XX->second].push_back(i);
 		}
 
-		/*for (unsigned int j=0; j < uniqueFastxFiles.size(); j++){
-			if (fastXtar[i] == uniqueFastxFiles[j]){ //the same
-				idx[j].push_back(i);
-				suc=true;
-				break;
-			}
-		}
-		if (!suc){
-			uniqueFastxFiles.push_back(fastXtar[i]);
-			idx.push_back(vector<int> (1,i));
-		}*/
 	}
 	
 
 	//unique Fas files set up.. check for their existence
 	shared_ptr<InputStreamer> testFiles = 
 		make_shared<InputStreamer>(!isFastq,mainFilter->getuserReqFastqVer(),"1","1",1);
-	// For each unique Fa file
-//	for (unsigned int i = 0; i < uniqueFastxFiles.size(); i++) {
+	// For each unique Fa file, create to see if path etc are right
 	for (auto uFX: uniqueFastxFiles) {
 			int tarID = idx[uFX.second][0]; string tmp;
 		string x = testFiles->setupInput(path, tarID, uFX.first, FastqF, FastaF,
@@ -1011,48 +980,20 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		// If multhreading is switched on and thread count is > 1  call multihtreaded functions.
 		// if multithreading = false ignore thread option
 		multithreading &= threads > 1;
+		
+		
+		
+		
+		
 		//**********************
-		//heavy reading routine
+		//heavy reading, demultiplexing, dereplicating routine
 		//**********************
+		read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
 		
-		//if (OutStreamer->isPEseq() == 2 || true) {
-		//completely switch to this routine to reduce maintenance workload
 
 
-
-
-
-
-
-
-			read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
-		
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			
-			//}else {
-			//read_single(cmdArgs, OutStreamer, IS, threads);
-			/*if (threads == 1) {
-			}	else if (threads >= 2) {
-				readSingleTp(cmdArgs, OutStreamer, IS, pool);
-			}*/
-		//}
-		//debug
-		//std::cout << "asdlkjsdlkjsad> " << filter->statistics_[0].main_read_stats_[0]->total << std::endl;
-		
 		//here all subfilter can be merged (to get stats right)
 		OutStreamer->mergeSubFilters();
-
 
 		cdbg("All reads processed in uFX");
 		outFile = OutStreamer->leadOutFile();

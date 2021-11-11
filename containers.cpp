@@ -5933,7 +5933,9 @@ UClinks::~UClinks(){
 UClinks::UClinks( OptContainer& cmdArgs):
 	CurSetPair(-1),//maxOldDNAvec(20000),
 	DNAunusedPos(0), derepMapFile(""),
-	bestDNA(0, NULL), oriKey(0), bestPID(0), bestLEN(0),
+	bestDNA(0, NULL), oriKey(0), 
+	mapLines(0),
+	bestPID(0), bestLEN(0),
 	clusCnt(0), uclines(0),
 	SEP(""), 
 	UCread(false), pairsMerge(false), MAPread(false),
@@ -6386,6 +6388,20 @@ void UClinks::resetMarks() {
 	}
 }
 
+bool UClinks::getTMPmapperLine(string& line) {
+	bool ret = true;
+	if (mapLines.size() > 0) {
+		line = mapLines.front();
+		mapLines.pop_front();
+	}
+	else {
+		if (!getline(ucf, line, '\n')) {
+			ret = false;
+		}
+	}
+	return ret;
+}
+
 bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID, 
 	vector<int>& curCLID,  bool addFromHDstring) {
 	//converts derep reads mapping to OTUs to counts
@@ -6401,7 +6417,9 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 	float qCov = 1.f;
 	string line; 
 	std::unordered_map<string, int>::iterator itCL;
-	while (getline(ucf, line, '\n')) {
+
+	//check if any lines need to be backworked
+	while (this->getTMPmapperLine(line)) {
 	//	cerr<<line<<endl;
 		uclines++;
 		if (line.length() <= 1){ continue; }	
@@ -6432,21 +6450,35 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 
 		if (cdhit) {
 			if (line[0] == '>') {
+				//get next line with actual mapping/clustering
 				getline(ucf, line, '\n');
 				repFound = false;
 				segs2 = "";
 			}
-			size_t pos = line.find("nt, >");
-			size_t pos2 = line.find("...", pos + 4);
-			//string gene = line.substr(pos + 5, pos2 - pos - 5);
-			segs = line.substr(pos + 5, pos2 - pos - 5);
 
 			//meachnism has to be slightly different for cdhit, have to save segs2 between lines
 			if (!repFound  ){//&& line.back() == '*') {//report representative gene
+				bool isRep = line.back() == '*';
+				while (!isRep) {
+					if (!isRep) {
+						mapLines.push_back(line);
+					}
+					getline(ucf, line, '\n');
+					isRep = line.back() == '*';
+					if (line[0] == '>') {//should never get here
+						cerr << "CD-HIT .clstr contained seq cluster with no rep (prev lines):\n" << line << endl;
+						exit(163);
+					}
+				}
+				size_t pos = line.find("nt, >");size_t pos2 = line.find("...", pos + 4);
+				segs = line.substr(pos + 5, pos2 - pos - 5);
 				repFound = true;
 				segs2 = segs;
 				perID = 100.f;
+				
 			} else {
+				size_t pos = line.find("nt, >");size_t pos2 = line.find("...", pos + 4);
+				segs = line.substr(pos + 5, pos2 - pos - 5);
 				//find ID
 				pos = line.find("at +/", pos2 + 3);
 				string ID = line.substr(pos + 5, line.length() - pos - 6);

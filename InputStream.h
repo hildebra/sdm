@@ -16,6 +16,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 
+
 #ifndef _InputStr_h
 #define _InputStr_h
 

@@ -900,6 +900,8 @@ private:
 	void readDerepInfo(const string);
 	int oneDerepLine(shared_ptr<DNAunique>);
 
+	inline bool getTMPmapperLine(string&);
+
 	//pair_: important to keep track whether to remove BC etc.: -1 to remove BC (454); 0 not to (MID miSeq)
 	int CurSetPair;
 	//store not matched DNA and keep track
@@ -918,6 +920,7 @@ private:
 	vector<shared_ptr<DNAunique>> bestDNA;
 	vector<shared_ptr<DNA>> bestDNA2;
 	vector<string> oriKey;
+	list<string> mapLines;
 	vector<float> bestPID;
 	vector<uint> bestLEN;
 	int clusCnt, uclines;

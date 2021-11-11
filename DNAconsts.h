@@ -54,7 +54,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //DEBUG mode: more output
 #define DE//BUG
 
-
 #include <string>
 #include <vector>
 #include <fstream>
@@ -105,7 +104,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif // _WIN32
 
 
-static const float sdm_version = 1.93f;
+static const float sdm_version = 1.94f;
 static const char* sdm_status = "beta";
 
 
