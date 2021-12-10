@@ -752,10 +752,19 @@ public:
 	DNAuniqSet():bestDNU(nullptr), bestSet(false),totalCnts(0){}
 	~DNAuniqSet() {}
 	void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, 
-		int MrgPos1, int sample_id) {
+				int MrgPos1, int sample_id) {
 		dna->setDereplicated();//dna->setYellowQual(false);
 		shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
 		new_dna_unique->saveMem();
+		int bestL = dna->getMergeLength();
+		if (bestL == -1 && dna2 != nullptr) {
+			bestL = dna->mem_length() + dna2->mem_length();
+		}
+		if (bestL == -1) {
+			bestL = dna->mem_length();
+		}
+
+		new_dna_unique->setBestSeedLength(bestL);
 		if (dna2 != nullptr) { new_dna_unique->attachPair(make_shared<DNAunique>(dna2, sample_id)); }
 		DNUs[MrgPos1] = new_dna_unique;
 	}
@@ -1186,5 +1195,9 @@ private:
 //bool read_fasta_entry(ifstream&fna,ifstream&qual_,shared_ptr<DNA> in,shared_ptr<DNA>,int&);
 //shared_ptr<DNA> read_fastq_entry(ifstream & fna,int fastQver, int &minQScore,
 //					  long& pos);
+
+
+
+
 
 #endif

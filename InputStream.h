@@ -600,7 +600,7 @@ string detectSeqFmt(const string);
 
 class Filters;
 
-class DNA{
+class DNA: public std::enable_shared_from_this<DNA> {
 	friend class DNAunique;
 public:
 	DNA(string seq, string names) : sequence_(seq), sequence_length_(sequence_.length()),
@@ -682,6 +682,7 @@ public:
 	string getNewIDshort() { return new_id_.substr(0, getShorterHeadPos(new_id_)); }
 	bool seal(bool isFasta=false);
 
+
 	bool isEmpty() {
 	    if (id_.empty() && sequence_.empty()) {
 	        this->setPassed(false);
@@ -716,13 +717,15 @@ public:
 		if (std::isinf((double) accumulated_error_)) {
             accumulated_error_ = 5.f;
 		}
-		return accumulated_error_;}
+		return accumulated_error_;
+	}
 	int minQual(){int mq=50; for (uint i=0; i < qual_.size(); i++){if (qual_[i] < mq){ mq=qual_[i];}}return mq;}
 	void ntSpecQualScores(vector<long>&, vector<long>&);
     void ntSpecQualScoresMT(vector<long>&, vector<long>&);
 
-
+	//returns qual filtered length 
 	inline uint length() { return (uint) sequence_length_; }
+	//returns original length 
 	inline uint mem_length() { return (uint) sequence_.length(); }
 	bool cutSeq(int start, int stop=-1, bool = false);
 	bool cutSeqPseudo(int start) { return cutSeq(start, -1, true); }
@@ -805,6 +808,8 @@ public:
 	bool isDereplicated() { return FtsDetected.dereplicated ; }
 	void constellationPairRev(bool b) { FtsDetected.revPairConstellation = b; }
 	bool isConstellationPairRev() { return FtsDetected.revPairConstellation ; }
+	int getMergeLength() { return FtsDetected.mergeLength; }
+
 	//only used in pre best seed step
 	//float getSeedScore() { return tempFloat; }
 	//void setSeedScore(float i) { tempFloat = (float)i; }
@@ -869,7 +874,19 @@ public:
 		mid_quality_ = oD-> mid_quality_;
 		sample_id_ = oD->sample_id_;
 
+		FtsDetected.errInOverlap = oD->FtsDetected.errInOverlap;
+		FtsDetected.meanQInOverlapMismatch = oD->FtsDetected.meanQInOverlapMismatch;
+		FtsDetected.mergeLength = oD->FtsDetected.mergeLength;
+
 	}
+
+	void setMergeErrors(int eoi, qual_score meanQeoi) {
+		FtsDetected.errInOverlap = eoi;
+		FtsDetected.meanQInOverlapMismatch = meanQeoi;
+	}
+	void setMergeLength(int x) { FtsDetected.mergeLength = x; }
+	int getMergeErrors() {	return FtsDetected.errInOverlap;}
+	qual_score getMergeErrorsQual() { return FtsDetected.meanQInOverlapMismatch; }
 
 protected:
     std::string qual_traf_;
@@ -889,9 +906,13 @@ protected:
 		bool forward; bool reverse;//primers detected
 		bool TA_cut; bool barcode_detected;  bool barcode_cut; bool dereplicated;
 		bool revPairConstellation;
+		//read merging related stats
+		int errInOverlap;		qual_score meanQInOverlapMismatch;
+		int mergeLength;
 
 		ElementsDetection() : forward(false), reverse(false), TA_cut(false), barcode_detected(false),
-                              barcode_cut(false), dereplicated(false), revPairConstellation(false) {}
+                              barcode_cut(false), dereplicated(false), revPairConstellation(false),
+								errInOverlap (-1), meanQInOverlapMismatch(0.f), mergeLength(-1){}
 		void transferFrom(ElementsDetection& o) { 
 			forward = o.forward;
 			reverse = o.reverse;
@@ -900,6 +921,10 @@ protected:
 			barcode_cut = o.barcode_cut;
 			dereplicated = o.dereplicated;
 			revPairConstellation = o.revPairConstellation;
+
+			errInOverlap = o.errInOverlap;
+			mergeLength = o.mergeLength;
+			meanQInOverlapMismatch = o.meanQInOverlapMismatch;
 		}
 		void reset() {
 		    forward = false;
@@ -909,6 +934,9 @@ protected:
             barcode_cut = false;
             dereplicated = false;
 			revPairConstellation = false;
+			errInOverlap = -1;
+			mergeLength = -1;
+			meanQInOverlapMismatch = 0.f;
 		}
 
 	} FtsDetected;
@@ -1232,6 +1260,9 @@ private:
 
 
 
+//true: d is better, false: ref is better
+bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> r1, shared_ptr<DNA> r2,
+	uint bestL);
 
 
 

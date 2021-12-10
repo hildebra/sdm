@@ -104,7 +104,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif // _WIN32
 
 
-static const float sdm_version = 1.94f;
+static const float sdm_version = 1.95f;
 static const char* sdm_status = "beta";
 
 
@@ -132,8 +132,8 @@ typedef unsigned long ulong;
 typedef signed char qual_score; //used for quality scores in vectors
 
 //seeding
-static const float BestLengthRatio = 0.83f;
-static const float RefLengthRatio = 0.9f;
+static const float BestLengthRatio = 0.8f;
+static const float RefLengthRatio = 0.85f;
 static const qual_score MinQualDiff = 5;
 
 

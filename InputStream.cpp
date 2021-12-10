@@ -356,6 +356,70 @@ string detectSeqFmt(const string inF) {
 	}
 	*/
 
+
+
+	//compares two DNA entries, decides which one has overall better stats
+bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> r1,
+	shared_ptr<DNA> r2, uint bestL) {
+
+	//check if two primers present
+	if (d2 == nullptr) {//hard reason .. only for PacBio etc reads
+		if (d1->has2PrimersDetected() && !r1->has2PrimersDetected()) { return true; }
+		if (!d1->has2PrimersDetected() && r1->has2PrimersDetected()) { return false; }
+	}
+	else {
+		if (d2->getRevPrimCut() && !r1->getFwdPrimCut() && !r2->getRevPrimCut()) {
+			return true;
+		}
+	}
+	//check if at least 1 primers present
+	if (d1->getFwdPrimCut() && !r1->getFwdPrimCut()) { return true; }//hard reason
+	if (!d1->getFwdPrimCut() && r1->getFwdPrimCut()) { return false; }
+
+
+
+
+
+	uint curL = d1->getMergeLength();
+
+	//first check if d1 has merged, but ref did not.. clearly go for d, hard filter
+	if (curL != -1 && r1->getMergeLength() == -1) {
+		return true;
+	}
+
+	if (curL == -1) {
+		uint curL = d1->length();
+		if (d2 != NULL) { curL += d2->length(); }
+	}
+	if (float(curL) / float(bestL) < BestLengthRatio) { return false; }
+
+
+	float dmergErr = (float)d1->getMergeErrors() * (float)d1->getMergeErrorsQual();
+	float thismergErr = (float)r1->getMergeErrors() * (float)r1->getMergeErrorsQual();
+	if (dmergErr) {
+		int x = 0;
+	}
+
+	//at least 90% length of "good" hit
+	if (r1->getMergeErrors() < 0) {//no merge, can look at read1 only
+		if (d1->length() / r1->length() < RefLengthRatio) { return false; }
+	}
+
+
+	//checks if the new DNA has a better overall quality
+	double dAcEr = d1->getAccumError();
+	double dLen = d1->mem_length();
+	double tAcEr = r1->getAccumError();
+	double tLen = r1->mem_length();
+	if (d2 != nullptr) { dAcEr += d2->getAccumError(); dLen += d2->mem_length(); }
+	if (r2 != nullptr) { tAcEr += r2->getAccumError(); tLen += r2->mem_length(); }
+	if ((dAcEr / dLen) < (tAcEr / tLen)) {
+		return true;
+	}
+
+	return false;
+}
+
 void DNA::fixQ0(void) {
 	return;//still depends on sequencer what is actually returned..
 	for (uint i = 0; i < qual_.size(); i++) {
@@ -1251,22 +1315,41 @@ bool DNAunique::betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2) {
 	//0.2% difference is still ok, but within 0.5% of the best found seed (prevent detoriating sequence match)
 	//float blen = (float)ref->length() + (float)d1->length();
 	shared_ptr<DNAunique> ref2 = this->getPair();
-	uint curL = d1->mem_length();
-	if (d2 != NULL) { curL += d2->mem_length(); }
-	else {
-		if (d1->has2PrimersDetected() && !this->has2PrimersDetected()) { return true; }
-		if (!d1->has2PrimersDetected() && this->has2PrimersDetected()) { return false; }
-	}
-	uint bestL = this->getBestSeedLength();
-	if (d1->getFwdPrimCut() && !this->getFwdPrimCut()) { return true; }//hard reason
-	if (!d1->getFwdPrimCut() && this->getFwdPrimCut()) { return false; }
+	//shared_ptr<DNAunique> ref = this;
 
-	if (float(curL) / float(bestL) < BestLengthRatio) { return false; }
+	
+
+	//uint bestL = this->getBestSeedLength();
+	//if (float(curL) / float(bestL) < BestLengthRatio) { return false; }
+	cerr << "should not be here DNAunique::betterPreSeed\n"; exit(1243);
+	return false;
+	//whoIsBetter(d1, d2, shared_from_this(), ref2, this->getBestSeedLength());
+
+
+	/*float dmergErr = (float)d1->getMergeErrors() * (float)d1->getMergeErrorsQual();
+	float thismergErr = (float)this->getMergeErrors() * (float)this->getMergeErrorsQual();
+	if (dmergErr) {
+		int x = 0;
+	}
+	*/
 
 	//at least 90% length of "good" hit
-	if (d1->mem_length() / this->mem_length() < RefLengthRatio) { return false; }
-
+	/*
+	if (this->getMergeErrors() < 0) {//no merge, can look at read1 only
+		if (d1->length() / this->length() < RefLengthRatio) { return false; }
+	}
+	
 	//checks if the new DNA has a better overall quality
+	double dAcEr = d1->getAccumError();
+	double tAcEr = this->getAccumError();
+	if (d2 != nullptr) { dAcEr += d2->getAccumError(); }
+	if (ref2 != nullptr) { tAcEr += ref2->getAccumError(); }
+	if (dAcEr < tAcEr) {
+		return true;
+	}
+	*/
+	
+	/* // remove old betterDNA algo, switched to accum error
 	//1 added to qual, in case no qual DNA is used
 	float thScore = (1 + d1->getAvgQual()) * log((float)d1->mem_length());
 	float rScore = (1 + this->getAvgQual()) * log((float)this->mem_length());
@@ -1277,11 +1360,16 @@ bool DNAunique::betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2) {
 			return true;
 		}
 	}
+	*/
+
+
+
+	/* whole second read is not useful..
 	if (d2 == NULL || ref2 == NULL) {
 		return false;
 	}
-	if (d2->getRevPrimCut() && !ref2->getRevPrimCut()) { return true; }//hard reason
-	if (!d2->getRevPrimCut() && ref2->getRevPrimCut()) { return false; }//hard reason
+	//if (d2->getRevPrimCut() && !ref2->getRevPrimCut()) { return true; }//hard reason
+	//if (!d2->getRevPrimCut() && ref2->getRevPrimCut()) { return false; }//hard reason
 
 	//at least 90% length of "good" hit
 	if (d2->mem_length() / ref2->mem_length() < RefLengthRatio) { return false; }
@@ -1295,12 +1383,13 @@ bool DNAunique::betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2) {
 		if (curL > bestL) { this->setBestSeedLength(curL); }
 		return true;
 	}
+	*/
 
 	return false;
 }
 
-void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, int sample_id, 
-	bool b_derep_as_fasta_){
+void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, 
+		int sample_id, bool b_derep_as_fasta_){
 	dna->setDereplicated();
 	DNAuniMTX.lock();
 	// increment sample counter
@@ -1310,7 +1399,9 @@ void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, int sample
 	}
 	// only replace old unique dna with new if it has good quality and its seed is better
 	// betterPreSeed makes sense with uparse/
-	if (dna->isGreenQual() && betterPreSeed(dna, dna2)) {
+	if (dna->isGreenQual() && 
+		whoIsBetter(dna, dna2, shared_from_this(), this->getPair(), this->getBestSeedLength()) ){
+		//betterPreSeed(dna, dna2)) {
 		// Uparse does NOT use qualities for clustering, therefore we do not need to calculate average qualities for this dna object
 		// Lotus uses qualities for constructing taxonomy (therefore we do replace dna if theres a better quality read)
 		takeOverDNA(dna, dna2);

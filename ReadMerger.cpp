@@ -491,6 +491,9 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 
 	//also log quality along read
 
+	int errInOverlap(0);
+	qual_score summedMismathcQ(0.f);
+
 	for (size_t i = 0; i < overlap; i++, pos1++, pos2++, pos_overlap++) {
 		//            std::cout << "___" << std::endl;
 		char S1 = Seq1[pos1];
@@ -512,6 +515,9 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 
 		}
 		else { //Oh oh..
+			errInOverlap++;
+			summedMismathcQ += min(Qual1[pos1],Qual2[pos2]);
+
 			bool S1canonical = canonicalDNA(S1);
 			bool S2canonical = !canonicalDNA(S2);
 
@@ -532,7 +538,6 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 		}
 		//            std::cout << "s1: " << Seq1[pos1] << " q: " << (int)Qual1[pos1] << "  -  s2: " << Seq2[pos2] << " q: " << (int)Qual2[pos2] << "  new: " << new_seq[pos_overlap] << " q: " << (int)new_qual[pos_overlap] << std::endl;
 	}
-
 
 	//        std::cout << "overlap: " << std::endl;
 	//        std::cout << std::string(new_seq) << std::endl;
@@ -555,6 +560,18 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	merged_read->setNewID(read1->getId());// +"_merged");
 	merged_read->getEssentialsFts(read1);
 
+	if (errInOverlap) {
+		int x = 0;
+	}
+
+	qual_score meanMisMatchQ = (qual_score)((float)summedMismathcQ / (float)errInOverlap);
+	merged_read->setMergeErrors(errInOverlap, meanMisMatchQ);
+	read1->setMergeErrors(errInOverlap, meanMisMatchQ);
+	read2->setMergeErrors(errInOverlap, meanMisMatchQ);
+
+	merged_read->setMergeLength(merged_read->length());
+	read1->setMergeLength(merged_read->length());
+	read2->setMergeLength(merged_read->length());
 
 	//backtranslate to make sure correct read again
 	if (read2->reversed_merge_) {

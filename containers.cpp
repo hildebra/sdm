@@ -23,6 +23,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 using namespace std;
 
 
+
+
+
 void trim(string& str){
 	// trim trailing spaces
 	size_t endpos = str.find_last_not_of(" \t");
@@ -2101,8 +2104,7 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 		dna_unique = dna_unique1->second.find(MrgPos1);
 		//truly dereplicated? at least overlap should fit..
 		if (dna_unique == dna_unique1->second.end()) {
-			//new_insert = true;
-			dna_unique1->second.addNewDNAuniq(dna, dna2, MrgPos1, sample_id);
+			dna_unique1->second.addNewDNAuniq(dna, dna2,  MrgPos1, sample_id);
 		} else { // compare to existing DNA
 			dna_unique->second->matchedDNA(dna, dna2, sample_id, b_derep_as_fasta_);
 		} 
@@ -3365,19 +3367,25 @@ bool Filters::betterSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA>
 	}
 	//0.2% difference is still ok, but within 0.5% of the best found seed (prevent detoriating sequence match)
 	//float blen = (float)ref->length() + (float)d1->length();
-	uint curL = d1->length();
-	if (d2 != NULL) {		curL += d2->length();	}
-	if (float(curL) / float(bestL) < BestLengthRatio) { return false; }
-	if (d1pid<refpid - 0.4f || d1pid < ever_best - 1){ return false; }
 
 	//*** DNA1
 	//needs to quality filter first
 	if (!checkYellowAndGreen(d1, usePair, TagIdx, true)) {
 		return false;
 	}
-	//at least 90% length of "good" hit
-	if (d1->length() / ref->length() < RefLengthRatio) { return false; }
+	if (d2 != nullptr) {
+		checkYellowAndGreen(d2, 1, TagIdx, true);
+	}
+	if (d1pid<refpid - 0.4f || d1pid < ever_best - 1){ return false; }
 
+	//at least 90% length of "good" hit
+//	if (d1->length() / ref->length() < RefLengthRatio) { return false; }
+
+	return whoIsBetter(d1, d2, ref, ref2,  bestL);
+
+
+
+	/*
 	//checks if the new DNA has a better overall quality
 	//1 added to qual, in case no qual DNA is used
 	float thScore = (1+d1->getAvgQual())*(d1pid ) * log((float)d1->length() );
@@ -3389,10 +3397,13 @@ bool Filters::betterSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA>
 	if (d2 == NULL || ref2 == NULL) {
 		return false;
 	}
+	*/
 	//*** DNA2
 	//second pair_ likely to be of worse qual_, but only direct comparison relevant here
-
-	checkYellowAndGreen(d2, 1, TagIdx, true);
+	
+	
+	
+	/*d2 irrelevant when working primarily with merged reads..
 	//at least 90% length of "good" hit
 	if (d2->length() / ref2->length() < RefLengthRatio) { return false; }
 
@@ -3403,9 +3414,11 @@ bool Filters::betterSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA>
 	if (thScore > rScore) {
 		return true;
 	}
+	*/
 
 	return false;
 }
+
 
 /*
 bool Filters::check(shared_ptr<DNA> d, bool doSeeding, int pairPre,
@@ -6240,7 +6253,7 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 				unusedID[curID] = DNAunusedPos;
 				oldDNA[DNAunusedPos] = match;	oldDNA2[DNAunusedPos] = match2;
 				DNAunusedPos++;
-			} else {
+			} else {//find if current DNA rep needs to be replaced with a better read (pair)
 				//assign % identity score to DNA object
 #ifdef DEBUG
 				cerr << "UC Hit";
@@ -6389,17 +6402,16 @@ void UClinks::resetMarks() {
 }
 
 bool UClinks::getTMPmapperLine(string& line) {
-	bool ret = true;
 	if (mapLines.size() > 0) {
 		line = mapLines.front();
 		mapLines.pop_front();
 	}
 	else {
 		if (!getline(ucf, line, '\n')) {
-			ret = false;
+			return false;
 		}
 	}
-	return ret;
+	return true;
 }
 
 bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID, 
