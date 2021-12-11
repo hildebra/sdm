@@ -394,10 +394,25 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> r1,
 	if (float(curL) / float(bestL) < BestLengthRatio) { return false; }
 
 
-	float dmergErr = (float)d1->getMergeErrors() * (float)d1->getMergeErrorsQual();
-	float thismergErr = (float)r1->getMergeErrors() * (float)r1->getMergeErrorsQual();
-	if (dmergErr) {
-		int x = 0;
+	float maxQErr = 60.f;// 1 + max(d1->getMergeErrorsQual(), r1->getMergeErrorsQual());
+
+	float dmergErr = 0.f;
+	if (d1->getMergeErrors()>0) {
+		dmergErr = (float)d1->getMergeErrors() * log10((maxQErr - (float)d1->getMergeErrorsQual()));
+	}
+	float thismergErr = 0.f;
+	if (r1->getMergeErrors() > 0) {
+		thismergErr = (float)r1->getMergeErrors() * log10((maxQErr - (float)r1->getMergeErrorsQual()));
+	}
+	//scale to 1
+	float maxMerr = max(thismergErr, dmergErr);
+	if (maxMerr) {
+		dmergErr /= maxMerr;	thismergErr /= maxMerr;
+	}
+
+
+	if (dmergErr < thismergErr) {
+		//return true;
 	}
 
 	//at least 90% length of "good" hit
@@ -413,7 +428,12 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> r1,
 	double tLen = r1->mem_length();
 	if (d2 != nullptr) { dAcEr += d2->getAccumError(); dLen += d2->mem_length(); }
 	if (r2 != nullptr) { tAcEr += r2->getAccumError(); tLen += r2->mem_length(); }
-	if ((dAcEr / dLen) < (tAcEr / tLen)) {
+	//normalize to gene length
+	dAcEr /= dLen;	tAcEr /= tLen;
+	//norm to 1, to compare to other terms
+	double maxEr = max(dAcEr, tAcEr); 
+	dAcEr /= maxEr; tAcEr /= maxEr;
+	if ((dAcEr + dmergErr) < (tAcEr + thismergErr)) {
 		return true;
 	}
 
