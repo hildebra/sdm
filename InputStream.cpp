@@ -328,114 +328,121 @@ string detectSeqFmt(const string inF) {
 }
 
 
-/*vector<int> orderOfVec(vector<int>& vin) {
-	struct MyStruct
-	{
-		int key;
-		int Value;
-		MyStruct() :key(0), Value(0) {}
-		MyStruct(int k, const int s) : key(k), Value(s) {}
-
-		bool operator < (const MyStruct& str) const {
-			return (key > str.key);
-		}
-	};
-	std::vector < MyStruct > vec(vin.size());
-	//fill vector
-	for (int i = 0; i < (int)vin.size(); i++) {
-		vec[i] = MyStruct(vin[i], i);
-	}
-
-	sort(vec.begin(), vec.end());
-	//extract from sorted vector
-	vector<int> ret(vin.size(), 0);
-	for (size_t i = 0; i < vin.size(); i++) {
-		ret[i] = vec[i].Value;
-	}
-	return ret;
-	}
-	*/
-
-
 
 	//compares two DNA entries, decides which one has overall better stats
-bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> r1,
-	shared_ptr<DNA> r2, uint bestL) {
+bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM, 
+	shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM, 
+	float& ever_best, bool forSeed) {
 
+	//if (forSeed) {		return false;	}
 	//check if two primers present
 	if (d2 == nullptr) {//hard reason .. only for PacBio etc reads
 		if (d1->has2PrimersDetected() && !r1->has2PrimersDetected()) { return true; }
 		if (!d1->has2PrimersDetected() && r1->has2PrimersDetected()) { return false; }
-	}
-	else {
-		if (d2->getRevPrimCut() && !r1->getFwdPrimCut() && !r2->getRevPrimCut()) {
-			return true;
-		}
+	} else {
+		if (d2->getRevPrimCut() && !r1->getFwdPrimCut() && !r2->getRevPrimCut()) {	return true;}
 	}
 	//check if at least 1 primers present
 	if (d1->getFwdPrimCut() && !r1->getFwdPrimCut()) { return true; }//hard reason
 	if (!d1->getFwdPrimCut() && r1->getFwdPrimCut()) { return false; }
 
+	double d1pid(1.), refpid(1.);
+	if (ever_best >=0) {
+		d1pid = (double) d1->getTempFloat(); refpid = (double)r1->getTempFloat();
+		if (d1pid > ever_best) {
+			ever_best = (float) d1pid;
+		}
+		//everbest is likely 100.f (ref OTUs)
+		if (d1pid < (refpid - 0.3f) || d1pid < (ever_best - 0.4f ) ) { return false; }
+	}
 
-
-
-
-	uint curL = d1->getMergeLength();
+	bool dMerge(true), rMerg(true);
+	double curL = (double)d1->getMergeLength();
+	if (curL < 0) {
+		curL = (double) d1->length();
+		//if (d2 != NULL) { curL += (double) d2->length(); }
+		dMerge = false;
+	}
+	double refL = (double)r1->getMergeLength();
+	if (refL < 0) {
+		refL = (double) r1->length();
+		//if (r2 != NULL) { refL += (double) r2->length(); }
+		rMerg = false;
+	}
 
 	//first check if d1 has merged, but ref did not.. clearly go for d, hard filter
-	if (curL != -1 && r1->getMergeLength() == -1) {
-		return true;
-	}
+	//if (d1->getMergeLength() != -1 && r1->getMergeLength() == -1) { return true; }
 
-	if (curL == -1) {
-		uint curL = d1->length();
-		if (d2 != NULL) { curL += d2->length(); }
-	}
-	if (float(curL) / float(bestL) < BestLengthRatio) { return false; }
-
-
-	float maxQErr = 60.f;// 1 + max(d1->getMergeErrorsQual(), r1->getMergeErrorsQual());
-
-	float dmergErr = 0.f;
-	if (d1->getMergeErrors()>0) {
-		dmergErr = (float)d1->getMergeErrors() * log10((maxQErr - (float)d1->getMergeErrorsQual()));
-	}
-	float thismergErr = 0.f;
-	if (r1->getMergeErrors() > 0) {
-		thismergErr = (float)r1->getMergeErrors() * log10((maxQErr - (float)r1->getMergeErrorsQual()));
-	}
-	//scale to 1
-	float maxMerr = max(thismergErr, dmergErr);
-	if (maxMerr) {
-		dmergErr /= maxMerr;	thismergErr /= maxMerr;
-	}
-
-
-	if (dmergErr < thismergErr) {
-		//return true;
-	}
-
+	//hard check on length ratios.. too drastically small , don't use d1
+	if ((curL) / (refL) < BestLengthRatio ) { return false; }
 	//at least 90% length of "good" hit
-	if (r1->getMergeErrors() < 0) {//no merge, can look at read1 only
-		if (d1->length() / r1->length() < RefLengthRatio) { return false; }
+	//if (r1->getMergeErrors() < 0) {//no merge, can look at read1 only
+	//	if (d1->length() / r1->length() < RefLengthRatio) { return false; }
+	//}
+
+
+	float dmergErrSco = 0.f;	float refMergErrSco = 0.f;
+	//only check further if both comparisons did merge
+	if (r1->getMergeLength() >=0 && d1->getMergeLength() >=0) {
+		if (d1->getMergeErrors() > 0) {
+			dmergErrSco = (float)d1->getMergeErrors();// *log10((maxQErr - (float)d1->getMergeErrorsQual()));
+			dmergErrSco += d1->getMergeErrorsQual()/30;
+		}
+		if (r1->getMergeErrors() > 0) {
+			refMergErrSco = (float)r1->getMergeErrors() + r1->getMergeErrorsQual() / 30;// *log10((maxQErr - (float)r1->getMergeErrorsQual()));
+		}
+		//scale to 1
+		float maxMerr = max(refMergErrSco, dmergErrSco);
+		dmergErrSco /= maxMerr;	refMergErrSco /= maxMerr;
+		dmergErrSco = 1.f - dmergErrSco; refMergErrSco = 1.f - refMergErrSco;
 	}
+
+	//choose merged DNA if possible; d2 no longer needed then
+	shared_ptr<DNA> dx, rx;
+	bool allowMergeGuide = false;
+	if (allowMergeGuide && dM != nullptr) { dx = dM;	d2 = nullptr; }	else { dx = d1; }
+	if (allowMergeGuide && rM != nullptr) { rx = rM; r2 = nullptr;}else { rx = r1; }
+	float thScore =  dx->getAvgQual(); //*(d1pid / 100)* log((float)curL);
+	float rScore =  rx->getAvgQual();// *(refpid / 100)* log((float)refL);//r1->length()
+	//if (thScore > rScore) {
+		//also check for stable lowest score
+		// if (d1->minQual() > r1->minQual() - MinQualDiff) { return true; }
+	//}
+	float maxScore = max(thScore, rScore);
+	thScore /= maxScore;	rScore /= maxScore;
 
 
 	//checks if the new DNA has a better overall quality
-	double dAcEr = d1->getAccumError();
-	double dLen = d1->mem_length();
-	double tAcEr = r1->getAccumError();
-	double tLen = r1->mem_length();
-	if (d2 != nullptr) { dAcEr += d2->getAccumError(); dLen += d2->mem_length(); }
-	if (r2 != nullptr) { tAcEr += r2->getAccumError(); tLen += r2->mem_length(); }
-	//normalize to gene length
-	dAcEr /= dLen;	tAcEr /= tLen;
-	//norm to 1, to compare to other terms
-	double maxEr = max(dAcEr, tAcEr); 
-	dAcEr /= maxEr; tAcEr /= maxEr;
-	if ((dAcEr + dmergErr) < (tAcEr + thismergErr)) {
+	double dAcSc = dx->getAccumError();	double dLen = dx->mem_length();
+	double tAcSc = rx->getAccumError();	double tLen = rx->mem_length();
+	if (d2 != nullptr) { dAcSc += d2->getAccumError(); dLen += d2->mem_length(); }
+	if (r2 != nullptr) { tAcSc += r2->getAccumError(); tLen += r2->mem_length(); }
+	dAcSc /= dLen;	tAcSc /= tLen;
+	
+	//calculate ratios to compare more easily among metrics
+	double ratAccErr =  log(dAcSc)/log(tAcSc); //smaller better, log changes terms around
+	double ratLength = double(curL) / (double)refL; //higher better
+	double ratId = d1pid / refpid * 10 - 9.; //higher better //10-fold weighting
+	if ((ratAccErr * ratLength * ratId) > 1.) {
 		return true;
 	}
+	//normalize and invert
+	//normalize to gene length, and invert to convert to positive score system
+	/*maxScore = max(dAcSc, tAcSc);
+	dAcSc /= maxScore;	tAcSc /= maxScore;
+	dAcSc = 1.f - dAcSc; tAcSc = 1.f - tAcSc;
+	//norm to 1, to compare to other terms
+	double maxEr = max(dAcSc, tAcSc); 
+	dAcSc /= maxEr; tAcSc /= maxEr;
+	//dmergErrSco refMergErrSco dAcSc + tAcSc +   thScore  rScore
+	if (  (dAcSc) *(d1pid / 100) * log((float)curL)
+		> (tAcSc)  *(refpid / 100) * log((float)refL )) {
+		
+		if (dx->minQual() > rx->minQual() - MinQualDiff) { return true; }
+//		return true;
+
+	}
+	*/
 
 	return false;
 }
@@ -1108,32 +1115,37 @@ void DNA::writeSeq(ofstream& wr){
 }
 */
 size_t DNA::getSpaceHeadPos(const string & x) {
-	size_t pos = x.find(' ');
-	if (pos == string::npos) { pos = x.length(); }
+	size_t pos = x.find_first_of(" \t"); // x.find(' ');
+	if (pos == string::npos) {pos = x.length(); }
 	return pos;
 }
 size_t DNA::getShorterHeadPos(const string & x, int fastQheadVer ) {
 
 	size_t pos(string::npos);
+	size_t strL = x.length();
 	if (fastQheadVer != 0) {
 		if (read_position_ == 1) {
-			pos = x.find("/2");
+			pos = x.find("/2", strL-3);
 			//			if (pos == string::npos) {	pos = x.find_first_of(" 1:");}
 				//		if (pos == string::npos) { pos = x.find_first_of("/1"); }
 		}
 		else if (read_position_ == 0) {
-			pos = x.find("/1");
+			pos = x.find("/1", strL - 3);
 		}
 		else {
-			pos = x.find("/1");
-			if (pos == string::npos) { pos = x.find("/2"); }
+			pos = x.find("/1", strL - 3);
+			if (pos == string::npos) { pos = x.find("/2", strL - 3); }
 		}
 	}
 	//if (pos == string::npos){pos=x.length()-min((size_t)5,x.length());}}
 	//if(pos<0){pos=0;}
-	if (pos == string::npos) { pos = min(x.find(' '), x.find('\t')); }
 
-	if (pos == string::npos) { pos = x.length(); }
+	if (pos == string::npos) {
+		pos = this->getSpaceHeadPos(x);
+	}
+		
+		//pos = x.find_first_of(" \t"); }//, x.find('\t');
+		//	if (pos == string::npos) { pos = x.length(); }
 	return pos;
 }
 string DNA::xtraHdStr(){
@@ -1343,12 +1355,12 @@ bool DNAunique::betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2) {
 	//if (float(curL) / float(bestL) < BestLengthRatio) { return false; }
 	cerr << "should not be here DNAunique::betterPreSeed\n"; exit(1243);
 	return false;
-	//whoIsBetter(d1, d2, shared_from_this(), ref2, this->getBestSeedLength());
+	//whoIsBetter(d1, d2, shared_from_this(), ref2, this->getBestSeedLength(), -1.f);
 
 
-	/*float dmergErr = (float)d1->getMergeErrors() * (float)d1->getMergeErrorsQual();
-	float thismergErr = (float)this->getMergeErrors() * (float)this->getMergeErrorsQual();
-	if (dmergErr) {
+	/*float dmergErrSco = (float)d1->getMergeErrors() * (float)d1->getMergeErrorsQual();
+	float refMergErrSco = (float)this->getMergeErrors() * (float)this->getMergeErrorsQual();
+	if (dmergErrSco) {
 		int x = 0;
 	}
 	*/
@@ -1360,11 +1372,11 @@ bool DNAunique::betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2) {
 	}
 	
 	//checks if the new DNA has a better overall quality
-	double dAcEr = d1->getAccumError();
-	double tAcEr = this->getAccumError();
-	if (d2 != nullptr) { dAcEr += d2->getAccumError(); }
-	if (ref2 != nullptr) { tAcEr += ref2->getAccumError(); }
-	if (dAcEr < tAcEr) {
+	double dAcSc = d1->getAccumError();
+	double tAcSc = this->getAccumError();
+	if (d2 != nullptr) { dAcSc += d2->getAccumError(); }
+	if (ref2 != nullptr) { tAcSc += ref2->getAccumError(); }
+	if (dAcSc < tAcSc) {
 		return true;
 	}
 	*/
@@ -1408,7 +1420,8 @@ bool DNAunique::betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2) {
 	return false;
 }
 
-void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, 
+void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
+		shared_ptr<DNA> dnaM,
 		int sample_id, bool b_derep_as_fasta_){
 	dna->setDereplicated();
 	DNAuniMTX.lock();
@@ -1419,12 +1432,14 @@ void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
 	}
 	// only replace old unique dna with new if it has good quality and its seed is better
 	// betterPreSeed makes sense with uparse/
+	float tmp(-1.f);
 	if (dna->isGreenQual() && 
-		whoIsBetter(dna, dna2, shared_from_this(), this->getPair(), this->getBestSeedLength()) ){
+		whoIsBetter(dna, dna2, dnaM, shared_from_this(), this->getPair(), this->getMerge(),
+			 tmp, false)  ){ //this->getBestSeedLength(),
 		//betterPreSeed(dna, dna2)) {
 		// Uparse does NOT use qualities for clustering, therefore we do not need to calculate average qualities for this dna object
 		// Lotus uses qualities for constructing taxonomy (therefore we do replace dna if theres a better quality read)
-		takeOverDNA(dna, dna2);
+		takeOverDNA(dna, dna2, dnaM);
 	}
 	DNAuniMTX.unlock();
 }
@@ -1576,46 +1591,54 @@ void DNAunique::Count2Head(bool usFmt) {
     id_fixed_ = true;
 }
 
-void DNAunique::takeOver(shared_ptr<DNAunique> const dna_unique_old, shared_ptr<DNA> const dna2) {
+void DNAunique::takeOver(shared_ptr<DNAunique> const dna_unique_old) {
 	this->saveMem();
-	this->setBestSeedLength(dna_unique_old->getBestSeedLength());
+	//this->setBestSeedLength(better_dna->getBestSeedLength());
 	this->transferOccurence(dna_unique_old);
-	if (dna2 != nullptr)
-		this->attachPair(make_shared<DNAunique>(dna2, -1));
+	if (dna_unique_old->getPair() != nullptr) {
+		this->attachPair(make_shared<DNAunique>(dna_unique_old->getPair(), -1));
+	}
+	if (dna_unique_old->getMerge() != nullptr) {
+		this->attachMerge(make_shared<DNAunique>(dna_unique_old->getMerge(), -1));
+	}
 
 	quality_sum_per_base_ = dna_unique_old->transferPerBaseQualitySum();
 }
-void DNAunique::takeOverDNA(shared_ptr<DNA> const dna_unique_old, shared_ptr<DNA> const dna2) {
+void DNAunique::takeOverDNA(shared_ptr<DNA> const better_dna, shared_ptr<DNA> const dna2, shared_ptr<DNA> const dnaMerge) {
 
 	
 	if (dna2 != nullptr) {
 		this->attachPair(make_shared<DNAunique>(dna2, -1));
 	}
-	avg_qual_=dna_unique_old->avg_qual_;
-	accumulated_error_ = dna_unique_old-> accumulated_error_;
-	FtsDetected=dna_unique_old->FtsDetected;
-	good_quality_=dna_unique_old->good_quality_;
-	//new_id_ = dna_unique_old->id_;
-	id_ = dna_unique_old->id_;
-	id_fixed_=dna_unique_old->id_fixed_;
-	new_id_ = dna_unique_old-> new_id_;
-	mid_quality_=dna_unique_old->mid_quality_;
-	merge_offset_=dna_unique_old->merge_offset_;
-	merge_seed_pos_=dna_unique_old->merge_seed_pos_;
-	reversed_merge_ = dna_unique_old-> reversed_merge_;
-	seed_length_ = dna_unique_old-> seed_length_;
-	quality_sum_=dna_unique_old->quality_sum_;
-	QualCtrl=dna_unique_old->QualCtrl;
-	qual_=dna_unique_old->qual_;
-	qual_traf_=dna_unique_old->qual_traf_;
-	sequence_=dna_unique_old->sequence_;
-	sequence_length_ = dna_unique_old-> sequence_length_;
-	sample_id_ = dna_unique_old-> sample_id_;
-	reversed_ = dna_unique_old-> reversed_;
-	read_position_ = dna_unique_old-> read_position_;
-	good_quality_=dna_unique_old->good_quality_;
-	accumulated_error_ = dna_unique_old-> accumulated_error_;
-	tempFloat = dna_unique_old-> tempFloat;
+	if (dnaMerge != nullptr) {
+		this->attachMerge(make_shared<DNAunique>(dnaMerge, -1));
+	}
+	
+	avg_qual_=better_dna->avg_qual_;
+	accumulated_error_ = better_dna-> accumulated_error_;
+	FtsDetected=better_dna->FtsDetected;
+	good_quality_=better_dna->good_quality_;
+	//new_id_ = better_dna->id_;
+	id_ = better_dna->id_;
+	id_fixed_=better_dna->id_fixed_;
+	new_id_ = better_dna-> new_id_;
+	mid_quality_=better_dna->mid_quality_;
+	merge_offset_=better_dna->merge_offset_;
+	merge_seed_pos_=better_dna->merge_seed_pos_;
+	reversed_merge_ = better_dna-> reversed_merge_;
+	seed_length_ = better_dna-> seed_length_;
+	quality_sum_=better_dna->quality_sum_;
+	QualCtrl=better_dna->QualCtrl;
+	qual_=better_dna->qual_;
+	qual_traf_=better_dna->qual_traf_;
+	sequence_=better_dna->sequence_;
+	sequence_length_ = better_dna-> sequence_length_;
+	sample_id_ = better_dna-> sample_id_;
+	reversed_ = better_dna-> reversed_;
+	read_position_ = better_dna-> read_position_;
+	good_quality_=better_dna->good_quality_;
+	accumulated_error_ = better_dna-> accumulated_error_;
+	tempFloat = better_dna-> tempFloat;
 	
 	
 	this->saveMem();

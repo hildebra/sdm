@@ -766,19 +766,19 @@ void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil,
 		//if (ostrCnt > maxFileStreams) {openOstreams = false;}
 		if (pairedSeq == 1 || pairedSeq == -1) {
 			string nfile = path + fil->SampleID[i] + ".fq" + gzSuffiz;
-			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, doMC, bufS); }
+			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, doMC, (size_t)bufS); }
 			//demultiSinglFilesF[i][0] = nfile;
 			ostrCnt++;
 		}
 		else {
 			string nfile = path + fil->SampleID[i] + ".1.fq" + gzSuffiz;
-			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, doMC,bufS*0.8); }
+			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, doMC,(size_t)bufS*0.8); }
 			//demultiSinglFilesF[i][0] = nfile;
 			nfile = path + fil->SampleID[i] + ".2.fq" + gzSuffiz;
-			if (openOstreams) { demultiSinglFiles[i][1] = new ofbufstream(nfile.c_str(), writeStatus, doMC,bufS*1.2); }
+			if (openOstreams) { demultiSinglFiles[i][1] = new ofbufstream(nfile.c_str(), writeStatus, doMC, (size_t)bufS*1.2); }
 			//demultiSinglFilesF[i][1] = nfile;
 			nfile = path + fil->SampleID[i] + ".merg.fq" + gzSuffiz;
-			if (openOstreams) { demultiMergeFiles[i] = new ofbufstream(nfile.c_str(), writeStatus, doMC, bufS); }
+			if (openOstreams) { demultiMergeFiles[i] = new ofbufstream(nfile.c_str(), writeStatus, doMC, (size_t)bufS); }
 			
 			ostrCnt += 2;
 		}
@@ -1184,13 +1184,23 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair, int thr) {
 	*/
 }
 
-bool OutputStreamer::saveForWrite_merge(shared_ptr<DNA> d, shared_ptr<DNA> d2,
+bool OutputStreamer::saveForWrite_merge(shared_ptr<DNAunique> d, 
 		string newHeader,int curThread, bool elseWriteD1) {
 	// CHECK WHERE TO IMPLEMENT BEST
 // MERGE DNA1 AND DNA2
-	shared_ptr<DNA> dna_merged = nullptr;
-	if (d->merge_seed_pos_ > 0) {
-		dna_merged = merger[curThread]->merge(d, d2);
+	shared_ptr<DNA> d2 = d->getPair();
+	shared_ptr<DNAunique> dna_merged = d->getMerge();
+	bool didMerge(false);
+	
+	if (!dna_merged && d2 != nullptr) {
+		findSeedForMerge(d, d2, 0);
+		if (d->merge_seed_pos_ > 0) {
+			shared_ptr<DNA> tdM = merger[curThread]->merge(d, d2);
+			if (tdM != nullptr) {
+				dna_merged = make_shared<DNAunique>(tdM, -1);
+			}
+		}
+		d->attachMerge(dna_merged);
 	}
 	if (dna_merged) {
 		// write out merged DNA
@@ -1904,11 +1914,11 @@ shared_ptr<DNA> OutputStreamer::mergeDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> d
 */
 
 void OutputStreamer::findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, int thrPos) {
-	bool didMerge(false);
 	if (dna1->length() == 0 || dna2->length() == 0) {
 		total_read_preMerge_++;  return; 
 	}
-    if (merger[thrPos]->findSeed(dna1->getSequence(), dna2->getSequence())) {
+	bool didMerge = merger[thrPos]->findSeedForMerge(dna1, dna2);
+    /*if (merger[thrPos]->findSeed(dna1->getSequence(), dna2->getSequence())) {
 		didMerge = true;
         dna1->merge_seed_pos_ = (int) merger[thrPos]->result.seed.pos1;
         dna1->merge_offset_ = merger[thrPos]->result.offset1;
@@ -1916,6 +1926,7 @@ void OutputStreamer::findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2
         dna2->merge_offset_ = merger[thrPos]->result.offset2;
         dna2->reversed_merge_ = merger[thrPos]->result.seed.is2reversed;
     }
+	*/
 	total_read_preMerge_++; 
 	if (didMerge) {
 		merged_counter_++;
@@ -1929,24 +1940,54 @@ void OutputStreamer::findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2
 //*******************************************
 
 
-void DNAuniqSet::setBest() {
+void DNAuniqSet::setBest(bool addCnts) {
 	int bestCnt = 0;
 	int bestPos = -1;
+	if (DNUs.size() == 1) {
+		bestSet = true;
+		bestDNU = DNUs.begin()->second;
+		return;
+	}
 	//shared_ptr<DNAunique> lastBest;
 	for (auto dd : DNUs) {
-		if (dd.second->totalSum() > bestCnt) {
+		if (dd.second == nullptr) {
+			continue;
+		}
+		bool nhM = dd.second->getMerge() != nullptr;
+		//weigh by whether any has a merge
+		float modN = 1.f; float modB = 1.f; float ratMLs(1.f);
+		if (nhM && bestHasMerge) {//compare merge length
+			ratMLs = (float)dd.second->getMerge()->length() / (float)bestDNU->getMerge()->length();
+		}
+		else {
+			if (!nhM) { modN = 0.8f; }
+			if (!bestHasMerge) { modB = 0.8f; }
+		}
+		float ratCns = ((float)dd.second->totalSum() * modN )/  ( (float)bestCnt * modB );
+		ratCns *= ratMLs;
+		if (ratCns > 1  ) {
 			bestCnt = dd.second->totalSum();
 			bestPos = dd.first;
 			bestDNU = dd.second;
 		}
 	}
 	//completely unbiased selection of whatever has the highest counts.. could select non-merge before merge
-	if (bestPos != -1 && DNUs.size() > 1) {
-		//include + - 1?
-		auto xx = DNUs.find((bestPos - 1));
-		if (xx != DNUs.end()) {bestDNU->transferOccurence(xx->second);}
-		xx = DNUs.find((bestPos + 1));
-		if (xx != DNUs.end()) {bestDNU->transferOccurence(xx->second);}
+	if (bestPos != -1 && DNUs.size() > 1 && !cntsAdded2best) {
+
+		if (addCnts) {
+			for (auto dd : DNUs) {
+				if (bestPos != dd.first) {
+					bestDNU->transferOccurence(dd.second);
+				}
+			}
+		} else {
+			//include + - 1?
+			auto xx = DNUs.find((bestPos - 1));
+			if (xx != DNUs.end()) { bestDNU->transferOccurence(xx->second); }
+			xx = DNUs.find((bestPos + 1));
+			if (xx != DNUs.end()) { bestDNU->transferOccurence(xx->second); }
+		}
+		cntsAdded2best = true;
 	}
 	bestSet = true;
 }
@@ -2072,22 +2113,34 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 	int sample_id = dna->getBarcodeNumber();
 	bool pass = dna->isGreenQual();
 	//deactivate this for now..
+
+	//completely deactive the merge position searches..reactivate later
+	//int MrgPos1 = -1;// dna->merge_seed_pos_;
 	int MrgPos1 = dna->merge_seed_pos_;
 	//int MrgPos1 = -1;
 	shared_ptr<DNA> dna_merged = nullptr;
 	string srchSeq("");
 
-	if (dna2 != nullptr && dna->merge_seed_pos_ != -1) {
-		MrgPos1 = dna2->merge_seed_pos_;
+	bool searchWithMerg = true;
+
+	if (searchWithMerg && dna2 != nullptr && dna->merge_seed_pos_ != -1) {
+		//MrgPos1 = dna2->merge_seed_pos_;
 		dna_merged = merger->merge(dna, dna2);
 	}
 
 	if (dna_merged){
 		srchSeq = dna_merged->getSeqPseudo().substr(0, dna->length());
+		dna_merged = nullptr;
+		//merge can be a lot shorter, potentially leading to problems searching this seq
+		if (false && srchSeq.length() != dna->length()) {
+			//int y = 1;
+			srchSeq = dna->getSeqPseudo();
+		}
 	}
 	else {
 		srchSeq = dna->getSeqPseudo();
 	}
+
 
     // Lock because were accessing the base_map
 
@@ -2104,9 +2157,9 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 		dna_unique = dna_unique1->second.find(MrgPos1);
 		//truly dereplicated? at least overlap should fit..
 		if (dna_unique == dna_unique1->second.end()) {
-			dna_unique1->second.addNewDNAuniq(dna, dna2,  MrgPos1, sample_id);
+			dna_unique1->second.addNewDNAuniq(dna, dna2, dna_merged, MrgPos1, sample_id);
 		} else { // compare to existing DNA
-			dna_unique->second->matchedDNA(dna, dna2, sample_id, b_derep_as_fasta_);
+			dna_unique->second->matchedDNA(dna, dna2, dna_merged, sample_id, b_derep_as_fasta_);
 		} 
 		dna_unique1->second.lockMTX.unlock();//just to be on safe side, lock entire section
 	}
@@ -2114,7 +2167,7 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 
 	if (new_insert && pass) {
 		drpMTX.lock(); 
-		Tracker[srchSeq].addNewDNAuniq(dna, dna2, MrgPos1, sample_id);
+		Tracker[srchSeq].addNewDNAuniq(dna, dna2, dna_merged, MrgPos1, sample_id);
 		drpMTX.unlock();
         // Create new dna_unique object
 		//cdbg("set new DNAderep ");
@@ -2189,7 +2242,9 @@ void Dereplicate::finishMap() {
 	outputFile.close();
 
 	std::remove(mapF.c_str());
-	std::rename((mapF + "t").c_str(), mapF.c_str());
+	int x = std::rename((mapF + "t").c_str(), mapF.c_str());
+
+	return;
 }
 string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	ofstream of, omaps, of2, ofRest, of2p2, of_merged;
@@ -2262,10 +2317,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	for (dd = Tracker.begin(); dd != Tracker.end();dd++) {
 		//super simple, double check later for correctness TODO
 		size_t xsi = dd->second.size();
-		if (xsi > 1) {
-			int y = 0;
-		}
-        dereplicated_dnas[count] = dd->second.best();
+        dereplicated_dnas[count] = dd->second.best(true);
 		count++;
 	}
 //	bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r) {	return l->getCount() < r->getCount();}
@@ -3358,9 +3410,9 @@ void Filters::setSeqLength(float minL, int maxL) {
 
 
 //ever_best is the best %id_ that was ever observed for this cluster match
-bool Filters::betterSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> ref, shared_ptr<DNA> ref2, float ever_best, 
-	uint bestL, int usePair, bool checkBC) {
-	float d1pid(d1->getTempFloat()), refpid(ref->getTempFloat());
+bool Filters::betterSeed(shared_ptr<DNAunique> d1,
+	shared_ptr<DNAunique> ref,  float ever_best,
+	 int usePair, bool checkBC) {
 	int TagIdx(0);
 	if (checkBC) {
 		TagIdx = -2;
@@ -3373,21 +3425,24 @@ bool Filters::betterSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA>
 	if (!checkYellowAndGreen(d1, usePair, TagIdx, true)) {
 		return false;
 	}
-	if (d2 != nullptr) {
-		checkYellowAndGreen(d2, 1, TagIdx, true);
+	if (d1->getPair() != nullptr) {
+		checkYellowAndGreen(d1->getPair(), 1, TagIdx, true);
 	}
+	/*float d1pid(d1->getTempFloat()), refpid(ref->getTempFloat());
 	if (d1pid<refpid - 0.4f || d1pid < ever_best - 1){ return false; }
-
+	*/
 	//at least 90% length of "good" hit
 //	if (d1->length() / ref->length() < RefLengthRatio) { return false; }
 
-	return whoIsBetter(d1, d2, ref, ref2,  bestL);
+	return whoIsBetter(d1, d1->getPair(),d1->getMerge(), 
+		ref, ref->getPair(), ref->getMerge(),  ever_best,true);
 
 
 
-	/*
+	
 	//checks if the new DNA has a better overall quality
 	//1 added to qual, in case no qual DNA is used
+	/*
 	float thScore = (1+d1->getAvgQual())*(d1pid ) * log((float)d1->length() );
 	float rScore = (1+ref->getAvgQual())*(refpid ) * log((float)ref->length() );
 	if (thScore > rScore){
@@ -5288,7 +5343,7 @@ string Filters::shortStats( const string & file) {
 	if (pairedSeq > 1) {
 		ret+= "Pair 1: ";
 	}
-	char buffer[50];
+	//char buffer[50];
 	float tmp = (100.f*float(cst->total - cst->totalRejected) / (float)cst->total);
 	ostringstream os;
 	os << tmp << "% of " << cst->total << " reads accepted (" << (100.f * float(cst->total - cst->Trimmed) / (float)cst->total) << "% end-trimmed)\n";
@@ -5928,20 +5983,6 @@ UClinks::~UClinks(){
 		delete merger;
 		merger = nullptr;
 	}
-/*
-	for (uint i=0; i< bestDNA.size();i++){
-		delete bestDNA[i];
-	}
-//	for (std::map<string, shared_ptr<DNA>>::iterator iterator = unusedID.begin(); iterator != unusedID.end(); iterator++) {
-//		delete (*iterator).second;
-//	}
-	for (uint i = 0; i<oldDNA.size(); i++) {
-		if (oldDNA[i] != NULL) { delete oldDNA[i]; }
-	}
-	for (uint i = 0; i<oldDNA2.size(); i++) {
-		if (oldDNA2[i] != NULL) { delete oldDNA2[i]; }
-	}
-	*/
 }
 UClinks::UClinks( OptContainer& cmdArgs):
 	CurSetPair(-1),//maxOldDNAvec(20000),
@@ -6077,7 +6118,7 @@ int UClinks::oneDerepLine(shared_ptr<DNAunique> d) {
 		return 0;
 	}
 	string line("");
-	int cnt;
+	int cnt(0);
 	while (!safeGetline(mapdere, line).eof()) {
 		//if (line.length() < 3) { continue; }
 		if (line[0] == '#') {continue;}
@@ -6242,6 +6283,19 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 			if (tmpDNA == NULL) { cont = false; break; }//signal that at end of file
 			
 			match = make_shared<DNAunique> (tmpDNA, -1);
+			if (match2 != NULL) {
+				match->attachPair(make_shared<DNAunique>(match2, -1));
+				//merge read
+				merger->findSeedForMerge(match, match2);
+				if (match->merge_seed_pos_ > 0) {
+					shared_ptr<DNA> dM = merger->merge(match, match2);
+					if (dM != nullptr) {
+						match->attachMerge(make_shared<DNAunique>(dM, -1));
+					}
+				}
+
+			}
+
 			//assummes in original implementation, that we can get derep.map lines with the same 
 			//ordering as fq derep (which works normally, just not for dada2 mode)
 			UCcnt+= oneDerepLine(match);
@@ -6251,7 +6305,7 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 			if (curID != segs){
 				//block to store unused DNA & find this id_ in this block
 				unusedID[curID] = DNAunusedPos;
-				oldDNA[DNAunusedPos] = match;	oldDNA2[DNAunusedPos] = match2;
+				oldDNA[DNAunusedPos] = match;	//oldDNA2[DNAunusedPos] = match2;
 				DNAunusedPos++;
 			} else {//find if current DNA rep needs to be replaced with a better read (pair)
 				//assign % identity score to DNA object
@@ -6259,7 +6313,7 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 				cerr << "UC Hit";
 #endif
 				match->setTempFloat(perID);
-				besterDNA(curCLID, match, match2, fil);
+				besterDNA(curCLID, match, match->getPair(), fil);
 				curCLID.resize(0);
 				break;
 			}
@@ -6358,14 +6412,14 @@ bool UClinks::uclInOldDNA_simple(const string& segs,const vector<int>& curCLID, 
 		matrixUnit matchSiz = (matrixUnit)curCLID.size();
 		for (int k = 0; k < matchSiz; k++) {
 			add2OTUmat(oldDNA[mID], curCLID[k], matchSiz);
-			countsAdd += matchSiz;
+			countsAdd += (int)matchSiz;
 		}
 		//was matched once to an OTU seed. Even if several later matches, doesn't mater - delete
 
 		unusedID.erase(unusedIT);
 //		delete oldDNA[mID]; if (oldDNA2[mID] != NULL){ delete oldDNA2[mID]; }
 
-		oldDNA.erase(mID); oldDNA2.erase(mID);// = NULL;oldDNA2[mID] = NULL;
+		oldDNA.erase(mID); //oldDNA2.erase(mID);// = NULL;oldDNA2[mID] = NULL;
 		return true;
 	}
 	return false;
@@ -6384,10 +6438,10 @@ bool UClinks::uclInOldDNA(const string& segs,const vector<int>& curCLID, float p
 		int mID = (*unusedIT).second;
 		//give sequence a chance to be selected
 		oldDNA[mID]->setTempFloat(perID);
-		besterDNA(curCLID, oldDNA[mID], oldDNA2[mID], fil);
+		besterDNA(curCLID, oldDNA[mID], oldDNA[mID]->getPair(), fil);
 		//remove all trace
 		unusedID.erase(unusedIT);
-		oldDNA.erase(mID); oldDNA2.erase(mID);
+		oldDNA.erase(mID); //oldDNA2.erase(mID);
 		//oldDNA[mID] = NULL;		oldDNA2[mID] = NULL;
 		return true;
 	}
@@ -6663,7 +6717,7 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 				}	else {
 					//not found in known clusters.. create entry
 					bestDNA.push_back(NULL);
-					bestDNA2.push_back(NULL);
+					//bestDNA2.push_back(NULL);
 					oriKey.push_back(oriClKey);
 					bestPID.push_back(0.f);
 					bestLEN.push_back(0);
@@ -6767,6 +6821,7 @@ void UClinks::setupDefSeeds(shared_ptr<InputStreamer> FA, const vector<string>& 
 	while (contRead) {
 		shared_ptr<DNA> tmpDNA = FA->getDNA( 0);
 		if (tmpDNA == NULL) { contRead = false; break; }
+		tmpDNA->setAllQual(30);
 		shared_ptr<DNAunique> tmp = make_shared<DNAunique>(tmpDNA, -1);
 //		delete tmpDNA;
 		//second pair_
@@ -6788,10 +6843,11 @@ void UClinks::setupDefSeeds(shared_ptr<InputStreamer> FA, const vector<string>& 
 
 		if (itCL == seq2CI.end()) {
 			//not found in known clusters.. create entry
+			bestPID.push_back(100.f);//it's the original seq, so it's at 100%
+			tmp->setTempFloat(100.f);
 			bestDNA.push_back(tmp);
-			bestDNA2.push_back(NULL);
+			//bestDNA2.push_back(NULL);
 			oriKey.push_back(oriClKey);
-			bestPID.push_back(100.f);
 			bestLEN.push_back(tmp->length());
 			clusCnt = (int)bestDNA.size() - 1;
 			seq2CI[segs2] = clusCnt;
@@ -6843,7 +6899,7 @@ void UClinks::addDefSeeds(shared_ptr<InputStreamer> FA, Filters* fil) {
 		if (itCL == seq2CI.end()) {
 			//not found in known clusters.. create entry
 			bestDNA.push_back(tmp);
-			bestDNA2.push_back(NULL);
+			//bestDNA2.push_back(NULL);
 			oriKey.push_back(oriClKey);
 			bestPID.push_back(100.f);
 			bestLEN.push_back(tmp->length());
@@ -6866,7 +6922,7 @@ void UClinks::addDefSeeds(shared_ptr<InputStreamer> FA, Filters* fil) {
 
 void UClinks::besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1, 
 	shared_ptr<DNA> tdn2, Filters* fil) {
-	bool checkBC = true; 
+	bool checkBC = true;
 	int TagIdx(-2);
 	if (tdn2 != NULL) {//fix for pairs assuming midSeqs
 		checkBC = false; //TagIdx = 0;
@@ -6901,26 +6957,22 @@ void UClinks::besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn
 			bestPID[curCLID] = tdn1->getTempFloat();
 			bestLEN[curCLID] = tdn1->length() + tdn2->length();
 			fil->checkYellowAndGreen(tdn2, 1, TagIdx, true);
-			bestDNA2[curCLID] = tdn2;
+			//bestDNA2[curCLID] = tdn2;
+			
 		}
 	}//already a candidate sequence? check who is better..
 	else if (
-		fil->betterSeed(tdn1, tdn2, bestDNA[curCLID], bestDNA2[curCLID], bestPID[curCLID], bestLEN[curCLID], CurSetPair, checkBC)
+		fil->betterSeed(tdn1,  bestDNA[curCLID], 
+			bestPID[curCLID], CurSetPair, checkBC) //bestLEN[curCLID], 
 		){
 //		delete bestDNA[curCLID];
 		bestDNA[curCLID] = tdn1; 
-		if (tdn2 != NULL) {
-//			if (bestDNA2[curCLID] != NULL) {delete bestDNA2[curCLID];	}
-			bestDNA2[curCLID] = tdn2;
-		}
 		if (bestPID[curCLID] < tdn1->getTempFloat()){
 			bestPID[curCLID] = tdn1->getTempFloat();
 		}
-		uint curL = tdn1->length();
-		if (tdn2 != NULL) { curL += tdn2->length(); }
-		if (bestLEN[curCLID] < curL){
-			bestLEN[curCLID] = curL;
-		}
+		//uint curL = tdn1->length();
+		//if (tdn2 != NULL) { curL += tdn2->length(); }
+		//if (bestLEN[curCLID] < curL){			bestLEN[curCLID] = curL;		}
 	} else {
 //		delete dnaTemp1;delete dnaTemp2;
 	}
@@ -6979,7 +7031,7 @@ void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, Filters* fil,
 		cerr << "Writing new OTU seeds..";
 		to = RefDBotuStart;
 	}
-	shared_ptr<DNA> d;
+	shared_ptr<DNAunique> d;
 	
 	for (uint i = st; i < to; i++) {
 		//if (i == 6628){			int x = 0;		}
@@ -6993,6 +7045,7 @@ void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, Filters* fil,
 		//fil->check(bestDNA[i],true);
 		string newH = oriKey[i];
 		d = bestDNA[i];
+		shared_ptr<DNAunique> d2 = d->getPair();
 		if (printLnk){
 			string oriH = d->getShortId(); removeSizeStr(oriH);
 			links << newH << "\t" << oriH << endl;
@@ -7003,21 +7056,20 @@ void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, Filters* fil,
 			d->setPassed(true);
 			d->setNewID(newH + ".1");
 
-			if (b_merge_pairs_optiSeed_ && bestDNA2[i] != NULL) {
-				MD->findSeedForMerge(d, bestDNA2[i],0);
-				bool didMerge(false);
-				didMerge = MD->saveForWrite_merge(d, bestDNA2[i], newH , 0, true);
+			if (b_merge_pairs_optiSeed_ ){//&& bestDNA2[i] != NULL) {
+				bool didMerge = MD->saveForWrite_merge(d, newH, 0, true);
+				//didMerge = MD->saveForWrite_merge(dM, nullptr, newH, 0, true);
 				if (!didMerge) {//not merged? we want to add this DNA nonetheless to output
 					//better to do this in saveForWrite already
 				}
 			}
 
-			if (bestDNA2[i] != NULL) {
+			if (d2 != nullptr) {
 			    //sorted by pair1,2, quality yellow green, singleton (pair 1 2 3 4) etc
 				MD->saveForWrite(d, 1,-1);
-				bestDNA2[i]->setPassed(true);
-				bestDNA2[i]->setNewID(newH + ".2");
-				MD->saveForWrite(bestDNA2[i], 2,-1);
+				d2->setPassed(true);
+				d2->setNewID(newH + ".2");
+				MD->saveForWrite(d2, 2,-1);
 			} else {
 				MD->saveForWrite(d, 3,-1);
 			}
@@ -7053,14 +7105,21 @@ void UClinks::printStats(ostream& os){
 	}
 
 	for (uint i = 0; i < to; i++){
-		if (bestDNA[i] == NULL){ continue; }
-		float curQ = bestDNA[i]->getAvgQual();
-		if (bestDNA2[i] != NULL) {
-			curQ += bestDNA2[i]->getAvgQual(); curQ /= 2.f;
+		shared_ptr<DNAunique> d = bestDNA[i];
+		if (d == nullptr) { continue; }
+		shared_ptr<DNAunique> d2(nullptr);
+		if (d->getMerge() != nullptr) {
+			d = d->getMerge();
+		} else {
+			d2 = d->getPair();
 		}
-		uint curL = (uint) bestDNA[i]->length();
-		if (bestDNA2[i] != NULL) {
-			curL += bestDNA2[i]->length(); 
+		float curQ = d->getAvgQual();
+		if (d2 != NULL) {
+			curQ += d2->getAvgQual(); curQ /= 2.f;
+		}
+		uint curL = (uint) d->length();
+		if (d2!= NULL) {
+			curL += d2->length(); 
 		}
 
 		if (curL < minL){ minL = curL; }
@@ -7071,15 +7130,15 @@ void UClinks::printStats(ostream& os){
 		if (curQ < 1) {//no new Seed found, default seed
 			continue;
 		}
-		float sc = bestDNA[i]->getTempFloat();
+		float sc = d->getTempFloat();
 
 		if (curQ < minQ){ minQ = curQ; }
 		if (curQ > maxQ){ maxQ = curQ; }
 		avgQ += curQ;
 
-		float curA = (float)bestDNA[i]->getAccumError();
-		if (bestDNA2[i] != NULL) {
-			curA += (float) bestDNA2[i]->getAccumError(); 
+		float curA = (float)d->getAccumError();
+		if (d2 != NULL) {
+			curA += (float) d2->getAccumError(); 
 		}
 
 		quals.push_back(curQ);

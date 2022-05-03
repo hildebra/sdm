@@ -283,7 +283,7 @@ void ReadMerger::testMergeWithReads(std::istream &is1, std::istream &is2) {
 
 ///// alll important initial routine to find the best place to merge
 //////////////////////////////////////////
-bool ReadMerger::findSeed(std::string sequence1, std::string sequence2, MergeResult &result) {
+bool ReadMerger::findSeed(std::string& sequence1, std::string& sequence2, MergeResult &result) {
 	seedmap_.clear();
 	int hit = 0;
 
@@ -376,6 +376,28 @@ bool ReadMerger::findSeed(std::string sequence1, std::string sequence2, MergeRes
 	return false;
 }
 
+
+/*bool ReadMerger::findSeed(std::string& sequence1, std::string& sequence2) {
+	return findSeed(sequence1, sequence2, result);
+}
+*/
+
+bool ReadMerger::findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2) {
+	bool didMerge(false);
+	if (dna1->length() == 0 || dna2->length() == 0) {
+		return false;
+	}
+	MergeResult res;
+	if (findSeed(dna1->getSequence(), dna2->getSequence(), res) ) {
+		dna1->merge_seed_pos_ = (int)res.seed.pos1;
+		dna1->merge_offset_ = res.offset1;
+		dna2->merge_seed_pos_ = (int)res.seed.pos2;
+		dna2->merge_offset_ = res.offset2;
+		dna2->reversed_merge_ = res.seed.is2reversed;
+		return true;
+	}
+	return false;
+}
 
 shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) {
 	if (read1->merge_seed_pos_ == -1 || read2->merge_seed_pos_ == -1) {
@@ -492,7 +514,7 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	//also log quality along read
 
 	int errInOverlap(0);
-	qual_score summedMismathcQ(0.f);
+	qual_score summedMismathcQ(0);
 
 	for (size_t i = 0; i < overlap; i++, pos1++, pos2++, pos_overlap++) {
 		//            std::cout << "___" << std::endl;
@@ -560,11 +582,8 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	merged_read->setNewID(read1->getId());// +"_merged");
 	merged_read->getEssentialsFts(read1);
 
-	if (errInOverlap) {
-		int x = 0;
-	}
 
-	qual_score meanMisMatchQ = (qual_score)((float)summedMismathcQ / (float)errInOverlap);
+	qual_score meanMisMatchQ = (qual_score)round((float)summedMismathcQ / (float)errInOverlap);
 	merged_read->setMergeErrors(errInOverlap, meanMisMatchQ);
 	read1->setMergeErrors(errInOverlap, meanMisMatchQ);
 	read2->setMergeErrors(errInOverlap, meanMisMatchQ);

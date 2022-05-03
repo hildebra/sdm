@@ -141,7 +141,7 @@ public:
 		//first round read..
 		primary->read(keeper, bufS);
 		if (!(*primary) || bufS > primary->gcount()) {
-			bufS = primary->gcount()+1;
+			bufS = (size_t)primary->gcount()+1;
 			atEnd = true;
 			delete[] keeperW;
 			keeperW = nullptr;
@@ -279,7 +279,7 @@ private:
 		input_mtx.lock();
 		primary->read(keeperW, bufS);	
 		if (!*(primary)) {
-			bufSW = primary->gcount() + 1;
+			bufSW = (size_t)primary->gcount() + 1;
 		}
 		input_mtx.unlock();
 		return true;
@@ -660,6 +660,7 @@ public:
         sequence_length_ = sequence_.length();
     }
 
+
 	string &getSequence() { return sequence_; }
 
 	string getSeqPseudo() {
@@ -668,6 +669,8 @@ public:
 
 	void setQual(vector<qual_score>& Q) { qual_ = Q; avg_qual_ = -1.f; }
     void setQual(vector<qual_score>&& Q) { qual_ = Q; avg_qual_ = -1.f; }
+
+	void setAllQual(qual_score q) { for (size_t i = 0; i < qual_.size(); i++) { qual_[i] = q; } avg_qual_ = -1.f;}
 
 	const string& getId() {
 	    if (id_fixed_) {
@@ -912,7 +915,7 @@ protected:
 
 		ElementsDetection() : forward(false), reverse(false), TA_cut(false), barcode_detected(false),
                               barcode_cut(false), dereplicated(false), revPairConstellation(false),
-								errInOverlap (-1), meanQInOverlapMismatch(0.f), mergeLength(-1){}
+								errInOverlap (-1), meanQInOverlapMismatch(0), mergeLength(-1){}
 		void transferFrom(ElementsDetection& o) { 
 			forward = o.forward;
 			reverse = o.reverse;
@@ -936,7 +939,7 @@ protected:
 			revPairConstellation = false;
 			errInOverlap = -1;
 			mergeLength = -1;
-			meanQInOverlapMismatch = 0.f;
+			meanQInOverlapMismatch = 0;
 		}
 
 	} FtsDetected;
@@ -968,8 +971,7 @@ public:
 	DNAunique(string s, string x) : DNA(s, x) {  }
 
 	// Mostly used constructor
-	DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d),  
-		best_seed_length_((uint)sequence_.size()), pair_(0) {
+	DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), pair_(0) {//best_seed_length_((uint)sequence_.size())
         incrementSampleCounter(BC);
 	}
 	~DNAunique() {
@@ -983,7 +985,7 @@ public:
 	//string sequence_;	string id_;
 	void Count2Head(bool);
 	bool betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2);
-	void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, int, bool);
+	void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, int, bool);
 	void incrementSampleCounter(int sample_id);
 	void writeMap(ofstream & os, const string&, vector<int>&, const vector<int>&);
 	//inline int getCount() { return count_; }
@@ -993,8 +995,8 @@ public:
 		if (ret == 0) { ret = 1; }
 		return ret; 
 	}
-	uint getBestSeedLength() { return best_seed_length_; }
-	void setBestSeedLength(uint i) { best_seed_length_ = i; }//DNAuniMTX.lock(); DNAuniMTX.unlock();}
+	//uint getBestSeedLength() { return best_seed_length_; }
+	//void setBestSeedLength(uint i) { best_seed_length_ = i; }//DNAuniMTX.lock(); DNAuniMTX.unlock();}
 	void incrementSampleCounterBy(int sample_id, long count);
 	void transferOccurence(shared_ptr<DNAunique>);
 	const read_occ& getDerepMap() { return occurence; }
@@ -1045,20 +1047,30 @@ public:
 
 
 	void attachPair(shared_ptr<DNAunique> dna_unique) {
-	    pair_ = dna_unique;
+		if (dna_unique == nullptr) { return; }
+		pair_ = dna_unique;
 	    pair_->saveMem();
 	}
-
 	shared_ptr<DNAunique> getPair(void) {
 	    return pair_;
 	}
+
+	void attachMerge(shared_ptr<DNAunique> dnamerge) {
+		if (dnamerge == nullptr) { return; }
+		merge_ = dnamerge;
+		merge_->saveMem();
+	}
+	shared_ptr<DNAunique> getMerge(void) {
+		return merge_;
+	}
+	
 
 	//estimates if one sample occurence covers the unique counts required for sample specific derep min counts
 	bool pass_deprep_smplSpc( const vector<int>&);
 	//int counts() const { return count_; }
 
-	void takeOver(shared_ptr<DNAunique> dna_unique_old, shared_ptr<DNA> dna2);
-	void takeOverDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2);
+	void takeOver(shared_ptr<DNAunique> dna_unique_old);
+	void takeOverDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaMerge);
 	uint64_t * transferPerBaseQualitySum();
 
     uint64_t* quality_sum_per_base_ = nullptr;
@@ -1071,10 +1083,12 @@ public:
 private:
 	//int count_;
 	//matrixUnit chimeraCnt;
-	int best_seed_length_;
+	//int best_seed_length_;
 	
 	read_occ occurence;
 	shared_ptr<DNAunique> pair_;
+
+	shared_ptr<DNAunique> merge_;
 
 	// to calculate mean
     std::string qualities_avg_;
@@ -1261,8 +1275,9 @@ private:
 
 
 //true: d is better, false: ref is better
-bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> r1, shared_ptr<DNA> r2,
-	uint bestL);
+bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM, 
+	shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM,
+	float& ever_best, bool forSeed);
 
 
 

@@ -449,7 +449,7 @@ public:
 	void preFilterSeqStat(shared_ptr<DNA> d,int pair);
 //    void preFilterSeqStatMT(shared_ptr<DNA> d, data_MT *data, int pair_);
 	inline void updateMaxSeqL(int x);
-	bool betterSeed(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, float, uint, int,bool);
+	bool betterSeed(shared_ptr<DNAunique>, shared_ptr<DNAunique>, float,  int,bool);
 	bool secondaryOutput(){return bAdditionalOutput;}
 	inline bool checkSwitchedRdPairs() { return b2ndRDBcPrimCk; }
 	inline bool checkRevRd() { return bRevRdCk; }
@@ -749,23 +749,27 @@ bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r);
 
 class DNAuniqSet {
 public:
-	DNAuniqSet():bestDNU(nullptr), bestSet(false),totalCnts(0){}
+	DNAuniqSet():bestDNU(nullptr), bestSet(false), bestHasMerge(false),totalCnts(0),
+		cntsAdded2best(false) {}
 	~DNAuniqSet() {}
-	void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, 
-				int MrgPos1, int sample_id) {
+
+	void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaM, int MrgPos1, int sample_id) {
+		
 		dna->setDereplicated();//dna->setYellowQual(false);
 		shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
 		new_dna_unique->saveMem();
-		int bestL = dna->getMergeLength();
+		if (new_dna_unique == nullptr) { return; }
+		/*int bestL = dna->getMergeLength();
 		if (bestL == -1 && dna2 != nullptr) {
 			bestL = dna->mem_length() + dna2->mem_length();
 		}
 		if (bestL == -1) {
 			bestL = dna->mem_length();
 		}
-
 		new_dna_unique->setBestSeedLength(bestL);
+		*/
 		if (dna2 != nullptr) { new_dna_unique->attachPair(make_shared<DNAunique>(dna2, sample_id)); }
+		if (dnaM != nullptr) { new_dna_unique->attachMerge(make_shared<DNAunique>(dnaM, sample_id)); }
 		DNUs[MrgPos1] = new_dna_unique;
 	}
 	shared_ptr<DNAunique> &operator[] (int x) {
@@ -782,11 +786,12 @@ public:
 		return DNUs.begin();
 	}
 	size_t size() { return DNUs.size(); }
-	void setBest();
-	shared_ptr<DNAunique> best() {
+	void setBest(bool addCnts);
+	shared_ptr<DNAunique> best(bool addCnts) {
 		if (!bestSet) {
-			this->setBest();
+			this->setBest(addCnts);
 		}
+		
 		return bestDNU;
 	}
 
@@ -794,8 +799,9 @@ public:
 private:
 	map<int, shared_ptr<DNAunique>> DNUs;
 	shared_ptr<DNAunique> bestDNU;
-	bool bestSet;
+	bool bestSet; bool bestHasMerge;
 	int totalCnts;
+	int cntsAdded2best;
 };
 
 typedef robin_hood::unordered_node_map<string, DNAuniqSet> HashDNA;
@@ -916,7 +922,7 @@ private:
 	//store not matched DNA and keep track
 	//uint maxOldDNAvec;
 	map<int,shared_ptr<DNAunique>> oldDNA;
-	map<int,shared_ptr<DNA>> oldDNA2;
+	//map<int,shared_ptr<DNA>> oldDNA2;
 	DNAidmaps unusedID;
 	//std::list<string> oldestID;
 	uint DNAunusedPos;
@@ -927,7 +933,7 @@ private:
 
 	ClusterIdx seq2CI;
 	vector<shared_ptr<DNAunique>> bestDNA;
-	vector<shared_ptr<DNA>> bestDNA2;
+	//vector<shared_ptr<DNA>> bestDNA2;
 	vector<string> oriKey;
 	list<string> mapLines;
 	vector<float> bestPID;
@@ -991,7 +997,7 @@ public:
 	
 																   //pretty final bool, aborts all, so careful with this
 	bool saveForWrite(shared_ptr<DNA> d, int Pair, int thr);//1=pair1;2=pair2;3=singleton
-	bool saveForWrite_merge(shared_ptr<DNA> d, shared_ptr<DNA> d2,
+	bool saveForWrite_merge(shared_ptr<DNAunique> d,
 		string newHeader="",int curThread=0, bool elseWriteD1=false);
 //bool saveForWriteMT(shared_ptr<DNA> dna, int thread, int pair = 1);
 	Filters* getFilters(int w = -1) { 

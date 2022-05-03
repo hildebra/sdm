@@ -282,7 +282,13 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	
 
 	//pre-merge step
-	if ( MD->mergeReads()) {MD->findSeedForMerge(tdn[0], tdn[1],curThread);	}
+	//if ( MD->mergeReads()) {MD->findSeedForMerge(tdn[0], tdn[1],curThread);	}
+	//needed to eval qual of seed
+
+	if (MD->mergeReads() && tdn[1] != nullptr) {
+		MD->findSeedForMerge(tdn[0], tdn[1], curThread);
+	}
+
 
 	//demultiplex write? do this first before DNA is deleted..
 	//at this point the tagIDX *MUST* be correctly set + BCoffset (in the DNA object, tagIDX doesn;t matter)
@@ -1089,17 +1095,21 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
         }
         //polished OTU seeds need to be written after OTU matrix (renaming scheme)
         shared_ptr<OutputStreamer> MDx = make_shared<OutputStreamer>(mainFilter, cmdArgs, 
-			ios::app, RDSset,0);
+			ios::out, RDSset,0);
 		vector<ReadMerger*> DerepM = vector<ReadMerger*>(1,NULL);
 		DerepM[0] = new ReadMerger(false);
 		MDx->attachReadMerger(DerepM);
         mainFilter->setMultiDNA(MDx);
         ucl->writeNewSeeds(MDx, mainFilter, false);
-        //new fastas also need to be written..
+        
+		//not used any longer
+		/*
+		//new fastas also need to be written..
         MDx.reset(new OutputStreamer(mainFilter, cmdArgs, 
 			ios::app, RDSset,1,".ref"));//force fna output
         mainFilter->setMultiDNA(MDx );
         ucl->writeNewSeeds(MDx, mainFilter, true, true);
+		*/
         //delete MDx;
 		delete DerepM[0];
         return;
