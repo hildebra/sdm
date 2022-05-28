@@ -21,6 +21,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "InputStream.h"
 #include "ReadMerger.h"
+#include<cstdio>
+
 //#include "include/robin_map.h"
 
 //#include <math.h>
@@ -47,6 +49,7 @@ public:
     std::vector<long> nucleotide_counter;
 };
 
+
 struct ltstr
 {
   bool operator()( std::string s1,  std::string s2)
@@ -54,6 +57,11 @@ struct ltstr
     return strcmp(s1.c_str(), s2.c_str()) < 0;
   }
 };
+
+template<typename K, typename V>
+vector<pair<K, V>> mapToVector(const unordered_map<K, V>& map) {
+	return std::vector<std::pair<K, V>>(map.begin(), map.end());
+}
 
 //output stream for main DNA object
 typedef ofbufstream ostr;
@@ -505,7 +513,8 @@ public:
 	void printHisto(ostream&, int which, int set = 1);//which: 1=qual_ //set:0 only filter, 1 all available
 	bool combineSamples(){ return bDoCombiSamples; }
 	
-	void SRessentials(int s) { if (SequencingRun.size() < s) { SequencingRun.resize(s, ""); } }
+	//handles setting up file paths, file order, file types.. (input only)
+	void FileEssentials(filesStr& files, OptContainer& cmdArgs);// 
 	//return a vector that says entry x (from invec) corresponds to group y
 	vector<int> combiSmplConvergeVec(const vector<string>&);
 //public version of BC finder..

@@ -90,6 +90,37 @@ string applyFileIT(string x, int it, const string xtr = "");
 bool fileExists(const std::string& name, int i=-1,bool extiffail=true);
 //vector<int> orderOfVec(vector<int>&);
 
+struct filesStr {//used in separateByFile
+	vector<string> FastaF;
+	vector<string> QualF;
+	vector<string> FastqF;
+	vector<string> MIDfq;
+	vector<string> fastXtar;
+	// Indicates if FASTQ files were submitted
+	bool isFastq = true;
+	//input path
+	string path = "";
+	//set up some log structures
+	string deLog = "";//dereplication main log
+	string logF = "";// cmdArgs["-log"];
+	string logFA = "";// cmdArgs["-log"].substr(0, cmdArgs["-log"].length() - 3) + "add.log";
+
+	// Unique Fas initialized with first element of tar (can be b_derep_as_fasta_ and fastq)
+	// Contains all unique b_derep_as_fasta_ or fastq files from the mapping file
+	unordered_map<string, int> uniqueFastxFiles;
+
+	// idx content: [ [0] ]
+	// idx contains one row (vector) for each unique string in tar
+	// This vector then contains the indices at which this string occurs in tar
+	vector < vector<int> > idx = vector<vector<int>>(0);
+
+	//rewrite uniqueFastxFiles to get it sorted after seqRun..
+	vector<pair<string, int>> uniqFxFls;
+
+
+};
+
+
 //static mutex input_mtx;
 
 class ifbufstream {//: private std::streambuf, public std::ostream {
@@ -1155,9 +1186,8 @@ public:
 
 	//path, fasta, qual_, pairNum
 	string setupInput(string path, int tarID, const string& uniqueFastxFile, 
-		const vector<string>& fastqFiles, 
-		const vector<string>& fastaFiles, const vector<string>& qualityFiles,
-		const vector<string>& midFiles, int &paired, string onlyPair,
+		filesStr& files,
+		 int &paired, string onlyPair,
 		string& mainFilename, bool simulate = false);
 	bool setupFastaQual(string,string, string, int&, string,bool=false);
 	void setupFna(string);

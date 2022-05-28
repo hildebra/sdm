@@ -21,7 +21,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 #include "containers.h"
-#include<cstdio>
 
 typedef std::map<std::string, shared_ptr<DNA>> DNAmap;
 
@@ -47,7 +46,6 @@ void threadAnalyzeDNA(shared_ptr<DNA> tdn, shared_ptr<OutputStreamer> MD,int thr
 void read_single(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, shared_ptr<InputStreamer> IS);
 
 bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs);
-
 
 
 

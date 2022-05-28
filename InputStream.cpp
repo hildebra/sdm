@@ -2758,10 +2758,14 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 	return true;
 }
 //mainFile = IS->setupInput(path, uniqueFas[i], FastqF[tarID], FastaF[tarID], QualF[tarID], MIDfq[tarID], fil->isPaired(), cmdArgs["-onlyPair"]);
-string InputStreamer::setupInput(string path, int t, const string& uniqueFastxFile, const vector<string>& fastqFiles, const vector<string>& fastaFiles,
-                                 const vector<string>& qualityFiles, const vector<string>& midFiles, int &paired, string onlyPair,
+string InputStreamer::setupInput(string path, int t, const string& uniqueFastxFile, filesStr& files, int &paired, string onlyPair,
                                  string& mainFilename, bool simulate) {
 	string mainFilepath("");
+	vector<string> fastqFiles = files.FastqF;
+	vector<string> fastaFiles = files.FastaF;
+	vector<string> qualityFiles = files.QualF;
+	vector<string> midFiles = files.MIDfq;
+
 	
 	if (isFasta) { // input is fasta
 		if (fastaFiles[t] != uniqueFastxFile) {

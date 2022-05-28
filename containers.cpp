@@ -3098,7 +3098,7 @@ Filters* Filters::filterPerBCgroup(const vector<int> idxi) {
 }
 
 
-//service function to ini what needs to be done
+//service function to ini OTU Seed extension 
 UClinks * Filters::ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDSset, 
 	shared_ptr<Dereplicate>& Dere) {
 	if (this->doOptimalClusterSeq()) {
@@ -5308,6 +5308,105 @@ void Filters::printHisto(ostream& give,int which, int set){
 		}
 
 	}
+}
+void Filters::FileEssentials(filesStr& files, OptContainer& cmdArgs){//unordered_map<string, int>& UFF) {
+	
+	files.FastaF = this->getFastaFiles();
+	files.QualF = this->getQualFiles();
+	files.FastqF = this->getFastqFiles();
+	files.MIDfq = this->getMIDfqFiles();
+
+
+
+	//set up some log structures
+	files.deLog = "";//dereplication main log
+	files.logF = cmdArgs["-log"];
+	files.logFA = cmdArgs["-log"].substr(0, cmdArgs["-log"].length() - 3) + "add.log";
+
+
+	// Set folder path
+	if (cmdArgs.find("-i_path") != cmdArgs.end() && cmdArgs["-i_path"].length() > 2) {
+		files.path = cmdArgs["-i_path"] + string("/");
+	}
+
+	// Set up b_derep_as_fasta_ or fastq way and save file vector in tar in case it is zipped
+	if (files.FastaF.size() > 0) { // If b_derep_as_fasta_ vector contains elements
+		files.fastXtar = files.FastaF;
+		files.isFastq = false; // Set boolean Fastq to false
+	}
+	else { // If no files.FastaF present assume there are Fastq files
+		files.fastXtar = files.FastqF;
+		if (files.FastqF.size() == 0) { // no Fasta and no Fastq files -> abort
+			cerr << "No FastQ or Fasta file given.\n  Aborting..\n";
+			exit(12);
+		}
+	}
+
+
+
+	// We dont know if it is a tar yet, but we call it tar
+	//this routine is important for managing the blocks of files to be read together
+	for (unsigned int i = 0; i < files.fastXtar.size(); i++) {
+		bool suc = false;
+		auto XX = files.uniqueFastxFiles.find(files.fastXtar[i]);
+		if (XX == files.uniqueFastxFiles.end()) {//no entry for this fastq yet
+			files.uniqueFastxFiles[files.fastXtar[i]] = (int)files.uniqueFastxFiles.size();
+			files.idx.push_back(vector<int>(1, i));
+		}
+		else {//exists already..
+			files.idx[XX->second].push_back(i);
+		}
+
+	}
+
+
+	//files.uniqFxFls = mapToVector(files.uniqueFastxFiles);
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	//is SeqRun covered at all?
+	if (SequencingRun.size() < files.uniqueFastxFiles.size()) { 
+		SequencingRun.resize(files.uniqueFastxFiles.size(), ""); 
+	}
+	//transfer  uniqueFastxFiles to vector with SR info
+	vector<pair<string, string>>SR2File;
+	for (auto uFX : files.uniqueFastxFiles) {
+		int tarID = files.idx[uFX.second][0];
+		string SR = this->SequencingRun[tarID];
+		pair<string, string> tmp (SR, uFX.first);
+		SR2File.push_back(tmp);
+	}
+	//sort vector
+	std::sort(SR2File.begin(), SR2File.end());
+
+	for (auto fx : SR2File) {
+		pair<string, int> tmp(fx.second, files.uniqueFastxFiles[fx.second]);
+		files.uniqFxFls.push_back(tmp);
+	}
+
+	if (files.uniqFxFls.size() != files.uniqueFastxFiles.size()) {
+		cerr << "Wrong size files.uniqFxFls vs files.uniqueFastxFiles\nAborting..\n";
+		exit(623);
+	}
+
+
+	//unique Fas files set up.. check for their existence
+	shared_ptr<InputStreamer> testFiles =
+		make_shared<InputStreamer>(!files.isFastq, this->getuserReqFastqVer(), "1", "1", 1);
+	// For each unique Fa file, create to see if path etc are right
+	for (auto uFX : files.uniqFxFls) {
+		int tarID = files.idx[uFX.second][0]; string tmp;
+		string x = testFiles->setupInput(files.path, tarID, uFX.first, files, this->setPaired(), cmdArgs["-onlyPair"], tmp, true);
+	}
+
+
+
 }
 
 vector<int> Filters::combiSmplConvergeVec(const vector<string>& inNames){
