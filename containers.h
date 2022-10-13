@@ -1004,7 +1004,6 @@ public:
 	//Function specifically if several output files are required
 	void writeSelectiveStream(shared_ptr<DNA> d, int Pair, int FS);//1=pair1;2=pair2;3=singl1,4=singl2  ;; FS: different multi FileStreams to be used
 	
-	
 	void writeForWrite(shared_ptr<DNA> d1, int Pair1, int Cstream1,
 		shared_ptr<DNA> d2, int Pair2, int Cstream2);
 	//pretty final bool, aborts all, so careful with this

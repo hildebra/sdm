@@ -1356,6 +1356,7 @@ bool DNAunique::betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2) {
 	//whoIsBetter(d1, d2, shared_from_this(), ref2, this->getBestSeedLength(), -1.f);
 
 
+
 	/*float dmergErrSco = (float)d1->getMergeErrors() * (float)d1->getMergeErrorsQual();
 	float refMergErrSco = (float)this->getMergeErrors() * (float)this->getMergeErrorsQual();
 	if (dmergErrSco) {

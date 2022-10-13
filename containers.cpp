@@ -3421,9 +3421,6 @@ bool Filters::betterSeed(shared_ptr<DNAunique> d1,
 
 	return whoIsBetter(d1, d1->getPair(),d1->getMerge(), 
 		ref, ref->getPair(), ref->getMerge(),  ever_best,true);
-
-
-
 	
 	//checks if the new DNA has a better overall quality
 	//1 added to qual, in case no qual DNA is used
@@ -7155,6 +7152,7 @@ void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, Filters* fil,
 				d2->setNewID(newH + ".2");
 				MD->saveForWrite(d, 1,-1, Cstream,true);
 				MD->saveForWrite(d2, 2,-1, Cstream,true);
+
 			} else {
 				MD->saveForWrite(d, 3,-1, Cstream,true);
 			}
