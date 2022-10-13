@@ -16,6 +16,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 
+
 #ifndef _InputStr_h
 #define _InputStr_h
 
@@ -89,6 +90,37 @@ string applyFileIT(string x, int it, const string xtr = "");
 bool fileExists(const std::string& name, int i=-1,bool extiffail=true);
 //vector<int> orderOfVec(vector<int>&);
 
+struct filesStr {//used in separateByFile
+	vector<string> FastaF;
+	vector<string> QualF;
+	vector<string> FastqF;
+	vector<string> MIDfq;
+	vector<string> fastXtar;
+	// Indicates if FASTQ files were submitted
+	bool isFastq = true;
+	//input path
+	string path = "";
+	//set up some log structures
+	string deLog = "";//dereplication main log
+	string logF = "";// cmdArgs["-log"];
+	string logFA = "";// cmdArgs["-log"].substr(0, cmdArgs["-log"].length() - 3) + "add.log";
+
+	// Unique Fas initialized with first element of tar (can be b_derep_as_fasta_ and fastq)
+	// Contains all unique b_derep_as_fasta_ or fastq files from the mapping file
+	unordered_map<string, int> uniqueFastxFiles;
+
+	// idx content: [ [0] ]
+	// idx contains one row (vector) for each unique string in tar
+	// This vector then contains the indices at which this string occurs in tar
+	vector < vector<int> > idx = vector<vector<int>>(0);
+
+	//rewrite uniqueFastxFiles to get it sorted after seqRun..
+	vector<pair<string, int>> uniqFxFls;
+
+
+};
+
+
 //static mutex input_mtx;
 
 class ifbufstream {//: private std::streambuf, public std::ostream {
@@ -138,27 +170,33 @@ public:
 		int length = primary.tellg();
 		primary.seekg(0, is.beg);*/
 		//first round read..
+		input_mtx.lock();
 		primary->read(keeper, bufS);
 		if (!(*primary) || bufS > primary->gcount()) {
-			bufS = primary->gcount()+1;
+			bufS = (size_t)primary->gcount()+1;
 			atEnd = true;
 			delete[] keeperW;
 			keeperW = nullptr;
 		} else {
 			kickOff();
 		}
+		input_mtx.unlock();
 	}
 	~ifbufstream() {
+		input_mtx.lock();
 		if (hasKickoff) { hasKickoff = false; readKickoff.get(); }
 		delete[] keeper;
 		if (keeperW != nullptr) { delete[] keeperW; }
 		delete primary;
+		input_mtx.unlock();
 	}
 	void clear() {
+		input_mtx.lock();
 		at = 0;
 		primary->clear();
 		delete primary;
 		primary = new ifstream(file, modeIO);
+		input_mtx.unlock();
 	}
 	void setMC(bool b) { doMC = b; }
 	bool eof() {
@@ -173,7 +211,6 @@ public:
 			this->getline(mpt);
 		}
 	}
-	//specific function that gets fasta line looking for pattern '\n>'
 	bool getlines(string& ret,int & linesRead, bool nwlRspace=false) {
 		ret.clear();
 		if (atEnd && at >= bufS) {
@@ -231,6 +268,7 @@ public:
 		}
 		return true;
 	}
+	//specific function that gets fasta line looking for pattern '\n>'
 	bool getline(string& ret) {
 		ret.clear();
 		if (atEnd && at >= bufS) {
@@ -239,8 +277,10 @@ public:
 		for (;;) {
 			char c = keeper[at];
 			at++;
-			if (at >= bufS && !readChunk()) {
-				return false;// read next chunk already
+			if (at >= bufS ) {
+				if (!readChunk()) {
+					return false;// read next chunk already
+				}
 			}
 
 			switch (c) {
@@ -275,12 +315,12 @@ private:
 			//keeperW[XX] = char_traits<char>::eof();
 			return false;
 		}
-		input_mtx.lock();
+		//input_mtx2.lock();
 		primary->read(keeperW, bufS);	
 		if (!*(primary)) {
-			bufSW = primary->gcount() + 1;
+			bufSW = (size_t)primary->gcount() + 1;
 		}
-		input_mtx.unlock();
+		//input_mtx2.unlock();
 		return true;
 	}
 	bool kickOff() {
@@ -291,7 +331,6 @@ private:
 				hasKickoff = true;
 				readKickoff = async(std::launch::async, &ifbufstream::internalReadChunk,
 					this);
-				//localMTX.unlock();
 				return true;
 			}	else {
 				return false;
@@ -311,13 +350,15 @@ private:
 		}
 		
 		//do a swap, no memcpy needed
+		//input_mtx.lock(); // not needed here, is already in input lock from calling routine..
 		char* tmp = keeper;
 		keeper = keeperW;
 		keeperW = tmp;
 		bufS=bufSW;//replace length of read string
+		at = 0;
+		//input_mtx.unlock();
 		//memcpy(keeper, keeperW, bufS);
 
-		at = 0;
 		kickOff();
 		localMTX.unlock();
 
@@ -332,8 +373,8 @@ private:
 	istream* primary;
 	future<bool> readKickoff;
 	size_t bufS, bufSW ;
-	mutex localMTX;
-	mutex input_mtx;
+	mutex localMTX, input_mtx2;
+	shared_mutex input_mtx;
 };
 
 
@@ -383,49 +424,54 @@ public:
 	}
 
 	~ofbufstream() {
-		if (hasKickoff) { hasKickoff = false; writeKickoff.get(); }
-		if (used > 0) {
-			writeStream(false);
-		}
+		finishWrites();
 		deactivate();
 		delete[] keeper;
 		delete[] keeperW;
 	}
+	void finishWrites() {
+		append_mtx_.lock();
+		if (hasKickoff) { hasKickoff = false; writeKickoff.get(); }
+		if (used > 0) {
+			writeStream(false);
+		}
+		used = 0; usedW = 0;
+		append_mtx_.unlock();
+	}
+
 	bool operator! (void) {
 		return false;
 	}
-	void operator<< (const string& X) {
-        {
-			if (coutW) {
-				cout << X;
-				return;
-			}
+	void operator<< (const string& X) {    
+		append_mtx_.lock();
+		if (coutW) {
+			cout << X;
+			return;
+		}
 			
-            size_t lX(X.length());
-            //writeStream();
-			append_mtx_.lock();
-			//if (lX > bufS) {
-				size_t at = 0;
-				while (at < lX) {
-					if (used >= bufS) {
-						writeStream();
-					}
-					keeper[used] = X[at];
-					//output_mtx.lock_shared();
-					used++; at++;
-				}
-			/*}
-			else {//faster??
-				if (lX + used > bufS) {
-					writeStream();
-				}
-				//output_mtx.lock_shared();
-				memcpy(keeper + used, X.c_str(), lX);
-				used += lX; 
-			}*/
-			append_mtx_.unlock();
-			//output_mtx.unlock_shared();
-        }
+        size_t lX(X.length());
+		size_t at = 0;
+        //writeStream();
+		//if (lX > bufS) {
+		while (at < lX) {
+			if (used >= bufS) {
+				writeStream();
+			}
+			keeper[used] = X[at];
+			//output_mtx.lock_shared();
+			used++; at++;
+		}
+		/*}
+		else {//faster??
+			if (lX + used > bufS) {
+				writeStream();
+			}
+			//output_mtx.lock_shared();
+			memcpy(keeper + used, X.c_str(), lX);
+			used += lX; 
+		}*/
+		//output_mtx.unlock_shared();
+		append_mtx_.unlock();
     }
 	/* original code
 	if (lX + used > bufS) {
@@ -438,7 +484,7 @@ public:
     // Multithreading through Threadpool
     //void setThreadPool(ThreadPool *pool) {this->pool = pool;}
 	void emptyStream() {
-		if (hasKickoff) { hasKickoff = false; writeKickoff.get(); }
+		finishWrites();
 		used = 0; usedW = 0;
 	}
 	void activate() {
@@ -472,7 +518,7 @@ public:
 
 private:
 	mutex append_mtx_;
-	mutable shared_mutex output_mtx;
+	mutex output_mtx;
 	bool internalWrite(bool closeThis){
 		output_mtx.lock();
 		primary->write(keeperW, usedW);
@@ -490,7 +536,7 @@ private:
             return;
         }
 		//do this first to prevent keeper/keeperW getting corrupted
-		if (hasKickoff) { hasKickoff = false; writeKickoff.get(); }
+		if (hasKickoff) {  writeKickoff.get(); hasKickoff = false;}
 		bool closeThis = true;
 		if (primary == nullptr) {
 			this->activate();
@@ -501,6 +547,8 @@ private:
 		char* keeperTmp = keeperW;
 		keeperW = keeper;
 		keeper = keeperTmp;
+		//rewrite keeperW with keeper, so append can continue..
+		//strcpy(keeperW, keeper);
 		output_mtx.unlock();
 		//keeper = new char[bufS];
         //if (false) {
@@ -525,7 +573,7 @@ private:
 		used = 0;
     }
 	string file;
-	char *keeper;
+	char* keeper;
 	char* keeperW;
 	int modeIO;
 	size_t used, usedW;
@@ -599,7 +647,7 @@ string detectSeqFmt(const string);
 
 class Filters;
 
-class DNA{
+class DNA: public std::enable_shared_from_this<DNA> {
 	friend class DNAunique;
 public:
 	DNA(string seq, string names) : sequence_(seq), sequence_length_(sequence_.length()),
@@ -659,6 +707,7 @@ public:
         sequence_length_ = sequence_.length();
     }
 
+
 	string &getSequence() { return sequence_; }
 
 	string getSeqPseudo() {
@@ -667,6 +716,8 @@ public:
 
 	void setQual(vector<qual_score>& Q) { qual_ = Q; avg_qual_ = -1.f; }
     void setQual(vector<qual_score>&& Q) { qual_ = Q; avg_qual_ = -1.f; }
+
+	void setAllQual(qual_score q) { for (size_t i = 0; i < qual_.size(); i++) { qual_[i] = q; } avg_qual_ = -1.f;}
 
 	const string& getId() {
 	    if (id_fixed_) {
@@ -680,6 +731,7 @@ public:
 	string getShortId() { return id_.substr(0, getShorterHeadPos(id_)); }
 	string getNewIDshort() { return new_id_.substr(0, getShorterHeadPos(new_id_)); }
 	bool seal(bool isFasta=false);
+
 
 	bool isEmpty() {
 	    if (id_.empty() && sequence_.empty()) {
@@ -715,13 +767,15 @@ public:
 		if (std::isinf((double) accumulated_error_)) {
             accumulated_error_ = 5.f;
 		}
-		return accumulated_error_;}
+		return accumulated_error_;
+	}
 	int minQual(){int mq=50; for (uint i=0; i < qual_.size(); i++){if (qual_[i] < mq){ mq=qual_[i];}}return mq;}
 	void ntSpecQualScores(vector<long>&, vector<long>&);
     void ntSpecQualScoresMT(vector<long>&, vector<long>&);
 
-
+	//returns qual filtered length 
 	inline uint length() { return (uint) sequence_length_; }
+	//returns original length 
 	inline uint mem_length() { return (uint) sequence_.length(); }
 	bool cutSeq(int start, int stop=-1, bool = false);
 	bool cutSeqPseudo(int start) { return cutSeq(start, -1, true); }
@@ -731,9 +785,9 @@ public:
 	int matchSeqRev(const string&, int, int, int=0);
 	int matchSeq_tot(const string&, int, int, int&);
 	void writeSeq(ostream&, bool singleLine = false);
-	string writeSeq( bool singleLine = false);
+	string& writeSeq( bool singleLine = false);
 	void writeQual(ostream&, bool singleLine = false);
-	string writeQual(bool singleLine = false);
+	string& writeQual(bool singleLine = false);
 	void writeFastQ(ostream&, bool = true);
 	string writeFastQ(bool = true);
 	//void writeFastQ(ofbufstream&, bool = true);
@@ -804,6 +858,8 @@ public:
 	bool isDereplicated() { return FtsDetected.dereplicated ; }
 	void constellationPairRev(bool b) { FtsDetected.revPairConstellation = b; }
 	bool isConstellationPairRev() { return FtsDetected.revPairConstellation ; }
+	int getMergeLength() { return FtsDetected.mergeLength; }
+
 	//only used in pre best seed step
 	//float getSeedScore() { return tempFloat; }
 	//void setSeedScore(float i) { tempFloat = (float)i; }
@@ -868,7 +924,19 @@ public:
 		mid_quality_ = oD-> mid_quality_;
 		sample_id_ = oD->sample_id_;
 
+		FtsDetected.errInOverlap = oD->FtsDetected.errInOverlap;
+		FtsDetected.meanQInOverlapMismatch = oD->FtsDetected.meanQInOverlapMismatch;
+		FtsDetected.mergeLength = oD->FtsDetected.mergeLength;
+
 	}
+
+	void setMergeErrors(int eoi, qual_score meanQeoi) {
+		FtsDetected.errInOverlap = eoi;
+		FtsDetected.meanQInOverlapMismatch = meanQeoi;
+	}
+	void setMergeLength(int x) { FtsDetected.mergeLength = x; }
+	int getMergeErrors() {	return FtsDetected.errInOverlap;}
+	qual_score getMergeErrorsQual() { return FtsDetected.meanQInOverlapMismatch; }
 
 protected:
     std::string qual_traf_;
@@ -888,9 +956,13 @@ protected:
 		bool forward; bool reverse;//primers detected
 		bool TA_cut; bool barcode_detected;  bool barcode_cut; bool dereplicated;
 		bool revPairConstellation;
+		//read merging related stats
+		int errInOverlap;		qual_score meanQInOverlapMismatch;
+		int mergeLength;
 
 		ElementsDetection() : forward(false), reverse(false), TA_cut(false), barcode_detected(false),
-                              barcode_cut(false), dereplicated(false), revPairConstellation(false) {}
+                              barcode_cut(false), dereplicated(false), revPairConstellation(false),
+								errInOverlap (-1), meanQInOverlapMismatch(0), mergeLength(-1){}
 		void transferFrom(ElementsDetection& o) { 
 			forward = o.forward;
 			reverse = o.reverse;
@@ -899,6 +971,10 @@ protected:
 			barcode_cut = o.barcode_cut;
 			dereplicated = o.dereplicated;
 			revPairConstellation = o.revPairConstellation;
+
+			errInOverlap = o.errInOverlap;
+			mergeLength = o.mergeLength;
+			meanQInOverlapMismatch = o.meanQInOverlapMismatch;
 		}
 		void reset() {
 		    forward = false;
@@ -908,6 +984,9 @@ protected:
             barcode_cut = false;
             dereplicated = false;
 			revPairConstellation = false;
+			errInOverlap = -1;
+			mergeLength = -1;
+			meanQInOverlapMismatch = 0;
 		}
 
 	} FtsDetected;
@@ -939,8 +1018,7 @@ public:
 	DNAunique(string s, string x) : DNA(s, x) {  }
 
 	// Mostly used constructor
-	DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d),  
-		best_seed_length_((uint)sequence_.size()), pair_(0) {
+	DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), pair_(0) {//best_seed_length_((uint)sequence_.size())
         incrementSampleCounter(BC);
 	}
 	~DNAunique() {
@@ -954,7 +1032,7 @@ public:
 	//string sequence_;	string id_;
 	void Count2Head(bool);
 	bool betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2);
-	void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, int, bool);
+	void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, int, bool);
 	void incrementSampleCounter(int sample_id);
 	void writeMap(ofstream & os, const string&, vector<int>&, const vector<int>&);
 	//inline int getCount() { return count_; }
@@ -964,8 +1042,8 @@ public:
 		if (ret == 0) { ret = 1; }
 		return ret; 
 	}
-	uint getBestSeedLength() { return best_seed_length_; }
-	void setBestSeedLength(uint i) { best_seed_length_ = i; }//DNAuniMTX.lock(); DNAuniMTX.unlock();}
+	//uint getBestSeedLength() { return best_seed_length_; }
+	//void setBestSeedLength(uint i) { best_seed_length_ = i; }//DNAuniMTX.lock(); DNAuniMTX.unlock();}
 	void incrementSampleCounterBy(int sample_id, long count);
 	void transferOccurence(shared_ptr<DNAunique>);
 	const read_occ& getDerepMap() { return occurence; }
@@ -1016,20 +1094,30 @@ public:
 
 
 	void attachPair(shared_ptr<DNAunique> dna_unique) {
-	    pair_ = dna_unique;
+		if (dna_unique == nullptr) { return; }
+		pair_ = dna_unique;
 	    pair_->saveMem();
 	}
-
 	shared_ptr<DNAunique> getPair(void) {
 	    return pair_;
 	}
+
+	void attachMerge(shared_ptr<DNAunique> dnamerge) {
+		if (dnamerge == nullptr) { return; }
+		merge_ = dnamerge;
+		merge_->saveMem();
+	}
+	shared_ptr<DNAunique> getMerge(void) {
+		return merge_;
+	}
+	
 
 	//estimates if one sample occurence covers the unique counts required for sample specific derep min counts
 	bool pass_deprep_smplSpc( const vector<int>&);
 	//int counts() const { return count_; }
 
-	void takeOver(shared_ptr<DNAunique> dna_unique_old, shared_ptr<DNA> dna2);
-	void takeOverDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2);
+	void takeOver(shared_ptr<DNAunique> dna_unique_old);
+	void takeOverDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaMerge);
 	uint64_t * transferPerBaseQualitySum();
 
     uint64_t* quality_sum_per_base_ = nullptr;
@@ -1042,10 +1130,12 @@ public:
 private:
 	//int count_;
 	//matrixUnit chimeraCnt;
-	int best_seed_length_;
+	//int best_seed_length_;
 	
 	read_occ occurence;
 	shared_ptr<DNAunique> pair_;
+
+	shared_ptr<DNAunique> merge_;
 
 	// to calculate mean
     std::string qualities_avg_;
@@ -1112,9 +1202,8 @@ public:
 
 	//path, fasta, qual_, pairNum
 	string setupInput(string path, int tarID, const string& uniqueFastxFile, 
-		const vector<string>& fastqFiles, 
-		const vector<string>& fastaFiles, const vector<string>& qualityFiles,
-		const vector<string>& midFiles, int &paired, string onlyPair,
+		filesStr& files,
+		 int &paired, string onlyPair,
 		string& mainFilename, bool simulate = false);
 	bool setupFastaQual(string,string, string, int&, string,bool=false);
 	void setupFna(string);
@@ -1231,6 +1320,10 @@ private:
 
 
 
+//true: d is better, false: ref is better
+bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM, 
+	shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM,
+	float& ever_best, bool forSeed);
 
 
 

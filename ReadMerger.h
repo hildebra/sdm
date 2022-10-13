@@ -40,7 +40,7 @@ struct MergeResult {
 
 struct mergeStats {
 	mergeStats():mismatchFwd(0), mismatchRev(0), matchFwd(0), matchRev(0),
-		percFwd(0), percRev(0){}
+		percFwd(0), percRev(0), maxF(0),maxR(0){}
 	vector<float> mismatchFwd, mismatchRev, matchFwd, matchRev;
 	vector<float> percFwd, percRev;
 	float maxF, maxR;
@@ -159,7 +159,6 @@ public:
      * @param result
      * @return
      */
-	bool findSeed(std::string sequence1, std::string sequence2, MergeResult &result);
 
     static double qualToProb(char c) {
         return pow(10, -1 * c/10.f);
@@ -181,9 +180,9 @@ public:
 	qual_score getMergedQual(qual_score q1, qual_score q2,bool same);
 	shared_ptr<DNA> merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2);
 
-    bool findSeed(std::string &sequence1, std::string &sequence2) {
-        return findSeed(sequence1, sequence2, result);
-    }
+	bool findSeed(std::string& sequence1, std::string& sequence2, MergeResult &result);
+	//bool findSeed(std::string& sequence1, std::string& sequence2);
+	bool findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2);
 
 
 	void testMergeWithReads(std::istream &is1, std::istream &is2);

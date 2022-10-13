@@ -21,6 +21,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "InputStream.h"
 #include "ReadMerger.h"
+#include<cstdio>
+
 //#include "include/robin_map.h"
 
 //#include <math.h>
@@ -47,6 +49,7 @@ public:
     std::vector<long> nucleotide_counter;
 };
 
+
 struct ltstr
 {
   bool operator()( std::string s1,  std::string s2)
@@ -54,6 +57,11 @@ struct ltstr
     return strcmp(s1.c_str(), s2.c_str()) < 0;
   }
 };
+
+template<typename K, typename V>
+vector<pair<K, V>> mapToVector(const unordered_map<K, V>& map) {
+	return std::vector<std::pair<K, V>>(map.begin(), map.end());
+}
 
 //output stream for main DNA object
 typedef ofbufstream ostr;
@@ -449,7 +457,7 @@ public:
 	void preFilterSeqStat(shared_ptr<DNA> d,int pair);
 //    void preFilterSeqStatMT(shared_ptr<DNA> d, data_MT *data, int pair_);
 	inline void updateMaxSeqL(int x);
-	bool betterSeed(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, float, uint, int,bool);
+	bool betterSeed(shared_ptr<DNAunique>, shared_ptr<DNAunique>, float,  int,bool);
 	bool secondaryOutput(){return bAdditionalOutput;}
 	inline bool checkSwitchedRdPairs() { return b2ndRDBcPrimCk; }
 	inline bool checkRevRd() { return bRevRdCk; }
@@ -505,7 +513,8 @@ public:
 	void printHisto(ostream&, int which, int set = 1);//which: 1=qual_ //set:0 only filter, 1 all available
 	bool combineSamples(){ return bDoCombiSamples; }
 	
-	void SRessentials(int s) { if (SequencingRun.size() < s) { SequencingRun.resize(s, ""); } }
+	//handles setting up file paths, file order, file types.. (input only)
+	void FileEssentials(filesStr& files, OptContainer& cmdArgs);// 
 	//return a vector that says entry x (from invec) corresponds to group y
 	vector<int> combiSmplConvergeVec(const vector<string>&);
 //public version of BC finder..
@@ -749,14 +758,27 @@ bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r);
 
 class DNAuniqSet {
 public:
-	DNAuniqSet():bestDNU(nullptr), bestSet(false),totalCnts(0){}
+	DNAuniqSet():bestDNU(nullptr), bestSet(false), bestHasMerge(false),totalCnts(0),
+		cntsAdded2best(false) {}
 	~DNAuniqSet() {}
-	void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, 
-		int MrgPos1, int sample_id) {
+
+	void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaM, int MrgPos1, int sample_id) {
+		
 		dna->setDereplicated();//dna->setYellowQual(false);
 		shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
 		new_dna_unique->saveMem();
+		if (new_dna_unique == nullptr) { return; }
+		/*int bestL = dna->getMergeLength();
+		if (bestL == -1 && dna2 != nullptr) {
+			bestL = dna->mem_length() + dna2->mem_length();
+		}
+		if (bestL == -1) {
+			bestL = dna->mem_length();
+		}
+		new_dna_unique->setBestSeedLength(bestL);
+		*/
 		if (dna2 != nullptr) { new_dna_unique->attachPair(make_shared<DNAunique>(dna2, sample_id)); }
+		if (dnaM != nullptr) { new_dna_unique->attachMerge(make_shared<DNAunique>(dnaM, sample_id)); }
 		DNUs[MrgPos1] = new_dna_unique;
 	}
 	shared_ptr<DNAunique> &operator[] (int x) {
@@ -773,11 +795,12 @@ public:
 		return DNUs.begin();
 	}
 	size_t size() { return DNUs.size(); }
-	void setBest();
-	shared_ptr<DNAunique> best() {
+	void setBest(bool addCnts);
+	shared_ptr<DNAunique> best(bool addCnts) {
 		if (!bestSet) {
-			this->setBest();
+			this->setBest(addCnts);
 		}
+		
 		return bestDNU;
 	}
 
@@ -785,8 +808,9 @@ public:
 private:
 	map<int, shared_ptr<DNAunique>> DNUs;
 	shared_ptr<DNAunique> bestDNU;
-	bool bestSet;
+	bool bestSet; bool bestHasMerge;
 	int totalCnts;
+	int cntsAdded2best;
 };
 
 typedef robin_hood::unordered_node_map<string, DNAuniqSet> HashDNA;
@@ -900,12 +924,14 @@ private:
 	void readDerepInfo(const string);
 	int oneDerepLine(shared_ptr<DNAunique>);
 
+	inline bool getTMPmapperLine(string&);
+
 	//pair_: important to keep track whether to remove BC etc.: -1 to remove BC (454); 0 not to (MID miSeq)
 	int CurSetPair;
 	//store not matched DNA and keep track
 	//uint maxOldDNAvec;
 	map<int,shared_ptr<DNAunique>> oldDNA;
-	map<int,shared_ptr<DNA>> oldDNA2;
+	//map<int,shared_ptr<DNA>> oldDNA2;
 	DNAidmaps unusedID;
 	//std::list<string> oldestID;
 	uint DNAunusedPos;
@@ -916,8 +942,9 @@ private:
 
 	ClusterIdx seq2CI;
 	vector<shared_ptr<DNAunique>> bestDNA;
-	vector<shared_ptr<DNA>> bestDNA2;
+	//vector<shared_ptr<DNA>> bestDNA2;
 	vector<string> oriKey;
+	list<string> mapLines;
 	vector<float> bestPID;
 	vector<uint> bestLEN;
 	int clusCnt, uclines;
@@ -977,9 +1004,13 @@ public:
 	//Function specifically if several output files are required
 	void writeSelectiveStream(shared_ptr<DNA> d, int Pair, int FS);//1=pair1;2=pair2;3=singl1,4=singl2  ;; FS: different multi FileStreams to be used
 	
-																   //pretty final bool, aborts all, so careful with this
-	bool saveForWrite(shared_ptr<DNA> d, int Pair, int thr);//1=pair1;2=pair2;3=singleton
-	bool saveForWrite_merge(shared_ptr<DNA> d, shared_ptr<DNA> d2,
+	
+	void writeForWrite(shared_ptr<DNA> d1, int Pair1, int Cstream1,
+		shared_ptr<DNA> d2, int Pair2, int Cstream2);
+	//pretty final bool, aborts all, so careful with this
+	//collects stats on read, writes then. Keep read pairs together by using "writeForWrite"in second mutext step
+	bool saveForWrite(shared_ptr<DNA> d, int Pair,int thr,int& Cstr,bool=true);//Pair:1=pair1;2=pair2;3=singleton
+	bool saveForWrite_merge(shared_ptr<DNAunique> d,
 		string newHeader="",int curThread=0, bool elseWriteD1=false);
 //bool saveForWriteMT(shared_ptr<DNA> dna, int thread, int pair = 1);
 	Filters* getFilters(int w = -1) { 
@@ -1083,7 +1114,7 @@ private:
 	vector<ostream*> fqNoBCFile;*/
 	uint totalFileStrms;
 	vector<vector<ostr*>> sFile, qFile, fqFile;
-	//mutex sqfqostrMTX;
+	mutex sqfqostrMTX;
 	vector<ostr*> fqNoBCFile;
 	//mutex nobcostrmMTX;
 	vector<ostr*> of_merged_fq;//1D vec, since no read pairs
@@ -1183,5 +1214,9 @@ private:
 //bool read_fasta_entry(ifstream&fna,ifstream&qual_,shared_ptr<DNA> in,shared_ptr<DNA>,int&);
 //shared_ptr<DNA> read_fastq_entry(ifstream & fna,int fastQver, int &minQScore,
 //					  long& pos);
+
+
+
+
 
 #endif

@@ -54,7 +54,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //DEBUG mode: more output
 #define DE//BUG
 
-
 #include <string>
 #include <vector>
 #include <fstream>
@@ -105,7 +104,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif // _WIN32
 
 
-static const float sdm_version = 1.93f;
+static const float sdm_version = 2.03f;
 static const char* sdm_status = "beta";
 
 
@@ -127,14 +126,16 @@ static const char DNA_SPACE[15] = {'A','C','G','T','N','R','Y','M','K','W','S','
 static const int DNA_MAX_IN_MEM = 5000;
 static const unsigned int MAX_FILE_STREAMS = 500;
 static const int RDBUFFER = 4096;
+static size_t INPUT_BUFFER_SIZE = 50000;
+static size_t OUTPUT_BUFFER_SIZE = 70000;
 
 typedef unsigned int uint;
 typedef unsigned long ulong;
 typedef signed char qual_score; //used for quality scores in vectors
 
 //seeding
-static const float BestLengthRatio = 0.83f;
-static const float RefLengthRatio = 0.9f;
+static const float BestLengthRatio = 0.8f;
+static const float RefLengthRatio = 0.85f;
 static const qual_score MinQualDiff = 5;
 
 
