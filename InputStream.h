@@ -785,11 +785,11 @@ public:
 	int matchSeqRev(const string&, int, int, int=0);
 	int matchSeq_tot(const string&, int, int, int&);
 	void writeSeq(ostream&, bool singleLine = false);
-	string& writeSeq( bool singleLine = false);
+	const string writeSeq( bool singleLine = false);
 	void writeQual(ostream&, bool singleLine = false);
-	string& writeQual(bool singleLine = false);
+	const string writeQual(bool singleLine = false);
 	void writeFastQ(ostream&, bool = true);
-	string writeFastQ(bool = true);
+	const string writeFastQ(bool = true);
 	//void writeFastQ(ofbufstream&, bool = true);
 	void writeFastQEmpty(ostream&);
 	void setNewID(string x) { new_id_ = x; }

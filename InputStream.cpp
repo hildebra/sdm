@@ -1157,7 +1157,7 @@ string DNA::xtraHdStr(){
 void DNA::writeSeq(ostream& wr, bool singleLine) {
 	wr << writeSeq(singleLine);
 }
-string& DNA::writeSeq(bool singleLine ){
+const string DNA::writeSeq(bool singleLine ){
 	string str("");
 	if (sequence_.size() == 0){return str;}
 	str = ">" + new_id_ + "\n";
@@ -1180,7 +1180,7 @@ string& DNA::writeSeq(bool singleLine ){
 void DNA::writeQual(ostream& wr, bool singleLine) {
 	wr << writeQual(singleLine);
 }
-string& DNA::writeQual(bool singleLine ){
+const string DNA::writeQual(bool singleLine ){
 	int cnt=0;
 	string str("");
 	if (qual_.size() == 0){return str;}
@@ -1207,7 +1207,7 @@ string& DNA::writeQual(bool singleLine ){
 void DNA::writeFastQ(ostream& wr, bool newHD) {//, int fastQver){
 	wr << writeFastQ(newHD);
 }
-string DNA::writeFastQ(bool newHD) {
+const string DNA::writeFastQ(bool newHD) {
 	string ret("");
 	if (qual_.size() == 0 || sequence_.length() == 0 || length() == 0){return ret;}
 	string xtr = xtraHdStr();
