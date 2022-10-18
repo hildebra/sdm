@@ -1157,33 +1157,41 @@ string DNA::xtraHdStr(){
 void DNA::writeSeq(ostream& wr, bool singleLine) {
 	wr << writeSeq(singleLine);
 }
-const string DNA::writeSeq(bool singleLine ){
-	string str("");
-	if (sequence_.size() == 0){return str;}
+void DNA::writeSeq(string& str, bool singleLine ){
+	if (sequence_.size() == 0) { return ; }
 	str = ">" + new_id_ + "\n";
 	if (singleLine) {
 		str += sequence_.substr(0, length()) + "\n";
-		return str;
+		return ;
 	}
 	unsigned int SeqS = length();
-	unsigned int leftOver = SeqS%80;
+	unsigned int leftOver = SeqS % 80;
 	int last = 0;
-	for (unsigned int i=0;i<(SeqS-leftOver)/80;i++){
-		str+= sequence_.substr(last, 80) + "\n"; last+=80;
+	for (unsigned int i = 0; i < (SeqS - leftOver) / 80; i++) {
+		str += sequence_.substr(last, 80) + "\n"; last += 80;
 	}
-	if (leftOver>0){
+	if (leftOver > 0) {
 		str += sequence_.substr(last) + "\n";
 	}
+}
+string DNA::writeSeq(bool singleLine ){
+	string str = string("");
+	this->writeSeq(str, singleLine);
 	return str;
+	
 }
 /**/
 void DNA::writeQual(ostream& wr, bool singleLine) {
 	wr << writeQual(singleLine);
 }
-const string DNA::writeQual(bool singleLine ){
+string DNA::writeQual(bool singleLine) {
+	string str = string("");
+	this->writeQual(str, singleLine);
+	return str;
+}
+void DNA::writeQual(string& str, bool singleLine) {
 	int cnt=0;
-	string str("");
-	if (qual_.size() == 0){return str;}
+	if (qual_.size() == 0){return ;}
 	str += ">" + new_id_ + "\n";
 	//wr<< qual_traf_<<endl;
 	string endlChr("\n");
@@ -1200,16 +1208,19 @@ const string DNA::writeQual(bool singleLine ){
 	if (cnt>0){
 		str += "\n";
 	}
-	return str;
 }
 
 
 void DNA::writeFastQ(ostream& wr, bool newHD) {//, int fastQver){
 	wr << writeFastQ(newHD);
 }
-const string DNA::writeFastQ(bool newHD) {
-	string ret("");
-	if (qual_.size() == 0 || sequence_.length() == 0 || length() == 0){return ret;}
+string DNA::writeFastQ(bool newHD) {
+	string ret = string("");
+	this->writeFastQ(ret, newHD);
+	return ret;
+}
+void DNA::writeFastQ(string& ret, bool newHD) {
+	if (qual_.size() == 0 || sequence_.length() == 0 || length() == 0){return ;}
 	string xtr = xtraHdStr();
 	if (newHD) {
 		ret += "@" + new_id_ + "\n";
@@ -1220,8 +1231,6 @@ const string DNA::writeFastQ(bool newHD) {
 	ret += "+\n" ;//new_id_<<endl;
 	//char* qual_traf_ = new char[qual_.size()+1];
 	ret += qual_traf_ + "\n";
-	//delete [] qual_traf_;
-	return ret;
 }
 /*
 void DNA::writeFastQ(ofbufstream& wr, bool newHD) {//, int fastQver){
@@ -2937,6 +2946,152 @@ void InputStreamer::maxminQualWarns_fq(){
 		cerr << "     WARNING :: \nQuality scores in your dataset are unusually low (min Q=" << int(minQScore)<< "). Please check that you have a fastQ file in Illumina 1.0 or Illumina 1.3 < 1.8 version.\nIf not, set fastqVersion in option file to \"1\" (NCBI SRA, Sanger or Illumina 1.8+ version).\n\n";
 	} 
 }
+
+
+ofbufstream::ofbufstream(const string IF, int mif, bool isMC , size_t bufferS ) :
+	file(IF), modeIO(mif), used(0), usedW(0),
+	coutW(false), isGZ(false), doMC(isMC), primary(nullptr), bufS(bufferS) {
+	cdbg("Ini obufstream");
+
+	if (modeIO == ios::out) {
+		remove(file.c_str());
+	}
+	if (file == "T") {//write to ostream
+		coutW = true;
+		keeper = new char[0];
+		keeperW = new char[0];
+		return;
+	}
+	keeper = new char[bufS];
+	//second keeper swappable with keeper to always have one added to, one written out (kickoff system)
+	keeperW = new char[bufS];
+	if (isGZfile(IF)) { //write a gzip out??
+		isGZ = true;
+#ifndef _gzipread
+		cerr << "ofbufstream::gzip outpout not supported in your sdm build\n" << file << endl;
+		exit(51);
+#endif
+		// ostream* os = new zstr::ofstream("output.txt", std::ios::app);
+	}
+}
+ofbufstream::~ofbufstream() {
+	cdbg("destroy obufstream ");
+	finishWrites();
+	deactivate();
+	delete[] keeper;
+	delete[] keeperW;
+}
+void ofbufstream::finishWrites() {
+	append_mtx_.lock();
+	if (hasKickoff) { hasKickoff = false; writeKickoff.get(); }
+	if (used > 0) {
+		writeStream(false);
+	}
+	used = 0; usedW = 0;
+	append_mtx_.unlock();
+}
+void ofbufstream::emptyStream() {
+	finishWrites();
+	used = 0; usedW = 0;
+}
+void ofbufstream::activate() {
+	if (primary != nullptr) {
+		return;
+	}
+	if (isGZ) {
+#ifdef _gzipread
+		primary = new zstr::ofstream(file.c_str(), std::ios::app);
+#else
+		cerr << "ofbufstream::gzip outpout not supported in your sdm build\n" << file << endl;
+		exit(51);
+#endif
+	}
+	else {
+		primary = new ofstream(file.c_str(), ios::app);
+	}
+}
+void ofbufstream::deactivate() {
+	if (primary == nullptr) {
+		return;
+	}
+	//primary->close();
+	//output_mtx.lock();
+	delete primary;// ->close();
+	primary = nullptr;
+	//output_mtx.unlock();
+
+}
+
+bool ofbufstream::operator! (void) {
+	return false;
+}
+void ofbufstream::operator<< (const string& X) {
+	//cerr << "ostr";
+	size_t lX(X.length());
+	if (lX == 0) {
+		return;
+	}
+	if (coutW) {
+		cout << X;
+		return;
+	}
+	append_mtx_.lock();
+	size_t at = 0;
+	while (at < lX) {
+		if (used >= bufS) {
+			writeStream();
+		}
+		keeper[used] = X[at];
+		used++; at++;
+	}
+
+	append_mtx_.unlock();
+}
+
+void ofbufstream::writeStream(bool doKickoff ) {
+	//int counter = 0;
+	//out << omp_get_thread_num << ": " << (counter++) << endl;
+	if (used == 0) {
+		return;
+	}
+	//do this first to prevent keeper/keeperW getting corrupted
+	if (hasKickoff) { writeKickoff.get(); hasKickoff = false; }
+	bool closeThis = true;
+	if (primary == nullptr) {
+		this->activate();
+		closeThis = false;
+	}
+	//swap opeartion
+	output_mtx.lock();
+	char* keeperTmp = keeperW;
+	keeperW = keeper;
+	keeper = keeperTmp;
+	//rewrite keeperW with keeper, so append can continue..
+	//strcpy(keeperW, keeper);
+	output_mtx.unlock();
+	//keeper = new char[bufS];
+	//if (false) {
+	/*if ( pool ) {
+		// With multithreading
+		std::string keeper_copy = string(keeper, used);
+		std::string file_copy = file;
+		pool->enqueue([keeper_copy, file_copy] {
+			write(std::move(keeper_copy), file_copy);
+		});
+	/**/
+	//multithreading via kickoff
+	usedW = used;
+	if (doMC && doKickoff) {
+		writeKickoff = async(std::launch::async, &ofbufstream::internalWrite,
+			this, closeThis);
+		hasKickoff = true;
+	}
+	else {
+		// Without multithreading
+		internalWrite(closeThis);
+}
+	used = 0;
+	}
 
 
 #ifdef _gzipread2

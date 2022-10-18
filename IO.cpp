@@ -100,6 +100,7 @@ bool read_paired_STRready(vector< vector< string>> tmpLines,
 	bool MIDuse, shared_ptr<OutputStreamer> MD, int curThread, 
 	bool keepPairHd, qual_score FastqVer ) {
 	vector<shared_ptr<DNA>> ret(3,nullptr);
+	//cdbg("rpS");
 	ret[0] = str2DNA(tmpLines[0], keepPairHd, FastqVer,0);
 	ret[1] = str2DNA(tmpLines[1], keepPairHd, FastqVer,1);
 	if (MIDuse) {
@@ -126,6 +127,8 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	}
 	//MD->checkFastqHeadVersion(tdn[0]);
 	//testreadpair.lock();
+
+	cdbg("read_paired_DNAready");
 
 	Filters* curFil = MD->getFilters(curThread);
 	//register read at all with stat counter:
@@ -295,7 +298,6 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	if (MD->mergeReads() && read2notNull) {
 		MD->findSeedForMerge(tdn[0], tdn[1], curThread);
 	}
-
 
 
 	//demultiplex write? do this first before DNA is deleted..

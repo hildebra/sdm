@@ -133,7 +133,7 @@ public:
 			cerr << "Buffer size chosen too small: " << bufS << endl << "class ifbufstream\n";
 			exit(236);
 		}
-
+		cdbg("Ini ibufstream");
 		keeper = new char[bufS];
 		keeperW = new char[bufS];
 		for (int x = 0; x < bufS; x++) {
@@ -183,6 +183,7 @@ public:
 		input_mtx.unlock();
 	}
 	~ifbufstream() {
+		cdbg("destroy ibufstream ");
 		input_mtx.lock();
 		if (hasKickoff) { hasKickoff = false; readKickoff.get(); }
 		delete[] keeper;
@@ -397,123 +398,14 @@ public:
 		coutW(true), isGZ(false), doMC(false){
 		int x = 0;
 	}
-	ofbufstream(const string IF, int mif, bool isMC=false, size_t bufferS=20000) :
-		file(IF), modeIO(mif), used(0), usedW(0),
-		coutW(false), isGZ(false), doMC(isMC), primary(nullptr), bufS(bufferS){
-		
-		if (modeIO == ios::out) {
-			remove(file.c_str());
-		}
-		if (file == "T") {//write to ostream
-			coutW = true;
-			keeper = new char[0];
-			keeperW = new char[0];
-			return;
-		}
-		keeper = new char[bufS];
-		//second keeper swappable with keeper to always have one added to, one written out (kickoff system)
-		keeperW = new char[bufS];
-		if (isGZfile(IF)) { //write a gzip out??
-			isGZ = true; 
-#ifndef _gzipread
-			cerr << "ofbufstream::gzip outpout not supported in your sdm build\n" << file<<endl; 
-			exit(51);
-#endif
-			// ostream* os = new zstr::ofstream("output.txt", std::ios::app);
-		}
-	}
-
-	~ofbufstream() {
-		finishWrites();
-		deactivate();
-		delete[] keeper;
-		delete[] keeperW;
-	}
-	void finishWrites() {
-		append_mtx_.lock();
-		if (hasKickoff) { hasKickoff = false; writeKickoff.get(); }
-		if (used > 0) {
-			writeStream(false);
-		}
-		used = 0; usedW = 0;
-		append_mtx_.unlock();
-	}
-
-	bool operator! (void) {
-		return false;
-	}
-	void operator<< (const string& X) {    
-		append_mtx_.lock();
-		if (coutW) {
-			cout << X;
-			return;
-		}
-			
-        size_t lX(X.length());
-		size_t at = 0;
-        //writeStream();
-		//if (lX > bufS) {
-		while (at < lX) {
-			if (used >= bufS) {
-				writeStream();
-			}
-			keeper[used] = X[at];
-			//output_mtx.lock_shared();
-			used++; at++;
-		}
-		/*}
-		else {//faster??
-			if (lX + used > bufS) {
-				writeStream();
-			}
-			//output_mtx.lock_shared();
-			memcpy(keeper + used, X.c_str(), lX);
-			used += lX; 
-		}*/
-		//output_mtx.unlock_shared();
-		append_mtx_.unlock();
-    }
-	/* original code
-	if (lX + used > bufS) {
-		writeStream();
-	}
-	//output_mtx.lock_shared();
-	memcpy(keeper + used, X.c_str(), lX);
-	used += lX;*/
-
-    // Multithreading through Threadpool
-    //void setThreadPool(ThreadPool *pool) {this->pool = pool;}
-	void emptyStream() {
-		finishWrites();
-		used = 0; usedW = 0;
-	}
-	void activate() {
-		if (primary != nullptr) {
-			return;
-		}
-		if (isGZ) {
-#ifdef _gzipread
-			primary = new zstr::ofstream(file.c_str(), std::ios::app);
-#else
-			cerr << "ofbufstream::gzip outpout not supported in your sdm build\n" << file << endl;
-			exit(51);
-#endif
-		}
-		else {
-			primary = new ofstream(file.c_str(), ios::app);
-		}
-	}
-	void deactivate() {
-		if (primary == nullptr) {
-			return;
-		}
-		//primary->close();
-		//output_mtx.lock();
-		delete primary;// ->close();
-		primary = nullptr;
-		//output_mtx.unlock();
-
-	}
+	ofbufstream(const string IF, int mif, bool isMC = false, size_t bufferS = 20000);
+	~ofbufstream();
+	void finishWrites();
+	bool operator! (void);
+	void operator<< (const string& X);
+	void emptyStream();
+	void activate();
+	void deactivate();
     // end
 
 private:
@@ -529,49 +421,18 @@ private:
 		}
 		return true;
 	}
-	void writeStream(bool doKickoff=true) {
-        //int counter = 0;
-        //out << omp_get_thread_num << ": " << (counter++) << endl;
-        if (used == 0) {
-            return;
-        }
-		//do this first to prevent keeper/keeperW getting corrupted
-		if (hasKickoff) {  writeKickoff.get(); hasKickoff = false;}
-		bool closeThis = true;
-		if (primary == nullptr) {
-			this->activate();
-			closeThis = false;
+	void write(std::string s, std::string file) {
+		{
+			// Lock the input area
+			//std::lock_guard<std::mutex> guard(output_mtx);
+			ofstream of(file.c_str(), ios::app);
+			of.write(s.c_str(), s.size());
+			of.close();
 		}
-		//swap opeartion
-		output_mtx.lock();
-		char* keeperTmp = keeperW;
-		keeperW = keeper;
-		keeper = keeperTmp;
-		//rewrite keeperW with keeper, so append can continue..
-		//strcpy(keeperW, keeper);
-		output_mtx.unlock();
-		//keeper = new char[bufS];
-        //if (false) {
-        /*if ( pool ) {
-            // With multithreading
-            std::string keeper_copy = string(keeper, used);
-            std::string file_copy = file;
-            pool->enqueue([keeper_copy, file_copy] {
-                write(std::move(keeper_copy), file_copy);
-            });
-        /**/
-		//multithreading via kickoff
-		usedW = used;
-		if (doMC && doKickoff){
-			writeKickoff = async(std::launch::async, &ofbufstream::internalWrite, 
-				this, closeThis);
-			hasKickoff = true;
-		} else {
-            // Without multithreading
-			internalWrite(closeThis);
-        }
-		used = 0;
-    }
+	}
+	void writeStream(bool doKickoff = true);
+
+	//functions
 	string file;
 	char* keeper;
 	char* keeperW;
@@ -589,15 +450,6 @@ private:
 	future<bool> writeKickoff;
 	bool hasKickoff=false;
 
-    void write(std::string s, std::string file) {
-        {
-            // Lock the input area
-            //std::lock_guard<std::mutex> guard(output_mtx);
-            ofstream of(file.c_str(), ios::app);
-            of.write(s.c_str(), s.size());
-            of.close();
-        }
-    }
 };
 
 
@@ -785,11 +637,14 @@ public:
 	int matchSeqRev(const string&, int, int, int=0);
 	int matchSeq_tot(const string&, int, int, int&);
 	void writeSeq(ostream&, bool singleLine = false);
-	const string writeSeq( bool singleLine = false);
+	string writeSeq(bool singleLine = false);
+	void writeSeq(string& seq, bool singleLine = false);
 	void writeQual(ostream&, bool singleLine = false);
-	const string writeQual(bool singleLine = false);
+	string writeQual(bool singleLine = false);
+	void writeQual(string&, bool singleLine = false);
 	void writeFastQ(ostream&, bool = true);
-	const string writeFastQ(bool = true);
+	string writeFastQ(bool = true);
+	void writeFastQ(string&, bool = true);
 	//void writeFastQ(ofbufstream&, bool = true);
 	void writeFastQEmpty(ostream&);
 	void setNewID(string x) { new_id_ = x; }
@@ -1185,6 +1040,7 @@ public:
             fqSolexaFmt(false), 
             ErrorLog(0), DieOnError(true), at_thread(0), num_threads(1)
 	{
+		cdbg("Ini inputstreamer");
 		opos[0] = 1; if (fastQver == 0) { QverSet = false; }
 		if (ignore_IO_errors =="1") { DieOnError = false; }
 		if (pairedRD_HD_out == "0") { keepPairHD = false; }
