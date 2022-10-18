@@ -1,4 +1,3 @@
-# copyright: Michael Safyan
 # modified by Falk Hildebrand
 
 
@@ -26,10 +25,9 @@ LDLIBS += -lz
 .PHONY: all clean distclean
 
 all: $(program_NAME)
-
+#-static
 $(program_NAME): $(program_OBJS)
 	$(LINK.cc) $(program_OBJS) -o $(program_NAME) $(LDLIBS) -static
-
 clean:
 	@- $(RM) $(program_NAME)
 	@- $(RM) $(program_OBJS)

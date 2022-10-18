@@ -236,9 +236,9 @@ OutputStreamer::OutputStreamer(Filters* fil, OptContainer& cmdArgs,
 		BPwrittenInSR(0), BPwrittenInSRmerg(0),
 		ReadsWritten(fil->writtenReads()),
         maxRdsOut(-1), stopAll(false),
-        leadingOutf(""), locCmdArgs(cmdArgs), dereplicator(NULL), cntDerep(0), wrMode(ios::out),
+        leadingOutf(""), locCmdArgs(cmdArgs), dereplicator(nullptr), cntDerep(0), wrMode(ios::out),
         sFile(0), qFile(0), fqFile(0),
-		of_merged_fq(NULL),
+		of_merged_fq(0),
         //sFileStr(0), qFileStr(0), fqFileStr(0), fqNoBCFile(0), 
 		totalFileStrms(0),
         bDoDemultiplexIntoFiles(false), demultiSinglFiles(0), //demultiSinglFilesF(0),
@@ -692,18 +692,20 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 		//dmltMTX.lock();
 		BPwrittenInSR += d1->length();
 		//dmltMTX.unlock();
-		dn1= d1->writeFastQ(false);
+		d1->writeFastQ(dn1,false);
 	}
 	if (green2) {
 		//cout << "trouble" << endl;
 		d2->prepareWrite(fastQoutVer);
 		//dmltMTX.lock();
 		//dmltMTX.unlock();
-		dn2 = d2->writeFastQ(false);
+		d2->writeFastQ(dn2,false);
 	}
+	//cerr << dn2 << "WEW";
 	//move them closer together..
 	dmltMTX.lock();
 	*(demultiSinglFiles[idx][0]) << dn1;
+	//cdbg("write2Demulti4"+itos(idx) + "X "+itos(demultiSinglFiles[idx].size())+"Y"+ dn2);
 	*(demultiSinglFiles[idx][1]) << dn2;
 	dmltMTX.unlock();
 
@@ -1088,12 +1090,10 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair, int thr,int& Cstr
 				d->changeHeadPver(curFil->FQheadV());
 			}
 			//writen = true;
-			
+			Cstream = 0; //isGreenQual
 			if (d->isYellowQual()) {
 				Cstream = 1;
-			} else {
-				Cstream = 0;
-			}
+			} 
 		}
 		else {
 			Cstream = 100;
@@ -1101,11 +1101,12 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair, int thr,int& Cstr
 		}
 	} else {
 		d->prepareWrite(fastQoutVer);
+		Cstream = 0;
 	}
 	
 	//sqfqostrMTX.lock();
 	if (write) {
-		writeForWrite(d, Cstream, Pair, nullptr,-1,-1);
+		writeForWrite(d, Pair, Cstream, nullptr,-1,-1);
 	}
 	return !stopAll;
 
@@ -1386,8 +1387,9 @@ void OutputStreamer::writeNonBCReads(shared_ptr<DNA> d, shared_ptr<DNA> d2) {
 				cerr << "Barcode only set in 1 reads.. something wrong!\n";
 			}
 			//nobcostrmMTX.lock();
-			string d1s = d->writeFastQ();
-			string d2s = d2->writeFastQ();
+			string d1s,d2s;
+			d->writeFastQ(d1s);
+			d2->writeFastQ(d2s);
 			dmltMTX.lock();
 			*(fqNoBCFile[0]) << d1s;
 			*(fqNoBCFile[1]) << d2s;
@@ -7145,7 +7147,7 @@ void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, Filters* fil,
 				}
 			}
 
-			int Cstream(0);
+			int Cstream(100);
 			if (d2 != nullptr) {
 			    //sorted by pair1,2, quality yellow green, singleton (pair 1 2 3 4) etc
 				d2->setPassed(true);
