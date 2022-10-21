@@ -390,7 +390,7 @@ public:
 	UClinks * ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDSset,
 		shared_ptr<Dereplicate>& Dere);// , ReadMerger* merg);
 
-	Filters* filterPerBCgroup(const vector<int>);
+	Filters* newFilterPerBCgroup(const vector<int>);
 
 	//pair_:-1: no Pair-sequence_, 0,1=pair_ 1/2 (assumes MID BC)
 	//doSeeding: extract longes Seed //false, -1, -2
@@ -561,7 +561,7 @@ public:
 
 	// mostly collect statistics of filter (green filtered)
 	vector<shared_ptr<collectstats>> collectStatistics; // top quality statistics
-	vector<mutex*> csMTX;
+	mutex csMTX1, csMTX2;
     // stats for additional reads to be output (yellow)
 	vector<shared_ptr<collectstats>> statAddition; // mid quality statistics
 

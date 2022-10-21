@@ -221,20 +221,20 @@ OutputStreamer::OutputStreamer(Filters* fil, OptContainer& cmdArgs,
         std::ios_base::openmode writeStatus, 
 		shared_ptr<ReadSubset> RDSset,
 		int numThreads, string fileExt, int forceFmt) :
-        MFil(fil), subFilter(0), //DNAsP1(0), DNAsP2(0), DNAsS1(0), DNAsS2(0),
+        MFil(nullptr), subFilter(0), //DNAsP1(0), DNAsP2(0), DNAsS1(0), DNAsS2(0),
         //DNAsNoHead(0), DNAsP1_alt(0), DNAsP2_alt(0), DNAsS1_alt(0), DNAsS2_alt(0),
         suppressOutWrite(0), write2File(true),// mem_used(false),
         DNAinMem(0), writeThreadStatus(0),
-        fastQver(fil->getuserReqFastqVer()),
-        fastQoutVer(fil->getuserReqFastqOutVer()), BWriteQual(false),
+        fastQver(33),
+        fastQoutVer(33), BWriteQual(false),
         BWriteFastQ(false), b_multiOutStream(false), pairedSeq(-1),
 		b_changeFQheadVer(false),
 		b_checkedHeaderChange(false),
         b_oneLinerFasta(false), b_doDereplicate(false), b_writeGreenQual(true), b_writeYellowQual(true),
-        maxReadsPerOFile(fil->maxReadsOutput()), 
-		demultiBPperSR(fil->getDemultiBPperSR()), 
+        maxReadsPerOFile(0), 
+		demultiBPperSR(0), 
 		BPwrittenInSR(0), BPwrittenInSRmerg(0),
-		ReadsWritten(fil->writtenReads()),
+		ReadsWritten(0),
         maxRdsOut(-1), stopAll(false),
         leadingOutf(""), locCmdArgs(cmdArgs), dereplicator(nullptr), cntDerep(0), wrMode(ios::out),
         sFile(0), qFile(0), fqFile(0),
@@ -254,7 +254,15 @@ OutputStreamer::OutputStreamer(Filters* fil, OptContainer& cmdArgs,
 	qFileSPos(0), sFileSPos(0), fqFileSPos(0),//singleton
 	qFileS2Pos(0), sFileS2Pos(0), fqFileS2Pos(0)//singleton*/
 {
+	MFil = fil;
 	
+	fastQver = fil->getuserReqFastqVer();
+	fastQoutVer = fil->getuserReqFastqOutVer();
+
+	maxReadsPerOFile = fil->maxReadsOutput();
+	demultiBPperSR = fil->getDemultiBPperSR();
+	ReadsWritten = fil->writtenReads();
+
  	pairedSeq = MFil->isPaired();
 	if (cmdArgs.find("-suppressOutput") != cmdArgs.end()) {
 		suppressOutWrite = atoi( cmdArgs["-suppressOutput"].c_str() );
@@ -1559,7 +1567,9 @@ void OutputStreamer::closeOutStreams(bool wr){
         this->mergeSubFilters();
     }
 	*/
-	MFil->setWrittenReads(ReadsWritten);
+	if (MFil != nullptr) {
+		MFil->setWrittenReads(ReadsWritten);
+	}
 #ifdef DEBUG
 	cerr << ".. closed\n";
 #endif
@@ -2501,7 +2511,7 @@ Filters::Filters(OptContainer& cmdArgs1) :
         Barcode(0), revBarcode(0), Barcode2(0), revBarcode2(0),
         HeadSmplID(0),
         hetPrimer(2,vector<string>(0)),
-        collectStatistics(2), csMTX(2,NULL) , statAddition(2),
+        collectStatistics(2), statAddition(2),
         FastaF(0), QualF(0), FastqF(0), MIDfqF(0),
         derepMinNum(0),
 	SequencingRun(0),
@@ -2545,7 +2555,6 @@ Filters::Filters(OptContainer& cmdArgs1) :
         barcodeLengths1_(0), barcodeLengths2_(0),
         cmdArgs(cmdArgs1)
 		{
-	csMTX[0] = new mutex();	csMTX[1] = new mutex();
 	//csMTX[0].unlock(); 
 	//csMTX[1].unlock();
 
@@ -2851,7 +2860,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
         PrimerIdx(of->PrimerIdx),
         Barcode(0), revBarcode(0), Barcode2(0), revBarcode2(0),
 	    HeadSmplID(0), hetPrimer(2, vector<string>(0)),
-		collectStatistics(2,nullptr), csMTX(2, NULL), statAddition(2,nullptr),
+		collectStatistics(2,nullptr),  statAddition(2,nullptr),
         FastaF(of->FastaF), QualF(of->QualF), FastqF(of->FastqF),
         MIDfqF(of->MIDfqF), derepMinNum(of->derepMinNum),
         lMD(nullptr), 
@@ -2906,7 +2915,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	OFileIncre = of->getFileIncrementor();
     BCdFWDREV[0].fix(); BCdFWDREV[1].fix();
 	//collectStatistics.resize(2); statAddition.resize(2);
-	csMTX[0] = new mutex(); csMTX[1] = new mutex();
+	//csMTX[0] = new mutex(); csMTX[1] = new mutex();
 
 	collectStatistics[0] = make_shared<collectstats>(); 
 	collectStatistics[1] = make_shared<collectstats>();
@@ -3031,9 +3040,9 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads) :
 
 Filters::~Filters() {
 	cdbg("Deleting filter .. ");
-	for (size_t i = 0; i < csMTX.size(); i++){
-		delete csMTX[i];
-	}
+//	for (size_t i = 0; i < csMTX.size(); i++){
+//		delete csMTX[i];
+//	}
 
 //	for (size_t i = 0; i < 2; i++) { delete PostFilt[i]; delete RepStatAddition[i]; }
 //	delete PreFiltP1; delete PreFiltP2;
@@ -3041,13 +3050,17 @@ Filters::~Filters() {
 }
 
 
-Filters* Filters::filterPerBCgroup(const vector<int> idxi) {
-	cdbg("filterPerBCgroup::start : "+ itos(idxi[0])+"\n");
+Filters* Filters::newFilterPerBCgroup(const vector<int> idxi) {
+	
+	if (idxi.size() < 1) {
+		return nullptr;
+	}
+	cdbg("newFilterPerBCgroup::start : "+ itos(idxi[0])+"\n");
 
 	// get filter from main filter object passing an index for mapping?!
 //	shared_ptr<Filters> filter = make_shared<Filters>(shared_from_this(), idxi[0]);
 	Filters* filter = new Filters(this, idxi[0]);
-	cdbg("filterPerBCgroup::star2t\n");
+	cdbg("newFilterPerBCgroup::star2t\n");
 
 	// number of mapping file lines associated with that unique fastx
 	unsigned int tarSize = (unsigned int)idxi.size();
@@ -3055,7 +3068,7 @@ Filters* Filters::filterPerBCgroup(const vector<int> idxi) {
 
 	int tarID = -1;
 	bool isDoubleBarcoded = this->doubleBarcodes();
-	cdbg("filterPerBCgroup::Go over BCs\n");
+	cdbg("newFilterPerBCgroup::Go over BCs\n");
 
 	// iterate over every occurence of unique fa
 	for (unsigned int j = 0; j < tarSize; j++) { //fill in filter
@@ -3075,7 +3088,7 @@ Filters* Filters::filterPerBCgroup(const vector<int> idxi) {
 		filter->SampleID_Combi[j] = this->SampleID_Combi[tarID];
 		filter->HeadSmplID[j] = this->HeadSmplID[tarID];
 	}
-	cdbg("filterPerBCgroup::check 4 doubles\n");
+	cdbg("newFilterPerBCgroup::check 4 doubles\n");
 	//sanity check no double barcodes..
 	filter->checkDoubleBarcode();
 	filter->singReadBC2();

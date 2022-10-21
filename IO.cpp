@@ -302,6 +302,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 	//demultiplex write? do this first before DNA is deleted..
 	//at this point the tagIDX *MUST* be correctly set + BCoffset (in the DNA object, tagIDX doesn;t matter)
+	cdbg("w2D ");
 	MD->write2Demulti(tdn[0], tdn[1], curFil->getBCoffset(), curThread);
 	MD->dereplicateDNA(tdn[0], tdn[1]);
 	MD->writeNonBCReads(tdn[0], tdn[1]);
@@ -315,6 +316,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	
 	//writing of pairs needs to be mutex locked 
 	int Cstr1(100), Cstr2(100);
+	cdbg("sFW\n");
 	bool owr1 = MD->saveForWrite(tdn[0], idx1, curThread, Cstr1,false);
 	bool owr2 = MD->saveForWrite(tdn[1], idx2, curThread, Cstr2,false);
 	MD->writeForWrite(tdn[0],idx1,Cstr1,tdn[1],idx2,Cstr2);//mutex version to ensure read pairs together..
@@ -824,8 +826,8 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 
 		//create subset of BCs for the currently processed fastq's (only relevant BCs)
 		cdbg("new filter in round " + itos(i) + "\n");
-//		Filters* filter = mainFilter->filterPerBCgroup(files.idx[i]);
-		Filters* filter = mainFilter->filterPerBCgroup(files.idx[i]);
+//		Filters* filter = mainFilter->newFilterPerBCgroup(files.idx[i]);
+		Filters* filter = mainFilter->newFilterPerBCgroup(files.idx[i]);
 		cdbg("Setting up threads\n");
 		filter->setThreads(threads);
 		int tarID = files.idx[i][0];//just points to one file in uFX group..
@@ -898,6 +900,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 
 		if (mainFilter->doOptimalClusterSeq()) {
 			ucl->findSeq2UCinstruction(IS, files.isFastq, mainFilter);
+			delete filter;
 			continue;// after this is only qual_ filter, not required from this point on
 		}
 		cdbg("Setting up output\n");
@@ -935,6 +938,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 				RDSset->findMatches(IS, OutStreamer, false);
 			}
 			//delete OutStreamer;
+			delete filter;
 			continue;
 		}
 
@@ -990,13 +994,14 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		}
 
         mainFilter->addStats(filter, files.idx[i]);
-		delete filter;
         // Print out merged read count (move to stort stats)
 		if (OutStreamer->total_read_preMerge_) {
-			std::cerr << "merged reads: " << OutStreamer->merged_counter_ << "/" << OutStreamer->total_read_preMerge_ << " (" << (double)OutStreamer->merged_counter_ / OutStreamer->total_read_preMerge_ << ")" << std::endl;
+			std::cerr << "merged reads: " << OutStreamer->merged_counter_ << "/" 
+				<< OutStreamer->total_read_preMerge_ << " (" << (double)OutStreamer->merged_counter_ / OutStreamer->total_read_preMerge_ 
+				<< ")" << std::endl;
 		}
-
-
+		OutStreamer.reset();
+		delete filter;
     }//uFX
 	cdbg("End of UFx loop");
 

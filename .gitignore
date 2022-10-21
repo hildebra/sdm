@@ -14,6 +14,7 @@ sdm
 Makefile_d
 MakefileD
 MakefileF
+DEBUG/
 
 # Build results
 [Dd]ebug/

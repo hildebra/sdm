@@ -315,13 +315,13 @@ string detectSeqFmt(const string inF) {
 				exit(888);
 			}
 		}
+		delete fnax;
 		if (ret == "") {
 			cerr << "Empty input file detected:\n" << fileS << endl;
 		} else {
 			return ret;
 		}
 
-		delete fnax;
 	}
 
 	return "empty";
