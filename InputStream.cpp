@@ -2316,7 +2316,7 @@ vector<shared_ptr<DNA>> InputStreamer::getDNApairs() {
 }
 
 
-shared_ptr<DNA> str2DNA(vector<string> in, bool keepPairHD,int fastQver, int readpos) {
+shared_ptr<DNA> str2DNA(vector<string>& in, bool keepPairHD,int fastQver, int readpos) {
 	shared_ptr<DNA> ret(nullptr);
 	bool isFasta(false);
 	if (in.size()==3 || in[0][0] == '>'  ) {//fasta
@@ -2344,7 +2344,7 @@ shared_ptr<DNA> str2DNA(vector<string> in, bool keepPairHD,int fastQver, int rea
 	return ret;
 }
 
-vector<shared_ptr<DNA>> InputStreamer::getDNAMC() {
+/*vector<shared_ptr<DNA>> InputStreamer::getDNAMC() {
 	
 	vector<shared_ptr<DNA>> ret(3,nullptr);
 	//there can only be 1 stream with this..
@@ -2440,13 +2440,25 @@ vector<shared_ptr<DNA>> InputStreamer::getDNAMC() {
 			}
 			
 			
-		}/**/
+		}
 	return ret;
-	/**/
+	
 }
+*/
 
+void InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse) {
+	vector<string>tmpLines2(4, "");
+	vector<vector<string>> tmpLines(3, tmpLines2);
+	tmpO->tmp.resize(blocks, tmpLines);
 
-
+	for (size_t k = 0; k < blocks; k++) {
+		this->getDNAlines(tmpO->tmp[k][0], 0);
+		this->getDNAlines(tmpO->tmp[k][1], 1);
+		if (MIDuse) {
+			this->getDNAlines(tmpO->tmp[k][2], 2);
+		}
+	}
+}
 void InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 	
 	//vector<string> ret(4,"");

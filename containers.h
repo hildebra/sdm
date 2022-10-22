@@ -35,6 +35,7 @@ class Dereplicate;
 //definitions
 
 
+
 // REPLACE THIS WITH STATISTICS OBJECT
 struct data_MT {
 public:
@@ -366,7 +367,7 @@ public:
 	~ReadSubset(){}
 	bool multiFile() {		if (outFiles.size() > 1) { return true; } return false;	}
 	vector<string> getOFiles() { return outFiles; }
-	void findMatches(shared_ptr<InputStreamer>, shared_ptr<OutputStreamer>,bool mocatFix);
+	void findMatches(shared_ptr<InputStreamer>, OutputStreamer*,bool mocatFix);
 	void setRemainingFilepipe(int j) { RemainderStrPos = j; }
 private:
 	//-1 deactivates
@@ -449,7 +450,7 @@ public:
 	void BCintoHead(int idx, shared_ptr<DNA> d, const string, const int, bool, bool = false);
 	void setBCdna(int idx, shared_ptr<DNA> d){ d->setBCnumber(idx, BCoffset); }
 	void SampleIntoHead(const int idx, shared_ptr<DNA> d, const size_t pos);
-	void setMultiDNA(shared_ptr<OutputStreamer> m) { lMD = m; }
+	void setMultiDNA(OutputStreamer* m) { lMD = m; }
 	//stats... probably mutexed functions
 	bool doReversePrimers() { return bPrimerR; }
 	//routine checks, and reverses/swaps DNA objects
@@ -649,7 +650,7 @@ protected:
 
 	vector<string> FastaF, QualF, FastqF, MIDfqF;
 	vector<int> derepMinNum;
-	shared_ptr<OutputStreamer> lMD;
+	OutputStreamer* lMD;
 	
 	//technical adapter removal
 	string tAdapter;
@@ -887,7 +888,7 @@ public:
 	UClinks(OptContainer& );
 	~UClinks();
 	void findSeq2UCinstruction(shared_ptr<InputStreamer>,bool, Filters* fil);
-	void writeNewSeeds(shared_ptr<OutputStreamer>, Filters* fil, bool, bool=false);
+	void writeNewSeeds(OutputStreamer*, Filters* fil, bool, bool=false);
 	void printStats(ostream&);
 	void finishUCfile(Filters* fil, string, bool);
 	void finishMAPfile();

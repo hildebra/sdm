@@ -28,12 +28,14 @@ typedef std::map<std::string, shared_ptr<DNA>> DNAmap;
 //void openOutFiles(string files, string fmt,string );
 //void prepareOutFiles(OptContainer& cmdArgs);
 //void read_fastq(OptContainer& cmdArgs, OutputStreamer* MD,string fileS);
-bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, 
+bool read_paired(OptContainer& cmdArgs, OutputStreamer* MD, 
 	shared_ptr<InputStreamer>,bool , int Nthreads);
 bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn, bool MIDuse,
-	shared_ptr<OutputStreamer> MD, int curThread);
+	OutputStreamer* MD, int curThread);
 bool read_paired_STRready(vector<vector< string >> tdn, bool MIDuse,
-	shared_ptr<OutputStreamer> MD, int curThread, bool keepPairHd, qual_score FastqVer);
+	OutputStreamer* MD, int curThread, bool keepPairHd, qual_score FastqVer);
+bool multi_read_paired_STRready(multi_tmp_lines* tdn, bool MIDuse,
+	OutputStreamer* MD, int curThread, bool keepPairHd, qual_score FastqVer);
 //shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2,shared_ptr<DNA> MIDseq,
 
 //bool read_tripple(OptContainer& cmdArgs, OutputStreamer* MD, InputStreamer*);

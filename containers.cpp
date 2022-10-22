@@ -161,7 +161,7 @@ RemainderStrPos(-1), newHD(0), outFiles(0), outFilesIdx(0) {
 
 }
 
-void ReadSubset::findMatches(shared_ptr<InputStreamer> IS, shared_ptr<OutputStreamer> MD, bool mocatFix) {
+void ReadSubset::findMatches(shared_ptr<InputStreamer> IS, OutputStreamer* MD, bool mocatFix) {
 	vector<shared_ptr<DNA>> match; //shared_ptr<DNA> match2(NULL);
 	bool cont(true), cont2(true);
 	int idx(0);
@@ -170,7 +170,7 @@ void ReadSubset::findMatches(shared_ptr<InputStreamer> IS, shared_ptr<OutputStre
 	bool b_doHD = newHD.size() > 0;
 	//bool sync(false);//meaningless placeholder
 	while (cont) {
-		match = IS->getDNAMC();
+		match = IS->getDNApairs();
 		if (match[0] == NULL) { cont = false; break; }
 		//if (pairs > 1) {			match2 = IS->getDNA(cont2, 1);		}
 		string curID = match[0]->getPositionFreeId();
@@ -3053,8 +3053,7 @@ Filters::~Filters() {
 Filters* Filters::newFilterPerBCgroup(const vector<int> idxi) {
 	
 	if (idxi.size() < 1) {
-		return nullptr;
-	}
+		return nullptr;}
 	cdbg("newFilterPerBCgroup::start : "+ itos(idxi[0])+"\n");
 
 	// get filter from main filter object passing an index for mapping?!
@@ -7106,7 +7105,7 @@ void UClinks::removeCentrStr(string& w) {
 	}
 }
 
-void UClinks::writeNewSeeds(shared_ptr<OutputStreamer> MD, Filters* fil, 
+void UClinks::writeNewSeeds(OutputStreamer* MD, Filters* fil, 
 			bool refSeeds, bool printLnk) {
 	if (!RefDBmode && refSeeds){ return; }
 	//ofstream O(outf.c_str());

@@ -121,6 +121,14 @@ struct filesStr {//used in separateByFile
 };
 
 
+
+struct multi_tmp_lines {
+	multi_tmp_lines() :tmp(0) {}
+	size_t size() { return tmp.size(); }
+	vector< vector< vector< string>>> tmp;
+	bool lastInFile = false;
+};
+
 //static mutex input_mtx;
 
 class ifbufstream {//: private std::streambuf, public std::ostream {
@@ -1014,7 +1022,7 @@ struct jobC {
 	bool inUse = false;
 };
 
-shared_ptr<DNA> str2DNA(vector<string> in, bool keepPairHD, int fastQver, int readpos);
+shared_ptr<DNA> str2DNA(vector<string>& in, bool keepPairHD, int fastQver, int readpos);
 
 class InputStreamer{
 public:
@@ -1052,9 +1060,10 @@ public:
 //most used routine to get a new DNA entry		// stillMore = is fastq file empty? pos = read pair to return [0/1/-1]
 	shared_ptr<DNA> getDNA(int pos);
 	void getDNAlines(vector<string>&,int pos);
+	void getDNAlines(multi_tmp_lines*, int blocks, bool);
 	vector<shared_ptr<DNA>> getDNApairs();
 	//mutli core version
-	vector < shared_ptr<DNA>> getDNAMC();
+	//vector < shared_ptr<DNA>> getDNAMC();
 
 	//path, fasta, qual_, pairNum
 	string setupInput(string path, int tarID, const string& uniqueFastxFile, 

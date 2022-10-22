@@ -96,22 +96,47 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 }
 */
 //converts str to DNA
+bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
+	bool MIDuse, OutputStreamer* MD, int curThread,
+	bool keepPairHd, qual_score FastqVer) {
+	
+	//for loop over tmplines, each entry is a read pair
+	bool isOK(true);
+
+	for (size_t k = 0; k < tmpLines->size(); k++) {
+
+		vector<shared_ptr<DNA>> ret(3, nullptr);
+		//cdbg("rpS");
+		ret[0] = str2DNA(tmpLines->tmp[k][0], keepPairHd, FastqVer, 0);
+		ret[1] = str2DNA(tmpLines->tmp[k][1], keepPairHd, FastqVer, 1);
+		if (MIDuse) {
+			ret[2] = str2DNA(tmpLines->tmp[k][2], keepPairHd, FastqVer, 2);
+		}
+
+		isOK = read_paired_DNAready(ret, MIDuse, MD, curThread);
+		if (!isOK) {
+			break;
+		}
+	}
+	delete tmpLines;
+	return isOK;
+}
 bool read_paired_STRready(vector< vector< string>> tmpLines,
-	bool MIDuse, shared_ptr<OutputStreamer> MD, int curThread, 
-	bool keepPairHd, qual_score FastqVer ) {
-	vector<shared_ptr<DNA>> ret(3,nullptr);
+	bool MIDuse, OutputStreamer* MD, int curThread,
+	bool keepPairHd, qual_score FastqVer) {
+	vector<shared_ptr<DNA>> ret(3, nullptr);
 	//cdbg("rpS");
-	ret[0] = str2DNA(tmpLines[0], keepPairHd, FastqVer,0);
-	ret[1] = str2DNA(tmpLines[1], keepPairHd, FastqVer,1);
+	ret[0] = str2DNA(tmpLines[0], keepPairHd, FastqVer, 0);
+	ret[1] = str2DNA(tmpLines[1], keepPairHd, FastqVer, 1);
 	if (MIDuse) {
-		ret[2] = str2DNA(tmpLines[2], keepPairHd, FastqVer,2);
+		ret[2] = str2DNA(tmpLines[2], keepPairHd, FastqVer, 2);
 	}
 
 	return read_paired_DNAready(ret, MIDuse, MD, curThread);
 }
 //is called from a while loop, that reads the DNA pairs
 bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
-	bool MIDuse, shared_ptr<OutputStreamer> MD, int curThread) {
+	bool MIDuse, OutputStreamer* MD, int curThread) {
 
 	if (tdn[0] == nullptr) {
 	    return false;
@@ -332,7 +357,7 @@ struct job2 {
 	future<bool> job;
 };
 
-bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, 
+bool read_paired(OptContainer& cmdArgs, OutputStreamer* MD, 
 	shared_ptr<InputStreamer> IS, bool MIDuse, int Nthreads) {
 	
 	DNAmap oldMIDs;
@@ -366,32 +391,24 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 	vector<vector<string>> tmpLines(3, tmpLines2);
 	vector<shared_ptr<DNA>> tdn(3,nullptr);
 
+	int tmpBlockSize = 1000;
+
 	while ( cont ) {
 		//bool sync = false;
 		//tests of different ways to read files..
+		multi_tmp_lines* tmpO = new multi_tmp_lines(); // will be deleted inside multi_read_paired_STRready function
 		if (false) {
-			tdn = IS->getDNAMC();//
-		}
-		else if (true) {
-			for (uint i = 0; i < 3; i++) {
-				if (!MIDuse && i == 2) {
-					continue;
-				}
-				IS->getDNAlines(tmpLines[i], i);
-			}
-		} else {
-			//tdn.resize(3, nullptr);
-			tdn[0] = IS->getDNA(0);
-			tdn[1] = IS->getDNA( 1);
+			IS->getDNAlines(tmpLines[0], 0);
+			IS->getDNAlines(tmpLines[1], 1);
 			if (MIDuse) {
-				tdn[2] = IS->getDNA(2);
-				if (tdn[2] != nullptr) {
-					tdn[2]->setMIDseq(true);
-				}
+				IS->getDNAlines(tmpLines[2], 2);
 			}
 		}
-		qual_score fastqVer = IS->fastQscore();
+		else {
+			IS->getDNAlines(tmpO, tmpBlockSize, MIDuse);
+		}
 
+		qual_score fastqVer = IS->fastQscore();
 		if (fqHeadVer) { //some things just need to be done
 			if (tdn[0] == nullptr) {
 				tdn[0] = str2DNA(tmpLines[0], keepPairedHD, fastqVer, 0);
@@ -407,14 +424,17 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 			bool notSubm(true);
 			while (notSubm) {//go over possible submission slots
 				if (thrCnt >= Nthreads) {thrCnt = 0;}
-				if (slots[thrCnt].inUse == true && 
-					slots[thrCnt].job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-					slots[thrCnt].inUse = false;
+				if (slots[thrCnt].inUse == true
+					&& slots[thrCnt].job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
 					cont = slots[thrCnt].job.get();
+					slots[thrCnt].inUse = false;
 				}
 				if (slots[thrCnt].inUse == false) {
-						slots[thrCnt].job = async(std::launch::async, read_paired_STRready,
-						tmpLines, MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
+
+					//slots[thrCnt].job = async(std::launch::async, read_paired_STRready,
+					//	tmpLines, MIDuse, MD, thrCnt, keepPairedHD, fastqVer); 
+					slots[thrCnt].job = async(std::launch::async, multi_read_paired_STRready,
+						tmpO, MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
 					slots[thrCnt].inUse = true;
 					notSubm = false;
 				}
@@ -422,25 +442,25 @@ bool read_paired(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD,
 			}
 			if (!cont) { break; }
 		} else {
-			if (0) {
+			/*if (false) {
 				if (tdn[0] == nullptr) { cont = false;  break; }
 				//if (fqHeadVer) { MD->checkFastqHeadVersion(tdn[0]); fqHeadVer = false; }
 				cont = read_paired_DNAready(tdn, MIDuse, MD, 0);
 				//if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
 			}
-			else {
-				cont = read_paired_STRready(tmpLines, MIDuse, MD, 0, 
-					keepPairedHD, fastqVer);
+			else {*/
+				//cont = read_paired_STRready(tmpLines, MIDuse, MD, 0, keepPairedHD, fastqVer);
+				cont = multi_read_paired_STRready(tmpO, MIDuse, MD, 0, keepPairedHD, fastqVer);
 				//if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
-			}
+			//}
 		}
 	}
 
 	//get all slots
 	for (int x = 0; x < slots.size(); x++){
-		if (slots[x].inUse == true && slots[x].job.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
-			slots[x].inUse = false;
+		if (slots[x].inUse == true){//&& slots[x].job.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
 			cont = slots[x].job.get();
+			slots[x].inUse = false;
 		}
 	}
 
@@ -910,7 +930,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		//OutputStreamer OutStreamer = OutputStreamer(&filter, cmdArgs, writeStatus, RDSset);
 
 		//OutputStreamer also contains subfilters for MC processing and logging of reads
-		shared_ptr<OutputStreamer> OutStreamer = make_shared<OutputStreamer>(filter, cmdArgs, 
+		OutputStreamer* OutStreamer = new OutputStreamer(filter, cmdArgs, 
 			writeStatus, RDSset, threads,"");
 		OutStreamer->attachDereplicator(dereplicator);
 		OutStreamer->attachReadMerger(merger);
@@ -1000,7 +1020,8 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 				<< OutStreamer->total_read_preMerge_ << " (" << (double)OutStreamer->merged_counter_ / OutStreamer->total_read_preMerge_ 
 				<< ")" << std::endl;
 		}
-		OutStreamer.reset();
+		//OutStreamer.reset();
+		delete OutStreamer;
 		delete filter;
     }//uFX
 	cdbg("End of UFx loop");
@@ -1056,7 +1077,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
             ucl->writeOTUmatrix(cmdArgs["-otu_matrix"]);
         }
         //polished OTU seeds need to be written after OTU matrix (renaming scheme)
-        shared_ptr<OutputStreamer> MDx = make_shared<OutputStreamer>(mainFilter, cmdArgs, 
+        OutputStreamer* MDx = new OutputStreamer(mainFilter, cmdArgs, 
 			ios::out, RDSset,0);
 		vector<ReadMerger*> DerepM = vector<ReadMerger*>(1,NULL);
 		DerepM[0] = new ReadMerger(false);
@@ -1072,7 +1093,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
         mainFilter->setMultiDNA(MDx );
         ucl->writeNewSeeds(MDx, mainFilter, true, true);
 		*/
-        //delete MDx;
+        delete MDx;
 		delete DerepM[0];
         return;
     } else if (mainFilter->doDereplicate()) {
