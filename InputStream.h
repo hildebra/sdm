@@ -529,8 +529,8 @@ public:
 	//starts with fastx record
 	DNA(FastxRecord*, qual_score & minQScore, qual_score & maxQScore, qual_score fastQver);
 	//works directly with 4 lines in fastq format
-	DNA(vector<string> fq, qual_score fastQver);
-	DNA(vector<string> fq);
+	DNA(vector<string> fq, qual_score fastQver);//fastq input
+	DNA(vector<string> fas);//this is for fasta only..
 
 	~DNA() {
 	    //cout << "destruct" << endl;
@@ -574,8 +574,8 @@ public:
 	    return sequence_.substr(0, sequence_length_);
 	}
 
-	void setQual(vector<qual_score>& Q) { qual_ = Q; avg_qual_ = -1.f; }
-    void setQual(vector<qual_score>&& Q) { qual_ = Q; avg_qual_ = -1.f; }
+	void setQual(vector<qual_score> Q) { qual_ = move(Q); avg_qual_ = -1.f; }
+    //void setQual(vector<qual_score>&& Q) { qual_ = Q; avg_qual_ = -1.f; }
 
 	void setAllQual(qual_score q) { for (size_t i = 0; i < qual_.size(); i++) { qual_[i] = q; } avg_qual_ = -1.f;}
 
@@ -606,7 +606,7 @@ public:
 	int numNonCanonicalDNA(bool);
 	float getAvgQual();
 	unsigned int getQsum(){return quality_sum_;}
-	float qualWinfloat(unsigned int,float,int&);
+	float qualWinfloat(uint,float,int&);
 	
 	
 	float binomialFilter(int, float);

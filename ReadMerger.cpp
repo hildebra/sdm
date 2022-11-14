@@ -384,7 +384,7 @@ bool ReadMerger::findSeed(std::string& sequence1, std::string& sequence2, MergeR
 
 bool ReadMerger::findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2) {
 	bool didMerge(false);
-	if (dna1->length() == 0 || dna2->length() == 0) {
+	if (dna1->length() < 20 || dna2->length() < 20) {//complete garbage sequence.. just ignore
 		return false;
 	}
 	MergeResult res;
@@ -578,7 +578,7 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	shared_ptr<DNA> merged_read = make_shared<DNA>();
 	merged_read->setSequence(std::string(new_seq));
 	delete[] new_seq;
-	merged_read->setQual(std::move(new_qual));
+	merged_read->setQual(move(new_qual));
 	merged_read->setNewID(read1->getId());// +"_merged");
 	merged_read->getEssentialsFts(read1);
 

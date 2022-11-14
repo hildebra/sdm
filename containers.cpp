@@ -3709,9 +3709,17 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre,
 
 
 		int rea (2), rea2 (2);
-		if ((min_q > 0 || FQWthr > 0) && d->qualWinfloat(FQWwidth, FQWthr, rea) < min_q) {
+		float avgQ(min_q); 
+		if (min_q > 0 || FQWthr > 0){
+			avgQ = d->qualWinfloat(FQWwidth, FQWthr, rea);
+		}
+		if ( avgQ < min_q) {
 			d->QualCtrl.AvgQual = true; //sAvgQual(pair_);
-			if ((alt_min_q > 0 || alt_FQWthr > 0) && d->qualWinfloat(FQWwidth, alt_FQWthr, rea2) < alt_min_q) {
+			float avgQalt(alt_min_q);
+			if (alt_min_q > 0 || alt_FQWthr > 0) {
+				avgQalt = d->qualWinfloat(FQWwidth, alt_FQWthr, rea2);
+			}
+			if (avgQalt < alt_min_q) {
 				d->QualCtrl.AvgQual= true; //statAddition.AvgQual++;
 				d->failed(); return false;
 			} else {
@@ -4577,14 +4585,14 @@ bool Filters::cutPrimer(shared_ptr<DNA> d,int primerID,bool RC,int pair){
 		stop = start + (int)PrimerL[primerID].length();
 	} else {
 	//if (1 && start == -1){
-		int QS = d->length();int limit = max(QS >> 1, QS - 150); stop = QS;
+		int QS = d->length();int limit = max(QS / 2, QS - 150); stop = QS;
 		start = d->matchSeqRev(PrimerL_RC[primerID], PrimerErrs, limit, startSearch);
 //		start = d->matchSeq(PrimerL_RC[primerID], PrimerErrs, tolerance, startSearch);
 		if (0 && start != -1) {
 			int y = 0;//debug
 		}
 	}
-	if (start == -1){//failed to match primer
+	if (start < 0){//failed to match primer
 		//this should only be set if it led to failing to read
 		//d->QualCtrl.PrimerFwdFail = true;
 		//sPrimerFail(pair_);// max(0, (int)d->getReadMatePos()));
@@ -4593,11 +4601,11 @@ bool Filters::cutPrimer(shared_ptr<DNA> d,int primerID,bool RC,int pair){
 				start = d->matchSeq(PrimerL[primerID], alt_PrimerErrs, tolerance, startSearch);
 				stop = start + (int)PrimerL[primerID].length();
 			} else {
-				int QS = d->length(); int limit = max(QS >> 1, QS - 150); stop = QS;
+				int QS = d->length(); int limit = max(QS / 2 , QS - 150); stop = QS;
 				start = d->matchSeqRev(PrimerL_RC[primerID], alt_PrimerErrs, limit, startSearch);
 			}
 		}
-		if (start== -1){
+		if (start < 0){
 			//statAddition.PrimerFail++;
 			return false;
 		}else if (pair!=1){ //2nd read shouldnt be affected by fwd primer (but still checked in short read mode)
@@ -4633,7 +4641,7 @@ bool Filters::findPrimer(shared_ptr<DNA> d, int primerID, bool RC, int pair) {
 		//stop = start + (int)PrimerL[primerID].length();
 	}
 	else {
-		int QS = d->length(); int limit = max(QS >> 1, QS - 150); //stop = QS;
+		int QS = d->length(); int limit = max(QS / 2, QS - 150); //stop = QS;
 		start = d->matchSeqRev(PrimerL_RC[primerID], PrimerErrs, limit, startSearch);
 	}
 	if (start == -1) {//failed to match primer
@@ -4661,7 +4669,7 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d,int primerID,bool RC){
 	
 
 
-	if (start == -1){//failed to match primer
+	if (start < 0){//failed to match primer
 		//d->QualCtrl.PrimerRevFail = true;
 		return false;
 	} 

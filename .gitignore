@@ -16,6 +16,10 @@ MakefileD
 MakefileF
 DEBUG/
 
+sdmN
+sdmD
+sdmD2
+
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/

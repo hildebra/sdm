@@ -81,7 +81,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "khash.hh"
 #endif
 
-#include "include/robin_set.h"
+//#include "include/robin_set.h"
 #include "include/robin_hood.h"
 
 //#include "include/ssw_cpp.h"
@@ -104,12 +104,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif // _WIN32
 
 
-static const float sdm_version = 2.05f;
+static const float sdm_version = 2.06f;
 static const char* sdm_status = "beta";
 
 
 using namespace std;
 
+
+static int maxSAqualP = 109;
 static const double SAqualP[110] = {1.000000e+00,7.943282e-01,6.309573e-01,5.011872e-01,3.981072e-01,3.162278e-01,2.511886e-01,1.995262e-01,1.584893e-01,1.258925e-01
 ,1.000000e-01,7.943282e-02,6.309573e-02,5.011872e-02,3.981072e-02,3.162278e-02,2.511886e-02,1.995262e-02,1.584893e-02,1.258925e-02
 ,1.000000e-02,7.943282e-03,6.309573e-03,5.011872e-03,3.981072e-03,3.162278e-03,2.511886e-03,1.995262e-03,1.584893e-03,1.258925e-03

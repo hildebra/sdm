@@ -510,13 +510,13 @@ DNA::DNA(vector<string> fas):DNA() {
 			exit(923);
 		}
 	}
-	this->setQual(Iqual);
+	this->setQual(move(Iqual));
 	
 }
 
 DNA::DNA(vector<string> fq, qual_score fastQver):DNA(){
 	//string line;
-	if (fq[0].length() == 0) { delself(); return; }
+	if (fq.size() != 4  || fq[0].length() == 0) { delself(); return; }
 	while (fq[0][0] != '@') {
 		cerr<< "ERROR on line " + fq[0] + ": Could not find \'@\' when expected (file likely corrupt, trying to recover):\n" ;// << endl;
 		delself();
@@ -537,22 +537,26 @@ DNA::DNA(vector<string> fq, qual_score fastQver):DNA(){
 	string& line = fq[3];
 
 
-	if (line.length()  != this->length()) {
+	if (line.length()  != this->mem_length()) {
+		string sizdif = "More";
+		if (line.length() > this->mem_length()) {
+			sizdif = "Less";
+		}
 		//check that quality gets not more length than DNA
 		delself();
-		cerr << "Error input line " + fq[3] + "'\n" + fq[1]+"'\n: More quality positions than nucleotides detected for sequence\n " +
+		cerr << "Error input line " + fq[3] + "'\n" + fq[1] + "'\n: "+ sizdif+" quality positions than nucleotides detected for sequence\n " +
 			fq[0];// << endl;
 		return;
 	}
 
+	uint qcnt(0); uint lline = (uint)this->mem_length();// line.length();
 	vector<qual_score> Iqual(this->mem_length(), 0);
 	
-	uint qcnt(0); uint lline = (uint)line.length();
 	for (; qcnt < lline; qcnt++) {
 		qual_score q = (qual_score)line[qcnt] - fastQver;
 		Iqual[qcnt] = q;// minmaxQscore();
 	}
-	this->setQual(Iqual);
+	this->setQual(move(Iqual));
 }
 
 DNA::DNA(FastxRecord* FR, qual_score & minQScore, qual_score & maxQScore, qual_score fastQver) :DNA(){
@@ -727,7 +731,8 @@ float DNA::sum_of_binomials(const float j, int k, float n, int qual_length, cons
 
 float DNA::binomialFilter(int maxErr, float alpha){
 
-	if (alpha == -1.f|| this->length()<3){ return 0; }//deactivated
+	if (alpha == -1.f|| this->length()<3){ return 0.f; }//deactivated
+	if (maxErr > 1e5) {return 0.f;	} // impossibly large..
 
 	///Initialize some variables.
 	
@@ -737,8 +742,9 @@ float DNA::binomialFilter(int maxErr, float alpha){
 	float alpha1 = 1.f - alpha;
 
 	///Translate quality scores into error probabilities.
-	vector<float> error_probs (sequence_length_, 0.f);
+	vector<float> error_probs (sequence_length_, 1.f);
 	for (size_t i = 0; i < sequence_length_; i++){
+		if (qual_[i]<0 || qual_[i]>maxSAqualP) { continue; }
 		error_probs[i] = (float)SAqualP[qual_[i]];//pow(10, (contig_quals[i] / -10.0)); //Since we want a continuous list of non-N error_probs.
 	}
 
@@ -779,27 +785,27 @@ float DNA::binomialFilter(int maxErr, float alpha){
 		}
 	}
 	if (expected_errors == 0){
-		return 0;
+		return 0.f;
 	}
 	float EXE = interpolate(expected_errors - 1, accumulated_probs[expected_errors - 1], expected_errors, accumulated_probs[expected_errors], alpha);
 	return EXE;
 }
 
-float DNA::qualWinfloat(unsigned int W, float T, int& reason){
+float DNA::qualWinfloat(uint W, float T, int& reason){
 	//if (T==0.f){return true;}
 	int AQS=0;
 	int TotQ = 0;
-	int upTs = static_cast<int>(T * W);
-	unsigned int QS = this->length();//static_cast<unsigned int> (qual_.size());
+	int upTs = int(T) * int(W);
+	uint QS = this->length();//static_cast<unsigned int> (qual_.size());
 	if (W>=QS){W = QS;} // too short
 
 //1st loop to ini window
-	for (unsigned int i=0; i<(unsigned int) W; i++){
+	for (size_t i = 0; i < size_t (W); i++) {
 		AQS += qual_[i];
 	}
 	TotQ = AQS;
 
-	for (unsigned int i=W; i<(unsigned int) QS; i++){
+	for (size_t i=W; i<(size_t) QS; i++){
 		AQS += qual_[i] - qual_[i - W];
 		TotQ += qual_[i];
 		if (AQS < upTs ){
@@ -807,7 +813,7 @@ float DNA::qualWinfloat(unsigned int W, float T, int& reason){
 		}
 	}
 	//if (averageQ > static_cast<float> (TotQ) /static_cast<float> ( qual_.size())){return false;}
-	return static_cast<float> (TotQ) /static_cast<float> ( QS);
+	return float(TotQ) /float( QS);
 }
 
 int DNA::qualAccumulate(double d){
@@ -905,6 +911,7 @@ bool DNA::qualWinPos(unsigned int W, float T){
 	
 	//partial seq  removal
 	int pos = curW - (W>>1);
+	if (pos < 0) {pos = 0;}
 	this->cutSeqPseudo(pos);
 	this->QualCtrl.QWinTrimmed = true;
 	return false;
@@ -915,7 +922,7 @@ bool DNA::qualWinPos(unsigned int W, float T){
 bool DNA::cutSeq(int start, int stop, bool pseudo){
 
 	 if (stop == -1) {
-		if (start >= (int) sequence_length_) { return false; }
+		if (start >= (int) sequence_length_ || start < 0) { return false; }
 	} else if (start >= stop || stop > (int)qual_.size() || start >= (int)qual_.size()) {
 		return false;
 	}
@@ -2005,7 +2012,7 @@ shared_ptr<DNA> InputStreamer::read_fastq_entry_fast(istream & fna, int& lnCnt, 
 
 	if (qcnt == tdn->mem_length()) {
 		//needsAT=true;
-		tdn->setQual(Iqual);
+		tdn->setQual(move(Iqual));
 	} else if (line.length() + qcnt != tdn->length()) {
 		//check that quality gets not more length than DNA
 		corrupt = true;

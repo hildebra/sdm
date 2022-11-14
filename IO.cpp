@@ -113,6 +113,7 @@ bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 			ret[2] = str2DNA(tmpLines->tmp[k][2], keepPairHd, FastqVer, 2);
 		}
 
+
 		isOK = read_paired_DNAready(ret, MIDuse, MD, curThread);
 		if (!isOK) {
 			break;
@@ -153,7 +154,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	//MD->checkFastqHeadVersion(tdn[0]);
 	//testreadpair.lock();
 
-	cdbg("read_paired_DNAready");
+	cdbg("read_paired_DNAready"+ tdn[0]->getId()+"\n");
 
 	Filters* curFil = MD->getFilters(curThread);
 	//register read at all with stat counter:
@@ -310,6 +311,8 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 		}*/
 	}
 	
+
+
 
 	//pre-merge step
 	//if ( MD->mergeReads()) {MD->findSeedForMerge(tdn[0], tdn[1],curThread);	}
