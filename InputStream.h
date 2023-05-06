@@ -495,11 +495,19 @@ inline vector<string> splitByCommas(const string& fileS, char SrchStr = ',') {
 //requires sorted vector with the entries being actual datapoints
 template<class TYPE>
 TYPE calc_median2(vector<TYPE>& in, float perc){
-	size_t sum = in.size();
+	size_t sum = in.size() - 1;
+	if (sum < 0) { return 0; }
 	size_t tar = (size_t)(((float)sum) * perc);
 	return in[tar];
 }
 
+template<class TYPE>
+TYPE median(vector<TYPE>& v)
+{
+	size_t n = v.size() / 2;
+	nth_element(v.begin(), v.begin() + n, v.end());
+	return v[n];
+}
 
 //returns "i_fna" or "i_fastq"
 string detectSeqFmt(const string);
@@ -605,6 +613,7 @@ public:
 	void stripLeadEndN();
 	int numNonCanonicalDNA(bool);
 	float getAvgQual();
+	int getMedianQual();
 	unsigned int getQsum(){return quality_sum_;}
 	float qualWinfloat(uint,float,int&);
 	

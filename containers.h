@@ -36,19 +36,7 @@ class Dereplicate;
 
 
 
-// REPLACE THIS WITH STATISTICS OBJECT
-struct data_MT {
-public:
-//    data_MT() {
-//        //std::cout << "Constructor data_MT" << std::endl;
-//    }
-    unsigned int total_reads = 0;
-    unsigned int total_nts = 0;
-    unsigned int qual_sum = 0;
-    double accum_error = 0;
-    std::vector<long> per_base_quality_sum;
-    std::vector<long> nucleotide_counter;
-};
+
 
 
 struct ltstr
@@ -163,54 +151,41 @@ class OutputStreamer;
 //reported stats on sequence properties
 class ReportStats {
 public:
-	ReportStats(bool MedianDo) :
-		bMedianCalcs(MedianDo), rstat_totReads(0), rstat_NTs(0), rstat_qualSum(0),
+	ReportStats(bool MedianDo = true) :
+		bMedianCalcs(MedianDo), bLvsQlogs(false), rstat_totReads(0), rstat_NTs(0), rstat_qualSum(0),
 		rstat_Qmed(0), rstat_Smed(0), RSQS(0.f), USQS(0.f), rstat_accumError(0.f),
 		QperNT(6, 0), NTcounts(6, 0),
 		rstat_VQmed(0), rstat_VSmed(0)
 	{}
-	ReportStats() :
-		bMedianCalcs(true), rstat_totReads(0), rstat_NTs(0), rstat_qualSum(0),
-		rstat_Qmed(0), rstat_Smed(0), RSQS(0.f), USQS(0.f), rstat_accumError(0.f),
-		QperNT(1000, 0), NTcounts(1000, 0),
-		rstat_VQmed(0), rstat_VSmed(0)
-	{}
+	
 	~ReportStats() {}
 	void reset();
 	void addDNAStats(shared_ptr<DNA> d);
-	void mergeStats(data_MT &data);
-	void addDNAStatsMT(shared_ptr<DNA> d, data_MT *data);
+	//void mergeStats(data_MT &data);
+	void setbLvsQlogs(bool b) { 
+		bLvsQlogs = b; 
+	}
+	bool getbLvsQlogs() { return bLvsQlogs; }
+	//void addDNAStatsMT(shared_ptr<DNA> d, data_MT *data);
 	void calcSummaryStats(float remSeqs, unsigned int min_l, float min_q);
 	float calc_median(vector<unsigned int>& in, float perc);
 	void add_median2histo(vector<unsigned int>& in, vector<unsigned int>& histo);
 	static void addMedian2Histo(unsigned int in, vector<unsigned int>& histo);
 	void addMeanStats(unsigned int NT, unsigned int Qsum, float AccErr) {
-		rstat_NTs += NT; rstat_totReads++; rstat_qualSum += Qsum; rstat_accumError += AccErr;
+		rstat_NTs += NT; rstat_totReads++; 
+		rstat_qualSum += Qsum; rstat_accumError += AccErr;
 	}
-	void addMeanStatsMT(unsigned int NT, unsigned int Qsum, float AccErr) {
-		{
-			std::unique_lock<std::mutex> stats_lock(stats_mutex);
-			rstat_NTs += NT;
-			rstat_totReads++;
-			rstat_qualSum += Qsum;
-			rstat_accumError += AccErr;
-		}
-	}
+	void addLvsQlogs(uint L, float avg, int med) {
+		listOfLengths.push_back(L);
+		listOfQuals.push_back(avg);
+		listOfQualMeds.push_back(med);
 
+	}
 	// TEST IF PRODUCES SAME RESULTS
-	void addNtSpecQualScores(shared_ptr<DNA> dna) {
-       
+	void addNtSpecQualScores(shared_ptr<DNA> dna) {       
 		size_t sql = dna->getSequence().length();
-		/*
-
-        if (QperNT.size() < sql) {
-            QperNT.resize(sql,0);
-        }
-        if (NTcounts.size() < sql) {
-            NTcounts.resize(sql,0);
-        }*/
-		vector<qual_score> quals = dna->getQual();
-		string seq = dna->getSequence();
+		const vector<qual_score> quals = dna->getQual();
+		const string seq = dna->getSequence();
         for (uint i = 0; i < sql; i++ ) {
             short p = NT_POS[(int) seq[i]];
             QperNT[p] += (long)quals[i];
@@ -222,27 +197,33 @@ public:
 	unsigned int highest(const vector<uint>& in);
 	void printStats2(ostream& give, float remSeqs, int pair);
 	void printGCstats(ostream& give);
-	void addRepStats(const ReportStats*);
+	void printLvsQ(ostream& give);
+	void addRepStats( ReportStats*);
 	bool bMedianCalcs;
+	bool bLvsQlogs;
 	const vector<unsigned int> &get_rstat_Vmed(int x) {
 		if (x == 1) { return rstat_VQmed; }
 		else { return rstat_VSmed; }
 	}
 	//const vector<unsigned int> &get_rstat_VSmed(){return rstat_VSmed;}
 	vector<size_t> getVrange(int which);
+	
 protected:
 
 	//median
 	vector<size_t> medVrange(const vector<uint>);
-	unsigned int rstat_totReads, rstat_NTs, rstat_qualSum, rstat_Qmed, rstat_Smed;
+	unsigned long rstat_totReads, rstat_NTs, rstat_qualSum, rstat_Qmed, rstat_Smed;
 	//means, Relative sample_id_ Quality Score (RSQS), Unifying sample_id_ Quality Score (USQS)
 	float RSQS, USQS;
-	float rstat_accumError;
+	double rstat_accumError;
 	vector<long> QperNT, NTcounts;
 	float GCcontent() { return float(NTcounts[2] + NTcounts[3]) / float(NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3]); }
 
 	//bin based median calculation's
 	vector<unsigned int> rstat_VQmed, rstat_VSmed;
+	std::list<int> listOfLengths;
+	std::list<float> listOfQuals;
+	std::list<float> listOfQualMeds;
 private:
 	std::mutex stats_mutex;
 };
@@ -268,14 +249,16 @@ public:
 		cdbg("Ini collectstats");
 		PostFilt = new ReportStats();
 		PreFilt = new ReportStats();
+
+		
 	}
 	//collectstats(const collectstats&) = default;
 	//collectstats& operator=(const collectstats&) = default;
 
 
 	~collectstats() {
-		delete PostFilt;
-		delete PreFilt;
+		delete PostFilt; PostFilt = nullptr;
+		delete PreFilt; PreFilt = nullptr;
 	}
 	unsigned int maxL, PrimerFail,AvgQual, HomoNT;
 	unsigned int PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)
@@ -302,14 +285,15 @@ public:
 		//PostFilt = make_shared<ReportStats>(PostFilt->bMedianCalcs);
 		//PreFilt = make_shared<ReportStats>(PreFilt->bMedianCalcs);
 	}
-
+	void setbLvsQlogsPreFilt(bool b){		PreFilt->setbLvsQlogs(b);}
+	bool getbLvsQlogsPreFilt(){return PreFilt->getbLvsQlogs();}
 
 	ReportStats* PostFilt;//green
 	ReportStats* PreFilt; //before filtering
 
 
 };
-
+/*
 class StatisticsMultithreaded {
 public:
     StatisticsMultithreaded () : main_read_stats_(2), mid_qual_stats_(2) {
@@ -358,7 +342,7 @@ public:
         }
     }
 };
-
+*/
 
 //filters a fasta file for certain reads
 class ReadSubset{
@@ -512,6 +496,7 @@ public:
 	string shortStats(const string &);
 	void SmplSpecStats(ostream&);
 	void printHisto(ostream&, int which, int set = 1);//which: 1=qual_ //set:0 only filter, 1 all available
+	void printLenVsQual(ostream& give);
 	bool combineSamples(){ return bDoCombiSamples; }
 	
 	//handles setting up file paths, file order, file types.. (input only)
@@ -535,10 +520,10 @@ public:
 	int detectCutBC(shared_ptr<DNA> d, bool);//returns id_, important for cutPrimer()
 
 	// Multithreading
-	void setThreads(size_t threads) {
+	/*void setThreads(size_t threads) {
 	    this->threads = threads;
 	    this->statistics_.resize(this->threads);
-	}
+	}*/
 
 	//public vars *************************************************
 	//check for heterogenity primers (can be useful for chimera estimation)
@@ -555,8 +540,8 @@ public:
 
 
 	// statistics for multithreaded variant
-	std::vector<StatisticsMultithreaded> statistics_;
-    std::size_t threads = 0;
+	//std::vector<StatisticsMultithreaded> statistics_;
+   // std::size_t threads = 0;
 
     // Central statistics
 
@@ -585,11 +570,11 @@ public:
 	}
 
 //    void addToStatistics(shared_ptr<DNA> d, Statistics &statistics);
-    void addDNAtoCStatsMT(shared_ptr<DNA> d, int pair, int thread_id);
+//    void addDNAtoCStatsMT(shared_ptr<DNA> d, int pair, int thread_id);
 
-    void preFilterSeqStatMT(shared_ptr<DNA> d, int pair, uint thread);
+ //   void preFilterSeqStatMT(shared_ptr<DNA> d, int pair, uint thread);
 
-    void addStatsMT(Filters* fil, vector<int> &idx);
+    //void addStatsMT(Filters* fil, vector<int> &idx);
 	int currentBCnumber() { return curBCnumber; }//only used in "one sample per file" cases
 
 	//quick check if a rev Primer seq matches correct position -> reverse this seq
@@ -638,7 +623,7 @@ protected:
 		string& presentBC, bool useBC1, bool revBC);
 
 	void extractMap(int k, int cnt, int tbcnt, string & segments, bool);
-	void fakeEssentials(void);
+	void fakeEssentials(bool all);
 	void noMapMode();
 	void reverseTS_all_BC();	
 	void reverseTS_all_BC2();
@@ -745,6 +730,10 @@ protected:
 	BarcodeMap barcodes1_, barcodes2_;
 	vector<int> barcodeLengths1_;
 	vector<int> barcodeLengths2_;
+
+	string illuPEfwd, illuPErev, illuSEuni, illuSEidx;
+	bool Bcheck4illuAdapts;
+	
 	
 	OptContainer cmdArgs;
     

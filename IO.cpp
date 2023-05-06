@@ -488,6 +488,16 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 			cmdArgs[string(argv[i])] = "T";
 		}
 	}
+
+	
+	if (cmdArgs.find("-illuminaClip") == cmdArgs.end()) {
+		cmdArgs["-illuminaClip"] = "0";
+	}
+	if (cmdArgs.find("-logLvsQ") == cmdArgs.end()) {
+		cmdArgs["-logLvsQ"] = "";
+	}
+	
+
 	if (cmdArgs.find("-i_MID_fastq") == cmdArgs.end()) {
 		cmdArgs["-i_MID_fastq"] = "";
 	}
@@ -523,6 +533,7 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 	if (cmdArgs.find("-ucAdditionalCounts_refclust1") == cmdArgs.end()) {//.RESTREF
 		cmdArgs["-ucAdditionalCounts_refclust1"] = "";
 	}
+	
 	if (cmdArgs.find("-XfirstReads") == cmdArgs.end()) {
 		cmdArgs["-XfirstReads"] = "";
 	}
@@ -852,7 +863,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 //		Filters* filter = mainFilter->newFilterPerBCgroup(files.idx[i]);
 		Filters* filter = mainFilter->newFilterPerBCgroup(files.idx[i]);
 		cdbg("Setting up threads\n");
-		filter->setThreads(threads);
+		//filter->setThreads(threads);
 		int tarID = files.idx[i][0];//just points to one file in uFX group..
 
 
@@ -1186,6 +1197,17 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
     log.open (logF2.c_str() ,ios_base::out);
     mainFilter->printHisto(log, 1);
     log.close();
+
+	//length vs qual log file (large!!)
+	logF2 = cmdArgs["-logLvsQ"];
+	if (logF2 != ""){
+		if (logF2 == "1") {
+			logF2 = files.logF.substr(0, files.logF.length() - 3) + "Len.Qual.txt";
+		}
+	log.open(logF2.c_str(), ios_base::out);
+	mainFilter->printLenVsQual(log);
+	log.close();
+	}
 
 #ifdef DEBUG
     cerr << "separateByFile finished" << endl;

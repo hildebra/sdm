@@ -104,8 +104,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif // _WIN32
 
 
-static const float sdm_version = 2.06f;
+static const float sdm_version = 2.08f;
 static const char* sdm_status = "beta";
+
+
+//2.08: add -logLvsQ flag & report
 
 
 using namespace std;

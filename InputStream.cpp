@@ -633,7 +633,7 @@ void DNA::appendQuality(const vector<qual_score> &q)
 }
 
 float DNA::getAvgQual(){
-	if (avg_qual_ == -1.f){
+	if (avg_qual_ < 0.f){
 		if (quality_sum_ == 0){
 			for (unsigned int i = 0; i < this->length(); i++){
                 quality_sum_ += qual_[i];
@@ -643,6 +643,12 @@ float DNA::getAvgQual(){
 
 	}
 	return avg_qual_;
+}
+int DNA::getMedianQual() {
+	/*vector<qual_score> meq = qual_;
+	sort(meq.begin(), meq.end());
+	return calc_median2(meq, 0.5);*/
+	return median(qual_);
 }
 
 /*float DNA::qualWinfloat_hybr(int W, float T, int W2, float T2, int& reason){//not used

@@ -402,7 +402,7 @@ void OutputStreamer::analyzeDNA(shared_ptr<DNA> d, int FilterUse, int pair, int&
 		return;
 	}
 
-		//pricipally safe to call from thread
+	//pricipally safe to call from thread
     curFil->checkYellowAndGreen(d, pair, idx, false);
 
 	//bit redundant.. but better safe than sorry
@@ -983,7 +983,7 @@ void Filters::addDNAtoCStats(shared_ptr<DNA> d,int Pair) {
 }
 
 
-
+/*
 void Filters::addDNAtoCStatsMT(shared_ptr<DNA> d, int pair, int thread_id) {
     //here should be the only place to count Barcodes!
     int easyPair = pair < 3 ? pair - 1 : pair - 3;
@@ -1069,6 +1069,7 @@ void Filters::addDNAtoCStatsMT(shared_ptr<DNA> d, int pair, int thread_id) {
     }
 }
 
+*/
 
 bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair, int thr,int& Cstream, bool write) {
 	//second most important part: collect stats on DNA passing through here (should be all read)
@@ -2514,8 +2515,7 @@ Filters::Filters(OptContainer& cmdArgs1) :
         collectStatistics(2), statAddition(2),
         FastaF(0), QualF(0), FastqF(0), MIDfqF(0),
         derepMinNum(0),
-	SequencingRun(0),
-
+		SequencingRun(0),
         lMD(NULL), 
         tAdapter(""), tAdapterLength(0),
         removeAdapter(false), bDoMultiplexing(true), bDoBarcode(true),
@@ -2553,6 +2553,8 @@ Filters::Filters(OptContainer& cmdArgs1) :
         maxReadsPerOFile(0), ReadsWritten(0), OFileIncre(0),
 		demultiBPperSR(0),
         barcodeLengths1_(0), barcodeLengths2_(0),
+		illuPEfwd(""), illuPErev(""), illuSEuni(""), illuSEidx(""), 
+		Bcheck4illuAdapts(false),
         cmdArgs(cmdArgs1)
 		{
 	//csMTX[0].unlock(); 
@@ -2598,6 +2600,10 @@ Filters::Filters(OptContainer& cmdArgs1) :
 		norm2fiveNTs = true;
 		cerr << "Warning: normRdsToFiveNTs is not implemented!\n";
 	}
+	if (cmdArgs["-logLvsQ"].c_str() != "") {
+		collectStatistics[0]->setbLvsQlogsPreFilt(true);
+	}
+
 	//delimit output file size to X reads
 	if (cmdArgs.find("-maxReadsPerOutput") != cmdArgs.end()) {
 		maxReadsPerOFile = atoi(cmdArgs["-maxReadsPerOutput"].c_str());
@@ -2803,15 +2809,23 @@ Filters::Filters(OptContainer& cmdArgs1) :
 			if ( segs2 == "T" ) {
 				bRevRdCk = true;
 			} else { bRevRdCk = false; }
-		}
-		else if (segs == "SyncReadPairs") {
+		} else if (segs == "SyncReadPairs") {
 			if (segs2 == "T") {
 				bChkRdPrs = true;
 			}
 			else { bChkRdPrs = false; }
-		}
-		
-
+		} else if (segs == "illuminaFwd") {
+			illuPEfwd = segs2;
+		} else if (segs == "illuminaRev") {
+			illuPErev = segs2;
+		} else if (segs == "illuminaSngUni") {
+			illuSEuni = segs2;
+		}else if (segs == "illuminaSngIdx") {
+			illuSEidx = segs2;
+		}		
+	}
+	if ((cmdArgs)["-illuminaClip"] == "1") {
+		Bcheck4illuAdapts = true;
 	}
 	
 	//report some non-std options
@@ -2908,7 +2922,12 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
         maxReadsPerOFile(of->maxReadsPerOFile),
 		demultiBPperSR(of->demultiBPperSR),
         //ReadsWritten(of->ReadsWritten), OFileIncre(of->OFileIncre),
-        barcodeLengths1_(0), barcodeLengths2_(0), SequencingRun(0)
+        barcodeLengths1_(0), barcodeLengths2_(0), 
+	
+		illuPEfwd(of->illuPEfwd), illuPErev(of->illuPErev), illuSEuni(of->illuSEuni), illuSEidx(of->illuSEidx),
+		Bcheck4illuAdapts(of->Bcheck4illuAdapts),
+
+		SequencingRun(0)
 {
 	cdbg("New Filter object from copy\n");
 	ReadsWritten = of->writtenReads();
@@ -2919,6 +2938,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 
 	collectStatistics[0] = make_shared<collectstats>(); 
 	collectStatistics[1] = make_shared<collectstats>();
+	collectStatistics[0]->setbLvsQlogsPreFilt (of->collectStatistics[0]->getbLvsQlogsPreFilt());
     statAddition[0] = make_shared<collectstats>(); statAddition[1] = make_shared<collectstats>(); ;
 	cdbg("New Filter::resize collectStatistics done\n");
 	if (takeAll) {
@@ -3372,6 +3392,7 @@ void Filters::preFilterSeqStat(shared_ptr<DNA> d, int pair) {
 	//csMTX[easyPair]->unlock();
 }
 
+/*
 void Filters::preFilterSeqStatMT(shared_ptr<DNA> d, int pair, uint thread) {
     if (d == NULL)
         return;
@@ -3384,7 +3405,7 @@ void Filters::preFilterSeqStatMT(shared_ptr<DNA> d, int pair, uint thread) {
     }
     updateMaxSeqL(d->length());
 }
-
+*/
 std::mutex updateMaxSeqMutex;
 void Filters::updateMaxSeqL(int x) {
     {
@@ -3641,7 +3662,7 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre,
 	    return false;
 	}
 	//bShortAmplicons checks for reverse primer on 1st read
-	if (BcutPrimer) {
+	if (BcutPrimer || Bcheck4illuAdapts) {
 		if (pair != 1  ) {//0 or -1
 			cutPrimer(d, PrimerIdx[tagIdx], false, pair);
 			if (bShortAmplicons) {//also check other end of primer..
@@ -3675,6 +3696,7 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre,
 			}
 		}
 	}
+
 
 	if (doSeeding) {
 		//cut off low qual, hard limits
@@ -3789,23 +3811,51 @@ void Filters::noMapMode(){
 	BcutPrimer = false; bDoBarcode = false; bDoBarcode2 = false; bDoBarcode2Rd1 = false;
     removeAdapter=false;bDoMultiplexing=false;
 	bDoHeadSmplID=false;
-	fakeEssentials();
     minBCLength1_ = 0; minBCLength2_ = 0; maxBCLength1_ = 0; maxBCLength2_ = 0; minPrimerLength_ = 0;
 	cerr<<noMapTxt<<endl;
+
+	///very similar in principle but easier:
+	//needs to correct some parts..
+	if (Bcheck4illuAdapts) {
+		//BcutPrimer = true;
+		fakeEssentials(false);
+		PrimerIdxRev.resize(1, 0); PrimerIdx.resize(1, 0);
+		if (pairedSeq) {
+			string segments = illuPErev;
+			trim(segments);	transform(segments.begin(), segments.end(), segments.begin(), ::toupper);
+			this->addPrimerR(segments, 0);
+			segments = illuPEfwd;
+			trim(segments);	transform(segments.begin(), segments.end(), segments.begin(), ::toupper);
+			this->addPrimerL(segments, 0);
+		}
+		else {
+			string segments = illuSEuni;
+			trim(segments);	transform(segments.begin(), segments.end(), segments.begin(), ::toupper);
+			this->addPrimerL(segments, 0);
+		}
+	}
+	else {
+		fakeEssentials(true);
+	}
+
+
 }
-void Filters::fakeEssentials(){
+void Filters::fakeEssentials(bool all){
 	//create fake entries
-	PrimerIdx.push_back(0);Barcode.push_back("NA");
+	Barcode.push_back("NA");
 	barcodeLengths1_.push_back(0);
 	barcodeLengths2_.push_back(0);
 	SequencingRun.push_back("");
 	SequencingRun2id[""] = vector<int>(1, 0);
-	PrimerL.push_back(""); PrimerL_RC.push_back(""); SampleID.push_back("NA"); SampleID_Combi.push_back("NA");
+	SampleID.push_back("NA"); SampleID_Combi.push_back("NA");
 	HeadSmplID.push_back("");bDoHeadSmplID=false;
 	collectStatistics[0]->BarcodeDetected.push_back(-1);
 	collectStatistics[1]->BarcodeDetected.push_back(-1);
 	collectStatistics[0]->BarcodeDetectedFail.push_back(-1);
 	collectStatistics[1]->BarcodeDetectedFail.push_back(-1);
+	if (all) {
+		PrimerIdx.push_back(0); PrimerL.push_back(""); PrimerL_RC.push_back("");
+	}
 	
 }
 void Filters::allResize(unsigned int x){
@@ -4572,7 +4622,9 @@ bool Filters::cutPrimer(shared_ptr<DNA> d,int primerID,bool RC,int pair){
 	}
 	int start(-1) ,stop(-1);
 	int tolerance(30), startSearch(0);
-	if (!d->getBarcodeCut() && maxBCLength1_ > 0) { tolerance = maxBCLength1_ + 4;
+	if (Bcheck4illuAdapts) {
+		tolerance = 22;
+	} else	if (!d->getBarcodeCut() && maxBCLength1_ > 0) { tolerance = maxBCLength1_ + 4;
 	} else { tolerance = 22; }//in this case nothing is known about 5' end
 
 	if (!BcutTag){
@@ -4694,7 +4746,7 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d,int primerID,bool RC){
 }
 bool Filters::readMap(){//core routine to read map info
 	if (cmdArgs.find("-map")  == cmdArgs.end()){
-		this->noMapMode(  );
+		this->noMapMode();
 		return true;
 	}
 	string MapF = cmdArgs["-map"];
@@ -5240,6 +5292,10 @@ void Filters::extractMap(int k, int cnt, int tbcnt, string & segments,
 		}
 	}
 
+}
+
+void Filters::printLenVsQual(ostream& give) {
+	collectStatistics[0]->PreFilt->printLvsQ(give);
 }
 
 void Filters::printHisto(ostream& give,int which, int set){
@@ -5857,30 +5913,34 @@ void collectstats::reset(){
 inline void ReportStats::addDNAStats(shared_ptr<DNA> d){
 	stats_mutex.lock();
 	//pretty fast
-	addMeanStats(d->length(),(int) d->getAvgQual(), (float)d->getAccumError());
+	float avq = d->getAvgQual();
+	addMeanStats(d->length(),(int) avq, (float)d->getAccumError());
 	//NT specific quality scores
 	
 //    d->ntSpecQualScores(QperNT, NTcounts); // Thread safe
 
     // Test this function
-    addNtSpecQualScores(d);
-	
+    //addNtSpecQualScores(d);
+
 	//more memory intensive
 	if (bMedianCalcs){
 		//quali
-		uint avq = (uint) (d->getAvgQual() + 0.5f);
-        addMedian2Histo(avq, rstat_VQmed); // Thread safe (?)
+        addMedian2Histo(avq + 0.5f, rstat_VQmed); // Thread safe (?)
         addMedian2Histo(d->length(), rstat_VSmed); // Thread safe
+	}
+	if (bLvsQlogs) {
+		int median = d->getMedianQual();
+		addLvsQlogs(d->length(), avq, median);
 	}
 	stats_mutex.unlock();
 }
 
 
-inline void ReportStats::mergeStats(data_MT &data) {
+/*void ReportStats::mergeStats(ReportStats& data) {
     rstat_NTs += data.total_nts;
     rstat_totReads += data.total_reads;
     rstat_qualSum += data.qual_sum;
-    rstat_accumError += (float) data.accum_error;
+    rstat_accumError +=  data.accum_error;
 
     if (data.per_base_quality_sum.size() > QperNT.size())
         QperNT.resize(data.per_base_quality_sum.size(), 0);
@@ -5892,9 +5952,15 @@ inline void ReportStats::mergeStats(data_MT &data) {
     for (size_t i = 0; i < data.nucleotide_counter.size(); i++) {
         NTcounts[i] += data.nucleotide_counter[i];
     }
-}
 
-inline void ReportStats::addDNAStatsMT(shared_ptr<DNA> d, data_MT *data){
+	//listOfLengths.merge(data.listOfLengths);
+
+}
+*/
+
+/*
+
+ void ReportStats::addDNAStatsMT(shared_ptr<DNA> d, ReportStats *data){
     data->total_nts += d->length();
     data->qual_sum += uint(d->getAvgQual()+0.5f);
     data->accum_error += d->getAccumError();
@@ -5912,6 +5978,7 @@ inline void ReportStats::addDNAStatsMT(shared_ptr<DNA> d, data_MT *data){
         addMedian2Histo(d->length(), rstat_VSmed);
     }
 }
+*/
 
 
 
@@ -5923,6 +5990,7 @@ void ReportStats::reset() {
 	std::fill(QperNT.begin(), QperNT.end(), 0);
 	std::fill(NTcounts.begin(), NTcounts.end(), 0);
 	rstat_VQmed.resize(0); rstat_VSmed.resize(0);
+	listOfLengths.resize(0); listOfQuals.resize(0); listOfQualMeds.resize(0);
 }
 unsigned int ReportStats::lowest(const vector<uint>& in){
 	for (int i=0;i<(int)in.size();i++){
@@ -5936,6 +6004,18 @@ unsigned int ReportStats::highest(const vector<uint>& in){
 		if (in[i]>0){return i;}
 	}
 	return 0;
+}
+
+void ReportStats::printLvsQ(ostream& give) {
+	std::list<int>::iterator it1 (listOfLengths.begin());
+	std::list<float>::iterator it2(listOfQuals.begin());
+	std::list<float>::iterator it3(listOfQualMeds.begin());
+	give << "Length\tAvgQual\tMedianQual\n";
+
+	for ( ;  it1 != listOfLengths.end() && it2 != listOfQuals.end() && it3 != listOfQualMeds.end(); ++it1, ++it2, ++it3) {
+		give << *it1 <<"\t"<< *it2<< "\t" <<*it3<<"\n";
+	}
+	
 }
 void ReportStats::printGCstats(ostream& give) {
 	//NT_POS['A'] = 0; NT_POS['T'] = 1; NT_POS['G'] = 2; NT_POS['C'] = 3;	NT_POS['N'] = 4;
@@ -5990,7 +6070,7 @@ void ReportStats::printStats2(ostream& give, float remSeqs,int pair){
 }
 
 //add the stats from a different ReportStats object
-void ReportStats::addRepStats(const ReportStats* RepoStat){
+void ReportStats::addRepStats( ReportStats* RepoStat){
 	//report stats:
 	rstat_NTs += RepoStat->rstat_NTs; rstat_totReads += RepoStat->rstat_totReads;
 	rstat_qualSum += RepoStat->rstat_qualSum;
@@ -6016,6 +6096,13 @@ void ReportStats::addRepStats(const ReportStats* RepoStat){
 		for (unsigned int i=0; i<RepoStat->rstat_VSmed.size(); i++){
 			rstat_VSmed[i] += RepoStat->rstat_VSmed[i];
 		}
+	}
+	if (bLvsQlogs) {
+		//l1.splice(l1.end(), l2);
+
+		listOfLengths.splice(listOfLengths.end(),RepoStat->listOfLengths);
+		listOfQuals.splice(listOfQuals.end(), RepoStat->listOfQuals);
+		listOfQualMeds.splice(listOfQualMeds.end(), RepoStat->listOfQualMeds);
 	}
 }
 //calculate median value from data stored as histogram-vector
@@ -6114,6 +6201,7 @@ UClinks::UClinks( OptContainer& cmdArgs):
 	SEP = cmdArgs["-sample_sep"];
 	string str = cmdArgs["-optimalRead2Cluster"];
 	
+
 	if (str.find(".paf") != string::npos) {
 		ucispaf = true; UpUcFnd = true;
 	}
@@ -6659,7 +6747,7 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 			stringstream ss;
 			ss << line;
 			//2 ways to get to a) hit info b) query & otu
-			if (ucispaf) {
+			if (ucispaf) {//minimap2 .paf file..
 				getline(ss, segs, '\t');
 				string query = segs;
 				getline(ss, segs, '\t');
@@ -7267,9 +7355,9 @@ void UClinks::printStats(ostream& os){
 	std::sort(accums.begin(), accums.end());
 	std::sort(sims.begin(), sims.end());
 	os << "Stats of Seed sequences (0th/10th/50th/90th/100th) percentile:\n";
-	if (lengths.size() > 0) { os << "\n     - Sequence Length :   " << minL << "/" << calc_median2(lengths, 0.1f) << "/" << calc_median2(lengths, 0.5f) << "/" << calc_median2(lengths, 0.9f) << "/" << maxL; }
-	if (quals.size() > 0) { os << "\n     - Quality :      " << minQ << "/" << calc_median2(quals, 0.1f) << "/" << calc_median2(quals, 0.5f) << "/" << calc_median2(quals, 0.9f) << "/" << maxQ; }
-	if (accums.size() > 0) { os << "\n     - Accum. Error : " << minA << "/" << calc_median2(accums, 0.1f) << "/" << calc_median2(accums, 0.5f) << "/" << calc_median2(accums, 0.9f) << "/" << maxA;	}
-	if (sims.size() > 0) {	os << "\n     - Sim2Consensus: " << minS << "/" << calc_median2(sims, 0.1f) << "/" << calc_median2(sims, 0.5f) << "/" << calc_median2(sims, 0.9f) << "/" << maxS;		}
+	if (lengths.size() > 0) { os << "\n     - Sequence Length :   " << calc_median2(lengths, 0.f) << "/" << calc_median2(lengths, 0.1f) << "/" << calc_median2(lengths, 0.5f) << "/" << calc_median2(lengths, 0.9f) << "/" << calc_median2(lengths, 1.f);; }
+	if (quals.size() > 0) { os << "\n     - Quality :      " << calc_median2(quals, 0.f) << "/" << calc_median2(quals, 0.1f) << "/" << calc_median2(quals, 0.5f) << "/" << calc_median2(quals, 0.9f) << "/" << calc_median2(quals, 1.f);; }
+	if (accums.size() > 0) { os << "\n     - Accum. Error : " << calc_median2(accums, 0.f) << "/" << calc_median2(accums, 0.1f) << "/" << calc_median2(accums, 0.5f) << "/" << calc_median2(accums, 0.9f) << "/" << calc_median2(accums, 1.f);;	}
+	if (sims.size() > 0) {	os << "\n     - Sim2Consensus: " << calc_median2(sims, 0.f) << "/" << calc_median2(sims, 0.1f) << "/" << calc_median2(sims, 0.5f) << "/" << calc_median2(sims, 0.9f) << "/" << calc_median2(sims, 1.f);		}
 	os << endl;
 }
