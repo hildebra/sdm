@@ -650,7 +650,7 @@ public:
 	bool cutSeqPseudo(int start) { return cutSeq(start, -1, true); }
 	bool HomoNTRuns(int);
 	int matchSeq(string, int, int, int);
-	void reverse_transcribe(bool reset=true);
+	void reverse_compliment(bool reset=true);
 	int matchSeqRev(const string&, int, int, int=0);
 	int matchSeq_tot(const string&, int, int, int&);
 	void writeSeq(ostream&, bool singleLine = false);

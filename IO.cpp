@@ -59,12 +59,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             int chkRev(1);
             tagIdx = curFil->findTag(tdn[0], presentBC, c_err, true, chkRev);
 /*			if (tagIdx < 0) { //check if on reversed_ read
-				dnaTemp1->reverse_transcribe();
+				dnaTemp1->reverse_compliment();
 				tagIdx = curFil->findTag(dnaTemp1, presentBC, c_err, true);
 			}
             
             if (chkRev==0) {//no? undo revTranscr
-				tdn[0]->reverse_transcribe();
+				tdn[0]->reverse_compliment();
             }
         }
         tagIdx = -2;
@@ -208,7 +208,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 			//	int x = 0;
 			//}
 			if (revT) {
-				tdn[0]->reverse_transcribe(); tdn[1]->reverse_transcribe();
+				tdn[0]->reverse_compliment(); tdn[1]->reverse_compliment();
 			}
 		}
 		tagIdx2 = -2; tagIdx = -2;
@@ -217,7 +217,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	*/
 
     
-	//tdn[0]->reverse_transcribe();
+	//tdn[0]->reverse_compliment();
 	//actually important routine
 	MD->analyzeDNA(tdn[0], -1, 0, tagIdx, curThread);
 	//tdn[0]->matchSeqRev
@@ -238,7 +238,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 				cerr << "tagidx2 wrongly truncated to " << tagIdx2 << endl;
 			}
 		}
-		//if (isReversed) { tdn[1]->reverse_transcribe(); }
+		//if (isReversed) { tdn[1]->reverse_compliment(); }
 		MD->analyzeDNA(tdn[1], -1, 1, tagIdx2, curThread);
 		ch2 = tdn[1]->isGreenQual();
 	}

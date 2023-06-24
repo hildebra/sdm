@@ -578,7 +578,7 @@ public:
 	int currentBCnumber() { return curBCnumber; }//only used in "one sample per file" cases
 
 	//quick check if a rev Primer seq matches correct position -> reverse this seq
-	bool checkIfRevPrimerHits(shared_ptr<DNA> d, int primerID, int pair = 0);
+	bool checkIfRevPrimerHits(shared_ptr<DNA> d, int primerID, int pair = 0,bool=false);
 	bool checkIfPrimerHits(shared_ptr<DNA> d, int primerID, int pair = 0);
 
 protected:
@@ -608,8 +608,8 @@ protected:
 		if (min_l==0){return false;}
 		return leng-hindrance < min_l;
 	}
-	bool cutPrimer(shared_ptr<DNA> d, int primerID, bool, int);
-	bool cutPrimerRev(shared_ptr<DNA> d,int primerID,bool);
+	bool cutPrimer(shared_ptr<DNA> d, int primerID, bool&, int, bool=false);
+	bool cutPrimerRev(shared_ptr<DNA> d,int primerID,bool&,bool=false);
 
 
 
@@ -668,12 +668,13 @@ protected:
 	//filter related
 	int min_l, alt_min_l;
 	float min_l_p, alt_min_l_p;
-	int maxReadLength;
+	int maxReadLength;//stats
 	bool norm2fiveNTs; //change IUPAC code to 5 bases (ACTGN)
 	uint max_l;
 	float min_q,alt_min_q;
 	bool BcutPrimer,alt_BcutPrimer,bPrimerR;//cut Primers from seq?
 	bool bRequireRevPrim,alt_bRequireRevPrim; // reject seq if reverse primer not found
+	bool BextensivePrimerChecks;
 	bool bRequireFwdPrim,alt_bRequireFwdPrim;
 	bool BcutTag;//cut Tag from seq?
 	bool bCompletePairs;//if paired seq, only accept complete pairs
