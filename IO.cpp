@@ -679,6 +679,14 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 	if (cmdArgs.find("-pairedRD_HD_out") == cmdArgs.end()) {
 		cmdArgs["-pairedRD_HD_out"] = DEFAULT_pairedRD_HD_out;
 	}
+	if (cmdArgs.find("-5PR1cut") == cmdArgs.end()) {
+		cmdArgs["-5PR1cut"] = DEFAULT_5PR1cut;
+	}
+	if (cmdArgs.find("-5PR2cut") == cmdArgs.end()) {
+		cmdArgs["-5PR2cut"] = DEFAULT_5PR2cut;
+	}
+
+	
 
 	if (cmdArgs.find("-ignore_IO_errors") == cmdArgs.end()) {
 		cmdArgs["-ignore_IO_errors"] = DEFAULT_ignore_IO_errors;
@@ -1301,7 +1309,8 @@ void printCmdsHelp(){
     cout << " -maxReadsPerOutput number of filtered reads in output files. If more reads, a new file is created. Only works with -o_fna\n -mergedPairs <1/0> 1: paired sequences were merged externally, important for assumption that read quality is detoriating.\n -OTU_fallback <file>: Fallback fasta sequences for OTU's, only used in SEED extension mode\n";
     cout << " -i_qual_offset [0-64] fastq offset for quality values. Set this to \'0\' or \'auto\' if you are unsure which fastq version is being used (default: read from sdm option file)\n -o_qual_offset [0-64] set quality offset for fastq outfile. Default: 33\n";
     cout << " -ignore_IO_errors [0/1]: 1=Errors in fastq reads are ignored, with sdm trying to sync reads pairs after corrupted single reads (default: 0)\n";
-    //-binomialFilterBothPairs [1/0]
+	cout << " -5PR1cut [I]: remove I first nts from read 1\n"; cout << " -5PR2cut [I]: remove I first nts from read 2\n";
+	//-binomialFilterBothPairs [1/0]
     //-count_chimeras [T/F]
     // ucAdditionalCounts_refclust -OTU_fallback_refclust -optimalRead2Cluster_ref
     cout<<"\nMinimal Example:\n./sdm -i test.fna -base_map mapping.txt (assuming quality file is \"test.qual_\")\n";

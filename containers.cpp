@@ -388,9 +388,16 @@ void OutputStreamer::analyzeDNA(shared_ptr<DNA> d, int FilterUse, int pair, int&
 		return ;
 	}
 	Filters * curFil = this->getFilters(thr);
+	bool isP1 = max(0, pair) == 0;
+
+	if (isP1 && curFil->getcut5PR1()) {
+		d->cutSeq(0,curFil->getcut5PR1());
+
+	} else if (!isP1 && curFil->getcut5PR2()) {
+		d->cutSeq(0, curFil->getcut5PR2());
+	}
 
 	if ( !curFil->doFilterAtAll() ) {
-		bool isP1 = max(0, pair) == 0;
 		if (idx < 0 && !isP1 && !curFil->doubleBarcodes()) {
 			;
 		} else if (idx < 0) {
@@ -2533,6 +2540,7 @@ Filters::Filters(OptContainer& cmdArgs1) :
         bRequireFwdPrim(false), alt_bRequireFwdPrim(false), BcutTag(true),
         bCompletePairs(false), bShortAmplicons(false),
         minBCLength1_(0), minBCLength2_(0), maxBCLength1_(0), maxBCLength2_(0), minPrimerLength_(0), maxHomonucleotide(0),
+		cut5PR1(0), cut5PR2(0),
         PrimerErrs(0), alt_PrimerErrs(0), barcodeErrors_(0),
         MaxAmb(-1), alt_MaxAmb(-1),
         FQWwidth(0), EWwidth(0),
@@ -2623,6 +2631,9 @@ Filters::Filters(OptContainer& cmdArgs1) :
 			userReqFastqVer = atoi((cmdArgs)["-i_qual_offset"].c_str());
 		}
 	}
+
+	cut5PR1= atoi((cmdArgs)["-5PR1cut"].c_str());
+	cut5PR2 = atoi((cmdArgs)["-5PR2cut"].c_str());
 	//cerr<<cmdArgs["-o_qual_offset"]<<endl;
 	userReqFastqOutVer = atoi((cmdArgs)["-o_qual_offset"].c_str());
 	//statistic tracker
@@ -2894,6 +2905,8 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
         min_l(of->min_l), alt_min_l(of->alt_min_l), min_l_p(of->min_l_p), alt_min_l_p(of->alt_min_l_p),
         maxReadLength(0), norm2fiveNTs(of->norm2fiveNTs),
         max_l(of->max_l), min_q(of->min_q), alt_min_q(of->alt_min_q),
+
+
         BcutPrimer(of->BcutPrimer), alt_BcutPrimer(of->alt_BcutPrimer),
         bPrimerR(of->bPrimerR),
 
@@ -2904,7 +2917,8 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 
         bCompletePairs(of->bCompletePairs), bShortAmplicons(of->bShortAmplicons),
         minBCLength1_(of->minBCLength1_), minBCLength2_(of->minBCLength2_), maxBCLength1_(of->maxBCLength1_), maxBCLength2_(of->maxBCLength2_), minPrimerLength_(of->minPrimerLength_), maxHomonucleotide(of->maxHomonucleotide),
-        PrimerErrs(of->PrimerErrs), alt_PrimerErrs(of->alt_PrimerErrs), barcodeErrors_(of->barcodeErrors_),
+		cut5PR1(of->cut5PR1), cut5PR2(of->cut5PR2),
+		PrimerErrs(of->PrimerErrs), alt_PrimerErrs(of->alt_PrimerErrs), barcodeErrors_(of->barcodeErrors_),
         MaxAmb(of->MaxAmb), alt_MaxAmb(of->alt_MaxAmb),
         FQWwidth(of->FQWwidth), EWwidth(of->EWwidth),
         RevPrimSeedL(of->RevPrimSeedL),

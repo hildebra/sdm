@@ -104,7 +104,8 @@ const std::string DEFAULT_BarcodeNameSep = "__";
 const std::string DEFAULT_output_qual_offset = "33"; //61 or 33
 const std::string DEFAULT_ignore_IO_errors = "0"; //61 or 33
 const std::string DEFAULT_pairedRD_HD_out = "1"; //1=write /1 or 1:N:00 etc out, has to be surpressed for some applications (dada2)
-
+const std::string DEFAULT_5PR1cut = "0";
+const std::string DEFAULT_5PR2cut = "0";
 
 
 
@@ -470,6 +471,9 @@ public:
 	bool doDemultiplex(){ return bDoMultiplexing; }
 	bool doDereplicate() { return bDoDereplicate; }
 	bool doFilterAtAll() { return b_doFilter; }
+	uint getcut5PR2() { return cut5PR2; }
+	uint getcut5PR1() { return cut5PR1; }
+
 
 	//*************************
 	//DNA statistic collection
@@ -537,7 +541,6 @@ public:
 	vector<vector<string>> hetPrimer;
 	vector<string> SequencingRun;
 	map<string, vector<int>> SequencingRun2id;
-
 
 	// statistics for multithreaded variant
 	//std::vector<StatisticsMultithreaded> statistics_;
@@ -681,6 +684,7 @@ protected:
 	bool bShortAmplicons;//checks for reverse primer on 1st read
 	//minBCLength1_ is Barcode length
 	unsigned int minBCLength1_, minBCLength2_, maxBCLength1_, maxBCLength2_, minPrimerLength_, maxHomonucleotide;
+	uint cut5PR1, cut5PR2;
 	int PrimerErrs,alt_PrimerErrs,barcodeErrors_,MaxAmb, alt_MaxAmb;//allowed max errs per Primer, Tag; max Ambigous Chars(not ACGT)
 	int FQWwidth, EWwidth; //Floating window width for avg quality
 	int RevPrimSeedL; // seed length of primer that will be searched for
