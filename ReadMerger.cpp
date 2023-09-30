@@ -12,7 +12,7 @@ void mergeStats::printHisto(string File) {
 	if (!temp) { cerr << "Could not open outstream to read merger stat file:\n" << File << endl; exit(478); }
 
 	temp << "Pos\tFracFwd\tmismatchFwd\tmatchFwd\tFracRev\tmismatchRev\tmatchRev\n";
-	for (int i = 0; i < maxVS; i++) {
+	for (size_t i = 0; i < (size_t)maxVS; i++) {
 		temp << i << "\t";
 		if (i < matchFwd.size()) {
 			temp << percFwd[i] << "\t" << mismatchFwd[i] << "\t" << matchFwd[i] << "\t";
@@ -60,13 +60,13 @@ void mergeStats::printLogs() {
 
 void mergeStats::logDistri(int p1, int p2, int overlap, bool same) {
 	if (p1>p2) {
-		if (mismatchFwd.size() <= p1) { mismatchFwd.resize(p1 + 1, 0); matchFwd.resize(p1 + 1, 0); }
+		if ((int)mismatchFwd.size() <= p1) { mismatchFwd.resize(p1 + 1, 0); matchFwd.resize(p1 + 1, 0); }
 		if (!same) { mismatchFwd[p1]++; }
 		matchFwd[p1]++;
 	}
 	else {
 		//int i2 = overlap - p2 - 1;
-		if (mismatchRev.size() <= p2) { mismatchRev.resize(p2 + 1, 0); matchRev.resize(p2 + 1, 0); }
+		if ((int)mismatchRev.size() <= p2) { mismatchRev.resize(p2 + 1, 0); matchRev.resize(p2 + 1, 0); }
 		if (!same) { mismatchRev[p2]++; }
 		matchRev[p2]++;
 	}
@@ -81,7 +81,7 @@ void qualStats::printHisto(string File) {
 	temp << "Pos\tAvgQ_r1\tAvgQ_r2\n";
 	int maxVS = max((int)r1.size(), (int)r2.size());
 	//int q11 = int(r1[0]);
-	for (int i = 0; i < maxVS; i++) {
+	for (size_t i = 0; i < (size_t)maxVS; i++) {
 		temp << i <<"\t";
 		if (i < r1.size()) {
 			temp <<  (float(int(r1[i])) /((float)N1[i]))  << "\t";
@@ -181,7 +181,7 @@ double ReadMerger::percentIdentity(std::string_view sequence1, std::string_view 
 
 	if (mismatches == -1) { mismatches = (int)sequence1.length(); }
 
-	for (size_t i = 0; i < sequence1.length(); ++i) {
+	for (int i = 0; i < (int)sequence1.length(); ++i) {
 
 		//match_count+=DNA_IUPAC[256*sequence1[i] + sequence2[i]];
 		match_count += sequence1[i] == sequence2[i];
@@ -354,7 +354,7 @@ bool ReadMerger::findSeed(std::string& sequence1, std::string& sequence2, MergeR
 				(offset >= 0) * int(std::min(sequence2.length() - offset, sequence1.length())) +
 				(offset < 0) * int(std::min(sequence1.length() + offset, sequence2.length()));
 
-			if (overlap < min_overlap_) { offset1 = -1; continue; }
+			if (overlap < (int)min_overlap_) { offset1 = -1; continue; }
 
 			auto pi = percentIdentity(
 				sequence1.c_str() + offset2,
@@ -419,8 +419,8 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	string Seq2 = read2->getSequence();
 	vector<qual_score> Qual1 = read1->getQual();
 	vector<qual_score> Qual2 = read2->getQual();
-	int seq1_length = (int)Seq1.length();
-	int seq2_length = (int)Seq2.length();
+	size_t seq1_length = (int)Seq1.length();
+	size_t seq2_length = (int)Seq2.length();
 
 	int offset1 = read1->merge_offset_;
 	int offset2 = read2->merge_offset_;
@@ -465,23 +465,23 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 		//this is for the head
 		if (read1->merge_offset_) {
 			memcpy(new_seq, Seq2.c_str(), read1->merge_offset_);
-			for (size_t i = 0; i < read1->merge_offset_; i++) {
+			for (int i = 0; i < read1->merge_offset_; i++) {
 				new_qual[i] = Qual2[i];
 			}
 			//            overlap_start = read1->merge_offset_;
 		}
 		else if (read2->merge_offset_) {
 			memcpy(new_seq, Seq1.c_str(), read2->merge_offset_);
-			for (size_t i = 0; i < read2->merge_offset_; i++) {
+			for (int i = 0; i < read2->merge_offset_; i++) {
 				new_qual[i] = Qual1[i];
 			}
 			//            overlap_start = read2->merge_offset_;
 		}
 		//this is for the tail
 		size_t tail_start = overlap + overlap_start;
-		if ((overlap + overlap_start) < read1->merge_offset_ + seq1_length) {
+		if ((overlap + overlap_start) < (size_t)read1->merge_offset_ + seq1_length) {
 			pos1 = int(read2->merge_offset_ + overlap);
-			for (size_t i = tail_start; pos1 < seq1_length && i < new_length; i++, ++pos1) {
+			for (size_t i = tail_start; pos1 < (int)seq1_length && i < new_length; i++, ++pos1) {
 				new_seq[i] = Seq1[pos1];
 				new_qual[i] = Qual1[pos1];
 			}

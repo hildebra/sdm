@@ -653,8 +653,8 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 		return;
 	}
 	
-	bool demultFini = demultiBPperSR > 0 && BPwrittenInSR > demultiBPperSR;
-	bool demultMrgFini = demultiBPperSR > 0 && BPwrittenInSRmerg > demultiBPperSR;
+	bool demultFini = demultiBPperSR > 0 && (uint)BPwrittenInSR > demultiBPperSR;
+	bool demultMrgFini = demultiBPperSR > 0 && (uint) BPwrittenInSRmerg > demultiBPperSR;
 	if (demultFini && demultMrgFini) {
 		return;
 	}
@@ -731,7 +731,7 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d, int p, int BCoffset) {//th
 	if (!this->Demulti2Fls()) {
 		return;
 	}
-	if (demultiBPperSR > 0 && BPwrittenInSR > demultiBPperSR) {
+	if (demultiBPperSR > 0 && (uint)BPwrittenInSR > demultiBPperSR) {
 		return;
 	}
 	int idx = d->getBarcodeNumber() - BCoffset; //correct for BC offset as well..
@@ -795,10 +795,10 @@ void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil,
 		}
 		else {
 			string nfile = path + fil->SampleID[i] + ".1.fq" + gzSuffiz;
-			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, doMC,(size_t)bufS*0.8); }
+			if (openOstreams) { demultiSinglFiles[i][0] = new ofbufstream(nfile.c_str(), writeStatus, doMC,size_t(bufS*0.8) ); }
 			//demultiSinglFilesF[i][0] = nfile;
 			nfile = path + fil->SampleID[i] + ".2.fq" + gzSuffiz;
-			if (openOstreams) { demultiSinglFiles[i][1] = new ofbufstream(nfile.c_str(), writeStatus, doMC, (size_t)bufS*1.2); }
+			if (openOstreams) { demultiSinglFiles[i][1] = new ofbufstream(nfile.c_str(), writeStatus, doMC, size_t (bufS*1.2)); }
 			//demultiSinglFilesF[i][1] = nfile;
 			nfile = path + fil->SampleID[i] + ".merg.fq" + gzSuffiz;
 			if (openOstreams) { demultiMergeFiles[i] = new ofbufstream(nfile.c_str(), writeStatus, doMC, (size_t)bufS); }
@@ -1151,12 +1151,12 @@ void OutputStreamer::writeForWrite(shared_ptr<DNA> d1, int Pair1, int Cstream1,
 	sqfqostrMTX.lock();//lock to ensure read pairs written together
 	//write out read pair 1
 	if (BWriteFastQ) {//write in fastq format
-		if (Cstream1 < fqFile.size()) {
+		if (Cstream1 < (int) fqFile.size()) {
 			*fqFile[Cstream1][Pair1 - 1] << d1->writeFastQ();
 		}
 	}
 	else {//Cstream1 in fasta (and maybe qual) format
-		if (Cstream1 < sFile.size()) {
+		if (Cstream1 < (int) sFile.size()) {
 			*sFile[Cstream1][Pair1 - 1] << d1->writeSeq(b_oneLinerFasta);
 			if (BWriteQual) {
 				*qFile[Cstream1][Pair1 - 1] << d1->writeQual(b_oneLinerFasta);
@@ -1166,12 +1166,12 @@ void OutputStreamer::writeForWrite(shared_ptr<DNA> d1, int Pair1, int Cstream1,
 
 	//write out read pair 2
 	if (BWriteFastQ) {//write in fastq format
-		if (Cstream2 < fqFile.size()) {
+		if (Cstream2 < (int) fqFile.size()) {
 			*fqFile[Cstream2][Pair2 - 1] << d2->writeFastQ();
 		}
 	}
 	else {//Cstream1 in fasta (and maybe qual) format
-		if (Cstream2 < sFile.size()) {
+		if (Cstream2 < (int) sFile.size()) {
 			*sFile[Cstream2][Pair2 - 1] << d2->writeSeq(b_oneLinerFasta);
 			if (BWriteQual) {
 				*qFile[Cstream2][Pair2 - 1] << d2->writeQual(b_oneLinerFasta);
@@ -6278,10 +6278,10 @@ UClinks::UClinks( OptContainer& cmdArgs):
 		derepMapFile = cmdArgs["-derep_map"];
 	}
 	if (cmdArgs.find("-minQueryCov") != cmdArgs.end()) {
-		qCovThr = atof(cmdArgs["-minQueryCov"].c_str());
+		qCovThr = (float) atof(cmdArgs["-minQueryCov"].c_str());
 	}
 	if (cmdArgs.find("-id") != cmdArgs.end()) {
-		perIDmatch = atof(cmdArgs["-id"].c_str());
+		perIDmatch =(float) atof(cmdArgs["-id"].c_str());
 	}
 	if (cmdArgs.find("-count_chimeras") != cmdArgs.end() &&
 		cmdArgs["-count_chimeras"] == "T") {
@@ -6820,14 +6820,14 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 				}
 				getline(ss, segs2, '\t');//tarname
 				getline(ss, segs, '\t');
-				float tLen = atof(segs.c_str());
+				float tLen = (float) atof(segs.c_str());
 				for (uint i = 0; i < 2; i++) {//jump to pos X
 					getline(ss, segs, '\t');
 				}
 				getline(ss, segs, '\t');
-				float matches = atof(segs.c_str());
+				float matches = (float) atof(segs.c_str());
 				getline(ss, segs, '\t');
-				float mapLen = atof(segs.c_str());
+				float mapLen = (float) atof(segs.c_str());
 				perID = matches / mapLen *100.f;
 
 				qCov = mapLen / qLen;

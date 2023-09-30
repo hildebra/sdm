@@ -600,7 +600,7 @@ protected:
 				return true;
 			}
 		}
-		if (max_l > 0 && leng - hindrance > max_l) {
+		if (max_l > 0 && leng - hindrance > (int) max_l) {
 			d->QualCtrl.maxL = true; //sMaxLength(pair_);
 			return true;
 		}
@@ -899,7 +899,7 @@ private:
 	void addUCdo(string,bool );
 	matrixUnit OTUmatSum() {
 		matrixUnit mcnt = 0;
-		for (int i = 0; i < OTUmat.size(); i++) { for (int j = 0; j < OTUmat[i].size(); j++) { mcnt += OTUmat[i][j]; } } 
+		for (uint i = 0; i < OTUmat.size(); i++) { for (size_t j = 0; j < OTUmat[i].size(); j++) { mcnt += OTUmat[i][j]; } } 
 		return mcnt;
 	}
 	void add2OTUmat(const string&, int, matrixUnit);
@@ -1007,7 +1007,7 @@ public:
 	bool saveForWrite_merge(shared_ptr<DNAunique> d,
 		string newHeader="",int curThread=0, bool elseWriteD1=false);
 //bool saveForWriteMT(shared_ptr<DNA> dna, int thread, int pair = 1);
-	Filters* getFilters(int w = -1) { 
+	Filters* getFilters(size_t w = -1) { 
 		if (w <= -1) { return  MFil; 
 		} else { 
 			assert(w < subFilter.size());

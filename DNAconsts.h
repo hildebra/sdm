@@ -105,8 +105,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 //2.10: added -5PR1cut and -5PR2cut flags (cut beginning X nts)
+//2.11: added ".1" ".2" end of fastq header pairs; removed a few warnings
 
-static const float sdm_version = 2.10f;
+static const float sdm_version = 2.11f;
 static const char* sdm_status = "beta";
 
 

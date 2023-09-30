@@ -165,14 +165,22 @@ void remove_paired_info(string &s, short RP) {
 		f1 = string::npos;
 	}
 	if (RP == 0) {
-		f1 = s.find("/1");
+		f1 = s.rfind("/1");
+		if (f1 == string::npos) { 
+			f1 = s.rfind(".1");
+		}
 	}
 	else if (RP == 1) {
-		f1 = s.find("/2");
+		f1 = s.rfind("/2");
+		if (f1 == string::npos) {
+			f1 = s.rfind(".2");
+		}
 	}
 	else {
-		f1 = s.find("/1");
-		if (f1 == string::npos) { f1 = s.find("/2"); }
+		f1 = s.rfind("/1");
+		if (f1 == string::npos) { f1 = s.rfind("/2"); }
+		if (f1 == string::npos) { f1 = s.rfind(".1"); }
+		if (f1 == string::npos) { f1 = s.rfind(".2"); }
 	}
 	if (f1 != string::npos && f1 == s.size() - 2) {
 		s = s.substr(0, f1);
@@ -969,7 +977,8 @@ int DNA::matchSeq(std::string PrSt,int Err,int tolerance, int startPos){
 	int PrL = (int) PrSt.length();
 	int mthL = this->length() - PrL;
 	//int wantSc = PrL - Err;
-	int endPos(-1),pos(startPos), Prp(0), c_err(0),Prp2(0);
+	int endPos(-1),pos(startPos), Prp(0), c_err(0),Prp2(0), c_points(0), point_aim(1);
+	point_aim = max(1, int(PrL / 2));
 	//bool res(false);
 	for (; pos< tolerance; pos++){
 		if (pos > mthL) {	break;	}
@@ -984,8 +993,9 @@ int DNA::matchSeq(std::string PrSt,int Err,int tolerance, int startPos){
 			if (!matchDNA(sequence_[Prp2],PrSt[Prp])){c_err++;if (c_err > Err){break;}}
 #endif
 			Prp++; Prp2++;
+			if (sequence_[Prp2] != 'N') { c_points++; }
 		} while ( Prp < PrL);
-		if (c_err<=Err ){endPos=pos;break;}
+		if (c_err<=Err && c_points >= point_aim){endPos=pos;break;}
 	}
 	//if(!suc){pos=-1;}
 	return endPos;
@@ -1020,19 +1030,22 @@ int DNA::matchSeqRev(const string& PrSt,int Err, int check_l,
 	if (coverage==0){coverage=5;} //default seed set to 5
 	int SeL = (int) sequence_.size();
 	//int wantSc = PrL - Err;
-	int pos(SeL-coverage), Prp(0), c_err(0),endPos(-1);
+	int pos(SeL-coverage), Prp(0), c_err(0), endPos(-1), c_points(0), point_aim(1);
 	for (; pos> check_l; pos--){
-		c_err=0;Prp=0;
+		c_err = 0; Prp = 0; c_points = 0;
 		int PrL2 = min(PrL,SeL-pos);
+		point_aim = max(1,int(PrL2 / 2)+1);
 		do {
 #ifdef _NEWMATCH
-			c_err += DNA_IUPAC[sequence_[pos + Prp] + 256 * PrSt[Prp]]; if (c_err > Err){break;}
+			uint lpos = pos + Prp;
+			c_err += DNA_IUPAC[sequence_[lpos] + 256 * PrSt[Prp]]; if (c_err > Err){break;}
 #else
 			if(!matchDNA(sequence_[pos+Prp],PrSt[Prp])){c_err++;if (c_err > Err){break;}	}
 #endif
 			Prp++;
+			if (sequence_[lpos] != 'N') { c_points++; }
 		} while (Prp < PrL2);
-		if (c_err<=Err ){
+		if (c_err<=Err && c_points >=point_aim){
 			endPos=pos;break;}
 	}
 	//secondary check for last few NT's
@@ -1300,11 +1313,16 @@ void DNA::changeHeadPver(int ver){
 	reverseTS(sequence_);
 }
 */
-bool DNA::sameHead(shared_ptr<DNA> d){
-	if (d == NULL){return false;}
-	return sameHead(d->getShortId());
+bool DNA::sameHeadPosFree(shared_ptr<DNA> d) {
+	if (d == NULL) { return false; }
+	return (getPositionFreeId() == d->getPositionFreeId());
+
+	//return sameHead(d->getShortId());
 }
+
 bool DNA::sameHead(const string& oID) {
+	
+
 	size_t pos = getShorterHeadPos(id_);
 	if (oID.size() < pos) { return false; }
 	if (id_.substr(0, pos) == oID.substr(0, pos)) {
@@ -1312,6 +1330,7 @@ bool DNA::sameHead(const string& oID) {
 	}
 	return false;
 }
+
 
 
 void DNA::setPassed(bool b){

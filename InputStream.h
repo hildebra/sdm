@@ -144,7 +144,7 @@ public:
 		cdbg("Ini ibufstream");
 		keeper = new char[bufS];
 		keeperW = new char[bufS];
-		for (int x = 0; x < bufS; x++) {
+		for (uint x = 0; x < bufS; x++) {
 			keeper[x] = EOF; keeperW[x] = EOF;
 		}
 		
@@ -402,8 +402,8 @@ std::ptrdiff_t len_common_prefix_base(char const a[], char const b[]);
 //static mutex output_mtx;
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
-	ofbufstream(size_t bufferS):file("T"), modeIO(ios::app), used(0), usedW(0),
-		coutW(true), isGZ(false), doMC(false){
+	ofbufstream(size_t bufferS):file("T"), keeper(0), keeperW(0), modeIO(ios::app), used(0), usedW(0),
+		coutW(true), isGZ(false), doMC(false), bufS(0),hasKickoff(false){
 		int x = 0;
 	}
 	ofbufstream(const string IF, int mif, bool isMC = false, size_t bufferS = 20000);
@@ -678,7 +678,9 @@ public:
 	void setpairFWD(){ read_position_ = 0; }
 	void setpairREV(){ read_position_ = 1; }
 	int getReadMatePos() { return (int) read_position_; }
-	bool sameHead(shared_ptr<DNA>);
+	
+	bool sameHeadPosFree(shared_ptr<DNA>);
+	
 	bool sameHead(const string&);
 	//inline void reverseTranscribe();
 	void setTempFloat(float i){tempFloat = i;}

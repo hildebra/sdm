@@ -318,8 +318,8 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	//if ( MD->mergeReads()) {MD->findSeedForMerge(tdn[0], tdn[1],curThread);	}
 	//needed to eval qual of seed
 	if (read2notNull) {//check that this is really correct read pair
-		if (!tdn[0]->sameHead(tdn[1])) {
-			cerr << "Error: invalid paired read pairs: read1:" << tdn[0]->getShortId() << "read2:" << tdn[1]->getShortId()<<endl;
+		if (!tdn[0]->sameHeadPosFree(tdn[1])) {
+			cerr << "Error: invalid paired read pair headers:\n  read1 head: " << tdn[0]->getShortId() << "\n  read2 head: " << tdn[1]->getShortId()<<endl;
 			exit(152);
 		}
 	}
