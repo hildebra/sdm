@@ -164,7 +164,8 @@ void remove_paired_info(string &s, short RP) {
 		s = s.substr(0, f1);
 		f1 = string::npos;
 	}
-	if (RP == 0) {
+	size_t  tarPos = s.size() - 2;
+	/*if (RP == 0) {
 		f1 = s.rfind("/1");
 		if (f1 == string::npos) { 
 			f1 = s.rfind(".1");
@@ -176,13 +177,13 @@ void remove_paired_info(string &s, short RP) {
 			f1 = s.rfind(".2");
 		}
 	}
-	else {
-		f1 = s.rfind("/1");
-		if (f1 == string::npos) { f1 = s.rfind("/2"); }
-		if (f1 == string::npos) { f1 = s.rfind(".1"); }
-		if (f1 == string::npos) { f1 = s.rfind(".2"); }
-	}
-	if (f1 != string::npos && f1 == s.size() - 2) {
+	else {*/
+	f1 = s.rfind("/1");
+	if (f1 == string::npos ||  f1 != tarPos) { f1 = s.rfind("/2"); }
+	if (f1 == string::npos || f1 != tarPos) { f1 = s.rfind(".1"); }
+	if (f1 == string::npos || f1 != tarPos) { f1 = s.rfind(".2"); }
+	//}
+	if (f1 != string::npos && f1 == tarPos) {
 		s = s.substr(0, f1);
 	}
 }
