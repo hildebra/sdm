@@ -331,9 +331,15 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	//demultiplex write? do this first before DNA is deleted..
 	//at this point the tagIDX *MUST* be correctly set + BCoffset (in the DNA object, tagIDX doesn;t matter)
 	cdbg("w2D ");
-	MD->write2Demulti(tdn[0], tdn[1], curFil->getBCoffset(), curThread);
-	MD->dereplicateDNA(tdn[0], tdn[1]);
-	MD->writeNonBCReads(tdn[0], tdn[1]);
+	if (MD->Demulti2Fls()) {
+		MD->write2Demulti(tdn[0], tdn[1], curFil->getBCoffset(), curThread);
+	}
+	if (MD->doDeriplicate()) {
+		MD->dereplicateDNA(tdn[0], tdn[1]);
+	}
+	if (MD->doWriteNonBCrds()) {
+		MD->writeNonBCReads(tdn[0], tdn[1]);
+	}
 
     // Test
     /*if (OutStreamer->b_merge_pairs_derep_ && tdn[0]->merge_seed_pos_ > 0) {
@@ -344,10 +350,11 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	
 	//writing of pairs needs to be mutex locked 
 	int Cstr1(100), Cstr2(100);
-	cdbg("sFW\n");
+	//cdbg("sFW\n");
 	bool owr1 = MD->saveForWrite(tdn[0], idx1, curThread, Cstr1,false);
 	bool owr2 = MD->saveForWrite(tdn[1], idx2, curThread, Cstr2,false);
-	MD->writeForWrite(tdn[0],idx1,Cstr1,tdn[1],idx2,Cstr2);//mutex version to ensure read pairs together..
+	//mutex version to ensure read pairs together..
+	MD->writeForWrite(tdn[0],idx1,Cstr1,tdn[1],idx2,Cstr2);
 
 	if (!owr1 || (!owr2 && read2notNull)) {
 		return false;
@@ -399,7 +406,7 @@ bool read_paired(OptContainer& cmdArgs, OutputStreamer* MD,
 	while ( cont ) {
 		//bool sync = false;
 		//tests of different ways to read files..
-		multi_tmp_lines* tmpO = new multi_tmp_lines(); // will be deleted inside multi_read_paired_STRready function
+		multi_tmp_lines* tmpO = DBG_NEW multi_tmp_lines(); // will be deleted inside multi_read_paired_STRready function
 		if (false) {
 			IS->getDNAlines(tmpLines[0], 0);
 			IS->getDNAlines(tmpLines[1], 1);
@@ -803,7 +810,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 
 //	mainFilter->ini_filestruct(cmdArgs);
 	//setup once at start
-	vector<ReadMerger*> merger;
+	vector<ReadMerger*> merger(0);
 	//contains info on input files, format, order etc
 	filesStr files;
 
@@ -841,7 +848,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
             threads = stoi(cmdArgs["-threads"]);
         }
 		/*if ( threads > 1) {
-			pool = new ThreadPool(threads);
+			pool = DBG_NEW ThreadPool(threads);
 		}*/
 		cerr << "Run with " << threads << " cores.";
     }
@@ -850,7 +857,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 	merger.resize(threads, nullptr);
 	bool detailedMergeStats(false);
 	for (int x = 0; x < threads; x++) {
-		merger[x] = new ReadMerger(detailedMergeStats);
+		merger[x] = DBG_NEW ReadMerger(detailedMergeStats);
 	}
 
 
@@ -908,7 +915,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 			//}
 			//in this case also needs to recheck merger prob
 			if (merger[0] != NULL) {
-				ReadMerger * cMerg = new ReadMerger();
+				ReadMerger * cMerg = DBG_NEW ReadMerger();
 				for (size_t x = 0; x < merger.size(); x++) {
 					cMerg->addRMstats(merger[x]);
 				}
@@ -952,7 +959,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		//OutputStreamer OutStreamer = OutputStreamer(&filter, cmdArgs, writeStatus, RDSset);
 
 		//OutputStreamer also contains subfilters for MC processing and logging of reads
-		OutputStreamer* OutStreamer = new OutputStreamer(filter, cmdArgs, 
+		OutputStreamer* OutStreamer = DBG_NEW OutputStreamer(filter, cmdArgs, 
 			writeStatus, RDSset, threads,"");
 		OutStreamer->attachDereplicator(dereplicator);
 		OutStreamer->attachReadMerger(merger);
@@ -1099,10 +1106,10 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
             ucl->writeOTUmatrix(cmdArgs["-otu_matrix"]);
         }
         //polished OTU seeds need to be written after OTU matrix (renaming scheme)
-        OutputStreamer* MDx = new OutputStreamer(mainFilter, cmdArgs, 
+        OutputStreamer* MDx = DBG_NEW OutputStreamer(mainFilter, cmdArgs, 
 			ios::out, RDSset,0);
 		vector<ReadMerger*> DerepM = vector<ReadMerger*>(1,NULL);
-		DerepM[0] = new ReadMerger(false);
+		DerepM[0] = DBG_NEW ReadMerger(false);
 		MDx->attachReadMerger(DerepM);
         mainFilter->setMultiDNA(MDx);
         ucl->writeNewSeeds(MDx, mainFilter, false);
@@ -1110,7 +1117,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		//not used any longer
 		/*
 		//new fastas also need to be written..
-        MDx.reset(new OutputStreamer(mainFilter, cmdArgs, 
+        MDx.reset(DBG_NEW OutputStreamer(mainFilter, cmdArgs, 
 			ios::app, RDSset,1,".ref"));//force fna output
         mainFilter->setMultiDNA(MDx );
         ucl->writeNewSeeds(MDx, mainFilter, true, true);
@@ -1137,7 +1144,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 
 		//last time merger stats to write
 		if (merger[0] != nullptr) {
-			ReadMerger* cMerg = new ReadMerger();
+			ReadMerger* cMerg = DBG_NEW ReadMerger();
 			for (size_t x = 0; x < merger.size(); x++) {
 				cMerg->addRMstats(merger[x]);
 			}
@@ -1225,7 +1232,9 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
     //delete pool;
 	//ReadMerger no longer needed
 	for (size_t x = 0; x < merger.size(); x++) {
-		delete merger[x];
+		if (merger[x] != nullptr) {
+			delete merger[x];
+		}
 	}
 
 }
@@ -1274,7 +1283,8 @@ void rewriteNumbers(OptContainer& cmdArgs){
 }
 
 void Announce_sdm(){
-    cerr << endl << "This is sdm (simple demultiplexer) " << sdm_version << " " << sdm_status << ".\n" << endl ;
+    cerr << endl << "This is sdm (simple demultiplexer) " << 
+		sdm_version << " " << sdm_status << ".\n" << endl ;
 }
 void help_head(){
     cout <<"------------------------------\nThis is sdm version "<<sdm_version <<" "<< sdm_status <<" help print\n------------------------------\n"<<endl;

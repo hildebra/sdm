@@ -169,7 +169,7 @@ public:
 	bool getbLvsQlogs() { return bLvsQlogs; }
 	//void addDNAStatsMT(shared_ptr<DNA> d, data_MT *data);
 	void calcSummaryStats(float remSeqs, unsigned int min_l, float min_q);
-	float calc_median(vector<unsigned int>& in, float perc);
+	float calc_median(vector<uint>& in, float perc);
 	void add_median2histo(vector<unsigned int>& in, vector<unsigned int>& histo);
 	static void addMedian2Histo(unsigned int in, vector<unsigned int>& histo);
 	void addMeanStats(unsigned int NT, unsigned int Qsum, float AccErr) {
@@ -248,8 +248,8 @@ public:
 		PostFilt(NULL),PreFilt(NULL)
 	{
 		cdbg("Ini collectstats");
-		PostFilt = new ReportStats();
-		PreFilt = new ReportStats();
+		PostFilt = DBG_NEW ReportStats();
+		PreFilt = DBG_NEW ReportStats();
 
 		
 	}
@@ -1010,7 +1010,7 @@ public:
 	Filters* getFilters(size_t w = -1) { 
 		if (w <= -1) { return  MFil; 
 		} else { 
-			assert(w < subFilter.size());
+			//assert(w < subFilter.size());
 			return subFilter[w]; 
 		} 
 	}
@@ -1055,7 +1055,6 @@ public:
 		return b_merge_pairs_;
 	}
 
-    bool b_doDereplicate;
     atomic_size_t merged_counter_ = 0;
     atomic_size_t total_read_preMerge_ = 0;
 
@@ -1067,6 +1066,10 @@ public:
 	uint getBPwrittenInSRmerg(void) { return BPwrittenInSRmerg; }
 
 	void attachReadMerger(vector<ReadMerger*> merg) { merger = merg; }
+	bool Demulti2Fls() { return bDoDemultiplexIntoFiles; }
+	bool doDeriplicate() { return	b_doDereplicate; }
+	bool doWriteNonBCrds() { return fqNoBCFile.size() == 2; }
+
 
 private:
 	void setwriteMode(std::ios_base::openmode wm) {	wrMode = wm;}
@@ -1158,9 +1161,9 @@ private:
 
 
 	//demultiplexing into files
-	bool Demulti2Fls() { return bDoDemultiplexIntoFiles; }
-
 	bool bDoDemultiplexIntoFiles;
+	bool b_doDereplicate;
+
 	//demultiplex files into these
 	vector<vector<ofbufstream*>> demultiSinglFiles;
 	//vector<vector<string>> demultiSinglFilesF;

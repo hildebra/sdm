@@ -142,8 +142,8 @@ public:
 			exit(236);
 		}
 		cdbg("Ini ibufstream");
-		keeper = new char[bufS];
-		keeperW = new char[bufS];
+		keeper = DBG_NEW char[bufS];
+		keeperW = DBG_NEW char[bufS];
 		for (uint x = 0; x < bufS; x++) {
 			keeper[x] = EOF; keeperW[x] = EOF;
 		}
@@ -157,13 +157,13 @@ public:
 		}
 		if (isGZ) {
 #ifdef _gzipread
-			primary = new zstr::ifstream(file.c_str());
+			primary = DBG_NEW zstr::ifstream(file.c_str());
 #else
 			cerr << "gzip not supported in your sdm build\n (ifbufstream) " << file; exit(50);
 #endif
 		}
 		else {
-			primary = new ifstream(file, modeIO);
+			primary = DBG_NEW ifstream(file, modeIO);
 		}
 		//primary->set_rdbuf(0);
 
@@ -193,9 +193,9 @@ public:
 	~ifbufstream() {
 		cdbg("destroy ibufstream ");
 		input_mtx.lock();
-		if (hasKickoff) { hasKickoff = false; readKickoff.get(); }
-		delete[] keeper;
-		if (keeperW != nullptr) { delete[] keeperW; }
+		if (hasKickoff) { readKickoff.get(); hasKickoff = false;}
+		delete[] keeper; 
+		delete[] keeperW; 
 		delete primary;
 		input_mtx.unlock();
 	}
@@ -204,7 +204,7 @@ public:
 		at = 0;
 		primary->clear();
 		delete primary;
-		primary = new ifstream(file, modeIO);
+		primary = DBG_NEW ifstream(file, modeIO);
 		input_mtx.unlock();
 	}
 	void setMC(bool b) { doMC = b; }
@@ -324,12 +324,10 @@ private:
 			//keeperW[XX] = char_traits<char>::eof();
 			return false;
 		}
-		//input_mtx2.lock();
 		primary->read(keeperW, bufS);	
 		if (!*(primary)) {
 			bufSW = (size_t)primary->gcount() + 1;
 		}
-		//input_mtx2.unlock();
 		return true;
 	}
 	bool kickOff() {
@@ -382,7 +380,7 @@ private:
 	istream* primary;
 	future<bool> readKickoff;
 	size_t bufS, bufSW ;
-	mutex localMTX, input_mtx2;
+	mutex localMTX;// , input_mtx2;
 	shared_mutex input_mtx;
 };
 
@@ -927,7 +925,7 @@ public:
 
 	void prepSumQuals() {
 		if (!quality_sum_per_base_) {
-			quality_sum_per_base_ = new uint64_t[length()];
+			quality_sum_per_base_ = DBG_NEW uint64_t[length()];
 			for (uint i = 0; i < length(); i++) {
 				quality_sum_per_base_[i] = qual_[i];
 			}

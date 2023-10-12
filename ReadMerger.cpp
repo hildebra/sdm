@@ -449,7 +449,7 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 
 	//        std::cout << "newlength> " << new_length << std::endl;
 	//string new_seq = string(new_length + 1,'N');//
-	char* new_seq = { new char[new_length + 1] };
+	char* new_seq = { DBG_NEW char[new_length + 1] };
 	//char new_seq[new_length + 1];
 	new_seq[new_length] = '\0';
 	std::vector<qual_score> new_qual(new_length);

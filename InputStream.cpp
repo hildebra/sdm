@@ -285,21 +285,21 @@ string detectSeqFmt(const string inF) {
 		if (fileS != "") {
             // auto detect gzip
 #ifdef _gzipread
-            fnax = new zstr::ifstream(fileS.c_str(), ios::in);
+            fnax = DBG_NEW zstr::ifstream(fileS.c_str(), ios::in);
 #else
-            fnax = new ifstream(fileS.c_str(), ios::in);
+            fnax = DBG_NEW ifstream(fileS.c_str(), ios::in);
 #endif
 		    
 //			if (isGZfile(fileS)) {
 //#ifdef _gzipread
 //				file_type = "gzipped fasta file";
-//				fnax = new igzstream(fileS.c_str(), ios::in);
+//				fnax = DBG_NEW igzstream(fileS.c_str(), ios::in);
 //#else
 //				cerr << "gzip not supported in your sdm build\n" << fileS; exit(50);
 //#endif
 //			}
 //			else {
-//				fnax = new ifstream(fileS.c_str(), ios::in);
+//				fnax = DBG_NEW ifstream(fileS.c_str(), ios::in);
 //
 //			}
 
@@ -1256,7 +1256,7 @@ void DNA::writeFastQ(string& ret, bool newHD) {
 	}
 	ret += sequence_.substr(0, this->length()) + "\n";
 	ret += "+\n" ;//new_id_<<endl;
-	//char* qual_traf_ = new char[qual_.size()+1];
+	//char* qual_traf_ = DBG_NEW char[qual_.size()+1];
 	ret += qual_traf_ + "\n";
 }
 /*
@@ -1281,7 +1281,7 @@ void DNA::writeFastQEmpty(ostream& wr) {
 	wr << "@" << new_id_ << endl;
 	wr << "" << endl;
 	wr << "+" << endl;//new_id_<<endl;
-	//char* qual_traf_ = new char[qual_.size()+1];
+	//char* qual_traf_ = DBG_NEW char[qual_.size()+1];
 	wr << "" << endl;
 	//delete [] qual_traf_;
 }
@@ -2139,7 +2139,7 @@ void InputStreamer::jumpToNextDNA(bool& stillMore, int pos) {
 	    // Read fasta entry
 		stillMore = read_fasta_entry(fasta_istreams[pos], quality_istreams[pos], dnaTemp1[pos], dnaTemp2[pos], lnCnt[pos]);
         dnaTemp1[pos] = dnaTemp2[pos];
-		dnaTemp2[pos].reset(new DNA("", ""));
+		dnaTemp2[pos].reset(DBG_NEW DNA("", ""));
 	} else {
 		//jmp_fastq(*fastq_istreams[pos], lnCnt[pos]);
 		fastq_istreams[pos]->jumpLines(4);
@@ -2654,7 +2654,7 @@ void InputStreamer::openMIDseqs(string p,string in){
 	string tmp = (p + in);
 	bool doMC = num_threads > 1;
 
-	fastq_istreams[2] = new ifbufstream(tmp, (size_t)round(INPUT_BUFFER_SIZE*0.6),doMC);
+	fastq_istreams[2] = DBG_NEW ifbufstream(tmp, (size_t)round(INPUT_BUFFER_SIZE*0.6),doMC);
 	if (fastq_istreams[2]->eof()) {
 		cerr << "\nCouldn't find " << file_type << " " << tmp << "!\n Aborting..\n";		exit(4);
 	}
@@ -2791,7 +2791,7 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 	if (!p1.empty()){ // first file exists
 		file_type = "fastq file 1";
 		//setup buffer of different sizes for p1,p2 to avoid simultaneous read
-		fastq_istreams[0] = new ifbufstream(p1, (size_t)round(bufS*0.8), doMC);
+		fastq_istreams[0] = DBG_NEW ifbufstream(p1, (size_t)round(bufS*0.8), doMC);
 		if (fastq_istreams[0]->eof()){ 
 			cerr << "\nCouldn't find " << file_type << " " << p1 << "!\n Aborting..\n";		exit(4); 
 		}
@@ -2799,7 +2799,7 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 	//second pair_
 	if (!p2.empty()){
 		file_type = "fastq file 2";
-		fastq_istreams[1] = new ifbufstream(p2, (size_t)round(bufS * 1.2), doMC);
+		fastq_istreams[1] = DBG_NEW ifbufstream(p2, (size_t)round(bufS * 1.2), doMC);
 		if (fastq_istreams[1]->eof()) {
 			cerr << "\nCouldn't find " << file_type << " " << p2 << "!\n Aborting..\n";		exit(4);
 		}
@@ -2864,8 +2864,8 @@ bool InputStreamer::setupFastaQual(string path, string sequenceFile, string qual
 	}
 
 	numPairs = paired;
-	dnaTemp1[0].reset(new DNA("", ""));
-	dnaTemp2[0].reset(new DNA("", ""));
+	dnaTemp1[0].reset(DBG_NEW DNA("", ""));
+	dnaTemp2[0].reset(DBG_NEW DNA("", ""));
     
     fastaFilepathTemp[0] = path + sequenceFile;
     qualityFilepathTemp[0] = path + qualityFile;
@@ -2893,7 +2893,7 @@ bool InputStreamer::setupFastaQual2(string sequenceFile, string qualityFile, str
 	bool doMC = num_threads > 1;
 	//        INPUT   file
 	if (sequenceFile != "") { // sequence not empty
-		fasta_istreams[0] = new ifbufstream(sequenceFile.c_str(), (size_t)round(iBufS * 0.4), doMC);
+		fasta_istreams[0] = DBG_NEW ifbufstream(sequenceFile.c_str(), (size_t)round(iBufS * 0.4), doMC);
 
 		if (fasta_istreams[0]->eof()) {
 		    cerr << "\nCouldn't find " << fileType << " file \"" << sequenceFile << "\"!\n Aborting..\n";
@@ -2902,7 +2902,7 @@ bool InputStreamer::setupFastaQual2(string sequenceFile, string qualityFile, str
 	}
 	//quality file
 	if (!qualityFile.empty()) {
-		quality_istreams[0] = new ifbufstream(qualityFile, (size_t)round(iBufS*0.5),doMC);
+		quality_istreams[0] = DBG_NEW ifbufstream(qualityFile, (size_t)round(iBufS*0.5),doMC);
 		if (quality_istreams[0]->eof()) {
 			cerr << "\nCouldn't find " << file_typeq << " file \"" << qualityFile << "\"!\n Running in no qual_ filter mode\n";
 			qualAbsent = true;
@@ -2921,7 +2921,7 @@ bool InputStreamer::setupFastaQual2(string sequenceFile, string qualityFile, str
 		} else {
 			cerr << "Reading Fasta.\n";
 		}
-        //quality_istreams[0] = new ifstream();
+        //quality_istreams[0] = DBG_NEW ifstream();
 		quality_istreams[0] = nullptr;
 		qualAbsent = true;
 	}
@@ -2931,14 +2931,14 @@ void InputStreamer::setupFna(string fileS){
 	allStreamClose();
 	resetLineCounts();
 	numPairs = 1;
-	dnaTemp1[0].reset(new DNA("", "")); dnaTemp2[0].reset(new DNA("", ""));
+	dnaTemp1[0].reset(DBG_NEW DNA("", "")); dnaTemp2[0].reset(DBG_NEW DNA("", ""));
 	setupFastaQual2(fileS, "","seq");
 	/*cerr << "Reading Fasta file.\n" << fileS << endl;
 	string file_type = "seq";
 	//        INPUT   file
 	if (isGZfile(fileS)){
 #ifdef _gzipread
-		fasta_istreams[0] = new igzstream(fileS.c_str(), ios::in);
+		fasta_istreams[0] = DBG_NEW igzstream(fileS.c_str(), ios::in);
 		file_type = "gzipped seq";
 #else
 		cerr << "gzip not supported in your sdm build"; exit(50);
@@ -2946,11 +2946,11 @@ void InputStreamer::setupFna(string fileS){
 	}
 	else {
 		//fna[0].open(fileS.c_str(), ios::in);
-		fasta_istreams[0] = new ifstream(fileS.c_str(), ios::in);
+		fasta_istreams[0] = DBG_NEW ifstream(fileS.c_str(), ios::in);
 	}
 	if (!fasta_istreams[0]){ cerr << "\nCouldn't find "<<file_type<<" file \"" << fileS << "\"!\n Aborting..\n"; exit(4); }
 	//set quality to empty read buffer
-	quality_istreams[0] = new ifstream();
+	quality_istreams[0] = DBG_NEW ifstream();
 	qualAbsent = true;
 	*/
 }
@@ -3003,20 +3003,20 @@ ofbufstream::ofbufstream(const string IF, int mif, bool isMC , size_t bufferS ) 
 	}
 	if (file == "T") {//write to ostream
 		coutW = true;
-		keeper = new char[0];
-		keeperW = new char[0];
+		keeper = DBG_NEW char[0];
+		keeperW = DBG_NEW char[0];
 		return;
 	}
-	keeper = new char[bufS];
+	keeper = DBG_NEW char[bufS];
 	//second keeper swappable with keeper to always have one added to, one written out (kickoff system)
-	keeperW = new char[bufS];
+	keeperW = DBG_NEW char[bufS];
 	if (isGZfile(IF)) { //write a gzip out??
 		isGZ = true;
 #ifndef _gzipread
 		cerr << "ofbufstream::gzip outpout not supported in your sdm build\n" << file << endl;
 		exit(51);
 #endif
-		// ostream* os = new zstr::ofstream("output.txt", std::ios::app);
+		// ostream* os = DBG_NEW zstr::ofstream("output.txt", std::ios::app);
 	}
 }
 ofbufstream::~ofbufstream() {
@@ -3045,14 +3045,15 @@ void ofbufstream::activate() {
 	}
 	if (isGZ) {
 #ifdef _gzipread
-		primary = new zstr::ofstream(file.c_str(), std::ios::app);
+		primary = DBG_NEW zstr::ofstream(file.c_str(), std::ios::app);
 #else
 		cerr << "ofbufstream::gzip outpout not supported in your sdm build\n" << file << endl;
 		exit(51);
 #endif
 	}
 	else {
-		primary = new ofstream(file.c_str(), ios::app);
+		//cout << "new str" << endl;
+		primary = DBG_NEW ofstream(file.c_str(), ios::app);
 	}
 }
 void ofbufstream::deactivate() {
@@ -3080,16 +3081,19 @@ void ofbufstream::operator<< (const string& X) {
 		cout << X;
 		return;
 	}
-	append_mtx_.lock();
 	size_t at = 0;
+	append_mtx_.lock();
+	if (used + lX >= bufS) {
+		writeStream();
+	}
 	while (at < lX) {
-		if (used >= bufS) {
-			writeStream();
-		}
 		keeper[used] = X[at];
 		used++; at++;
+		if (used >= bufS) {
+			//should normally not be called.. but in case of big X and small buff might be needed..
+			writeStream();
+		}
 	}
-
 	append_mtx_.unlock();
 }
 
@@ -3101,20 +3105,21 @@ void ofbufstream::writeStream(bool doKickoff ) {
 	}
 	//do this first to prevent keeper/keeperW getting corrupted
 	if (hasKickoff) { writeKickoff.get(); hasKickoff = false; }
-	bool closeThis = true;
+	bool closeThis = false;
 	if (primary == nullptr) {
 		this->activate();
 		closeThis = false;
 	}
-	//swap opeartion
+	//swap operation
 	output_mtx.lock();
-	char* keeperTmp = keeperW;
+	/*char* keeperTmp = keeperW;
 	keeperW = keeper;
-	keeper = keeperTmp;
+	keeper = keeperTmp;*/
+	swap(keeper, keeperW);
 	//rewrite keeperW with keeper, so append can continue..
 	//strcpy(keeperW, keeper);
 	output_mtx.unlock();
-	//keeper = new char[bufS];
+	//keeper = DBG_NEW char[bufS];
 	//if (false) {
 	/*if ( pool ) {
 		// With multithreading

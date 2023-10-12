@@ -40,15 +40,32 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //disable win warning about fopen
 #define _CRT_SECURE_NO_WARNINGS 
 
+//better mem leak reports
+#define _CRTDBG_MAP_ALLOC
 
 
 //#define ZSTR
 
 //read gzip'd files using zlib.h
 #if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
+
+//#include "windows.h"
+//find memleaks in VS:
+#define _DEBUG
+#include <stdlib.h>
+#include <crtdbg.h>
+
 #else
 //#define _notgzip
 #define _gzipread
+#endif
+
+#ifdef _DEBUG
+#define DBG_NEW new ( _NORMAL_BLOCK , __FILE__ , __LINE__ )
+// Replace _NORMAL_BLOCK with _CLIENT_BLOCK if you want the
+// allocations to be of _CLIENT_BLOCK type
+#else
+#define DBG_NEW new
 #endif
 
 //DEBUG mode: more output
@@ -107,7 +124,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //2.10: added -5PR1cut and -5PR2cut flags (cut beginning X nts)
 //2.11: added ".1" ".2" end of fastq header pairs; removed a few warnings
 
-static const float sdm_version = 2.11f;
+static const float sdm_version = 2.13f;
 static const char* sdm_status = "beta";
 
 
