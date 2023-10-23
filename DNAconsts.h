@@ -51,7 +51,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //#include "windows.h"
 //find memleaks in VS:
-#define _DEBUG
+//#define _DEBUG
 #include <stdlib.h>
 #include <crtdbg.h>
 
@@ -123,8 +123,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //2.10: added -5PR1cut and -5PR2cut flags (cut beginning X nts)
 //2.11: added ".1" ".2" end of fastq header pairs; removed a few warnings
+//2.13: fixed mem leak in output
+//2.14: new model of preallocating space for input strings
 
-static const float sdm_version = 2.13f;
+static const float sdm_version = 2.14f;
 static const char* sdm_status = "beta";
 
 

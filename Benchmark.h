@@ -18,18 +18,42 @@ class Benchmark {
     long time_sum = 0;
     long dummy_time;
     time_point<high_resolution_clock> start_time;
+    time_point<high_resolution_clock> last_time;
 
 public:
     Benchmark(string name) : name(name) {
         auto start_time_dummy = high_resolution_clock::now();
 
         start_time = high_resolution_clock::now();
+        last_time = start_time;
         auto stop_time = high_resolution_clock::now();
 
         auto stop_time_dummy = high_resolution_clock::now();
         auto duration_dummy = duration_cast<microseconds>(stop_time_dummy - start_time_dummy);
 
         dummy_time = (long)duration_dummy.count();
+    }
+
+    uint now_total_secs() {
+        auto now_time = high_resolution_clock::now();
+        auto duration = duration_cast<microseconds>(now_time - start_time);
+        long time_loc = (long)duration.count();
+        uint secs = time_loc / 1000000;
+        return secs;
+    }
+
+    float now_interval_secs(int decimals=0) {
+        auto now_time = high_resolution_clock::now();       
+        auto duration = duration_cast<microseconds>(now_time - last_time);
+        float time_loc = (float)duration.count();
+        float secs = time_loc / 1000000.f;
+        last_time = now_time;
+        //convert decimal places
+        if (decimals > 0) {
+            const double multiplier = std::pow(10.0, decimals);
+            secs = std::ceil(secs * multiplier) / multiplier;
+        }
+        return secs;
     }
 
     void start() {

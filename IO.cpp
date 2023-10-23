@@ -119,7 +119,8 @@ bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 			break;
 		}
 	}
-	delete tmpLines;
+	//delete tmpLines;
+	//no longer needed..
 	return isOK;
 }
 bool read_paired_STRready(vector< vector< string>> tmpLines,
@@ -154,7 +155,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	//MD->checkFastqHeadVersion(tdn[0]);
 	//testreadpair.lock();
 
-	cdbg("read_paired_DNAready"+ tdn[0]->getId()+"\n");
+	//cdbg("read_paired_DNAready"+ tdn[0]->getId()+"\n");
 
 	Filters* curFil = MD->getFilters(curThread);
 	//register read at all with stat counter:
@@ -285,9 +286,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 	if (MD->isPEseq() == 2 ) {
 		if (read2notNull && tdn[0] != nullptr &&
-			(tdn[0]->isGreenQual() && tdn[1]->isGreenQual()) ||
-			(tdn[0]->isYellowQual() && tdn[1]->isYellowQual())
-			) {
+			(tdn[0]->isGreenYellowQual() && tdn[1]->isGreenYellowQual()) ) {
 			//only this case allows for paired reads out
 			idx1 = 1;  idx2 = 2;
 		}
@@ -330,7 +329,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 	//demultiplex write? do this first before DNA is deleted..
 	//at this point the tagIDX *MUST* be correctly set + BCoffset (in the DNA object, tagIDX doesn;t matter)
-	cdbg("w2D ");
+	//cdbg("w2D ");
 	if (MD->Demulti2Fls()) {
 		MD->write2Demulti(tdn[0], tdn[1], curFil->getBCoffset(), curThread);
 	}
@@ -367,7 +366,7 @@ struct job2 {
 	future<bool> job;
 };
 
-bool read_paired(OptContainer& cmdArgs, OutputStreamer* MD, 
+bool read_paired(OptContainer* cmdArgs, OutputStreamer* MD, 
 	shared_ptr<InputStreamer> IS, bool MIDuse, int Nthreads) {
 	
 	DNAmap oldMIDs;
@@ -382,7 +381,7 @@ bool read_paired(OptContainer& cmdArgs, OutputStreamer* MD,
 	//bool syncedMID = false;
 	
 	//multithreading setup
-	//int Nthrds = atoi(cmdArgs["-threads"].c_str()) -1 ;
+	//int Nthrds = atoi((*cmdArgs)["-threads"].c_str()) -1 ;
 	vector<job2> slots(Nthreads);
 	int thrCnt = 0;
 	bool doMC(false);
@@ -394,62 +393,59 @@ bool read_paired(OptContainer& cmdArgs, OutputStreamer* MD,
 	bool cont(true),cont2(true),cont3(true);
 	bool keepPairedHD = IS->keepPairedHD();
 	//int revConstellation(0);
-	int cnt(0); 
+	//int cnt(0); 
 	bool switching(true); // important to keep track of this, to fix swapped read pairs
 
-	vector<string>tmpLines2(4, "");
-	vector<vector<string>> tmpLines(3, tmpLines2);
-	vector<shared_ptr<DNA>> tdn(3,nullptr);
+	//vector<string>tmpLines2(4, "");
+	//vector<vector<string>> tmpLines(3, tmpLines2);
 
-	int tmpBlockSize = 1000;
+
+	//ini blocks of empty strings for later reuse..
+	int tmpBlockSize = atoi((*cmdArgs)["-iniBlockSize"].c_str());
+	vector<multi_tmp_lines*> tmpStrHolders(Nthreads, nullptr);
+	string empty(""); empty.reserve(151);
+	vector<string>tmpLines2(4, empty);
+	vector<vector<string>> tmpLines(3, tmpLines2);
+	for (size_t ii = 0; ii < Nthreads; ii++) {
+		multi_tmp_lines* tmpO = DBG_NEW multi_tmp_lines(); // will be deleted inside multi_read_paired_STRready function
+		tmpO->tmp.resize(tmpBlockSize, tmpLines);
+		tmpStrHolders[ii] = tmpO;
+	}
+
+	//object holding converted DNA.. not longer used
+	//vector<shared_ptr<DNA>> tdn(3, nullptr);
+	qual_score fastqVer;
 
 	while ( cont ) {
 		//bool sync = false;
 		//tests of different ways to read files..
-		multi_tmp_lines* tmpO = DBG_NEW multi_tmp_lines(); // will be deleted inside multi_read_paired_STRready function
-		if (false) {
-			IS->getDNAlines(tmpLines[0], 0);
-			IS->getDNAlines(tmpLines[1], 1);
-			if (MIDuse) {
-				IS->getDNAlines(tmpLines[2], 2);
-			}
-		}
-		else {
-			IS->getDNAlines(tmpO, tmpBlockSize, MIDuse);
-		}
 
-		qual_score fastqVer = IS->fastQscore();
-		if (fqHeadVer) { //some things just need to be done
-			if (tdn[0] == nullptr) {
-				tdn[0] = str2DNA(tmpLines[0], keepPairedHD, fastqVer, 0);
-			}
-			MD->checkFastqHeadVersion(tdn[0]); 
-			fqHeadVer = false; 
-			tdn[0] = nullptr;//delete again, this is a oneoff..
-		}
-
-		cnt++;
+		//cnt++;
 		//decide on MC or single core submission route
 		if (true && doMC) {
 			bool notSubm(true);
-			while (notSubm) {//go over possible submission slots
-				if (thrCnt >= Nthreads) {thrCnt = 0;}
-				if (slots[thrCnt].inUse == true
-					&& slots[thrCnt].job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-					cont = slots[thrCnt].job.get();
-					slots[thrCnt].inUse = false;
-				}
-				if (slots[thrCnt].inUse == false) {
-
-					//slots[thrCnt].job = async(std::launch::async, read_paired_STRready,
-					//	tmpLines, MIDuse, MD, thrCnt, keepPairedHD, fastqVer); 
-					slots[thrCnt].job = async(std::launch::async, multi_read_paired_STRready,
-						tmpO, MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
-					slots[thrCnt].inUse = true;
-					notSubm = false;
-				}
-				thrCnt++;
+			if (slots[thrCnt].inUse == true){
+				//&& slots[thrCnt].job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+				bool cont2 = slots[thrCnt].job.get();
+				slots[thrCnt].inUse = false;
 			}
+			//now thread X is empty.. and eventual reads in it as well
+			cont = IS->getDNAlines(tmpStrHolders[thrCnt], tmpBlockSize, MIDuse);
+			fastqVer = IS->fastQscore();
+			if (fqHeadVer) { //some things just need to be done
+				shared_ptr<DNA> tmp = str2DNA(tmpStrHolders[thrCnt]->tmp[0][0], keepPairedHD, fastqVer, 0);
+				MD->checkFastqHeadVersion(tmp);			fqHeadVer = false;
+			}
+			if (slots[thrCnt].inUse == false) {
+				//slots[thrCnt].job = async(std::launch::async, read_paired_STRready,
+				//	tmpLines, MIDuse, MD, thrCnt, keepPairedHD, fastqVer); 
+				slots[thrCnt].job = async(std::launch::async, multi_read_paired_STRready,
+					tmpStrHolders[thrCnt], MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
+				slots[thrCnt].inUse = true;
+				notSubm = false;
+			}
+			thrCnt++;
+			if (thrCnt >= Nthreads) { thrCnt = 0; }
 			if (!cont) { break; }
 		} else {
 			/*if (false) {
@@ -460,13 +456,24 @@ bool read_paired(OptContainer& cmdArgs, OutputStreamer* MD,
 			}
 			else {*/
 				//cont = read_paired_STRready(tmpLines, MIDuse, MD, 0, keepPairedHD, fastqVer);
-				cont = multi_read_paired_STRready(tmpO, MIDuse, MD, 0, keepPairedHD, fastqVer);
+			cont = IS->getDNAlines(tmpStrHolders[thrCnt], tmpBlockSize, MIDuse); fastqVer = IS->fastQscore();
+			if (fqHeadVer && tmpStrHolders[thrCnt]->tmp[0].size()>0) { //some things just need to be done
+				shared_ptr<DNA> tmp = str2DNA(tmpStrHolders[thrCnt]->tmp[0][0], keepPairedHD, fastqVer, 0);
+				MD->checkFastqHeadVersion(tmp);			fqHeadVer = false;
+			}
+			bool cont2 = multi_read_paired_STRready(tmpStrHolders[thrCnt], MIDuse, MD, 0, keepPairedHD, fastqVer);
 				//if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
 			//}
 		}
 	}
 
 	//get all slots
+	for (int x = thrCnt; x < slots.size(); x++) {//better load balancing
+		if (slots[x].inUse == true) {//&& slots[x].job.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
+			cont = slots[x].job.get();
+			slots[x].inUse = false;
+		}
+	}
 	for (int x = 0; x < slots.size(); x++){
 		if (slots[x].inUse == true){//&& slots[x].job.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
 			cont = slots[x].job.get();
@@ -478,11 +485,16 @@ bool read_paired(OptContainer& cmdArgs, OutputStreamer* MD,
 	//close shop
 	//MD->revConstellationCnts(revConstellation);
 	MD->closeOutStreams();
+
+	for (size_t ii = 0; ii < Nthreads; ii++) {
+		delete tmpStrHolders[ii];
+	}
+
 	return true;
 }
 
 
-bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
+bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 	if (argc%2!=1){
 		cerr<<"It seems command line arguments were not passed in pairs. Aborting.\n";
 		exit(666);
@@ -490,96 +502,99 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 	for (int i=1; i<argc; i+=2){ //parsing of cmdline args
 		string theNxtSt = string(argv[i+1]);
 		if (theNxtSt[0] != '-'){
-			cmdArgs[string(argv[i])] = theNxtSt;
+			(*cmdArgs)[string(argv[i])] = theNxtSt;
 		} else {
-			cmdArgs[string(argv[i])] = "T";
+			(*cmdArgs)[string(argv[i])] = "T";
 		}
 	}
 
 	
-	if (cmdArgs.find("-illuminaClip") == cmdArgs.end()) {
-		cmdArgs["-illuminaClip"] = "0";
+	if (cmdArgs->find("-illuminaClip") == cmdArgs->end()) {
+		(*cmdArgs)["-illuminaClip"] = "0";
 	}
-	if (cmdArgs.find("-logLvsQ") == cmdArgs.end()) {
-		cmdArgs["-logLvsQ"] = "";
+	if (cmdArgs->find("-logLvsQ") == cmdArgs->end()) {
+		(*cmdArgs)["-logLvsQ"] = "";
 	}
 	
 
-	if (cmdArgs.find("-i_MID_fastq") == cmdArgs.end()) {
-		cmdArgs["-i_MID_fastq"] = "";
+	if (cmdArgs->find("-i_MID_fastq") == cmdArgs->end()) {
+		(*cmdArgs)["-i_MID_fastq"] = "";
 	}
 	//set to default (empty)
-	if (cmdArgs.find("-OTU_fallback") == cmdArgs.end()){
-		cmdArgs["-OTU_fallback"] = "";
+	if (cmdArgs->find("-OTU_fallback") == cmdArgs->end()){
+		(*cmdArgs)["-OTU_fallback"] = "";
 	}
-	if (cmdArgs.find("-otu_matrix") == cmdArgs.end()) {
-		cmdArgs["-otu_matrix"] = "";
+	if (cmdArgs->find("-otu_matrix") == cmdArgs->end()) {
+		(*cmdArgs)["-otu_matrix"] = "";
 	}
-	if (cmdArgs.find("-derepPerSR") == cmdArgs.end()) {
-		cmdArgs["-derepPerSR"] = "0";
+	if (cmdArgs->find("-derepPerSR") == cmdArgs->end()) {
+		(*cmdArgs)["-derepPerSR"] = "0";
 	}
-	if (cmdArgs.find("-ucAdditionalCounts") == cmdArgs.end()) {//.ADD
-		cmdArgs["-ucAdditionalCounts"] = "";
+	if (cmdArgs->find("-ucAdditionalCounts") == cmdArgs->end()) {//.ADD
+		(*cmdArgs)["-ucAdditionalCounts"] = "";
 	}
-	if (cmdArgs.find("-ucAdditionalCounts1") == cmdArgs.end()) {//.REST
-		cmdArgs["-ucAdditionalCounts1"] = "";
+	if (cmdArgs->find("-ucAdditionalCounts1") == cmdArgs->end()) {//.REST
+		(*cmdArgs)["-ucAdditionalCounts1"] = "";
 	}
-	if (cmdArgs.find("-ucAdditionalCounts_refclust") == cmdArgs.end()) {//.ADDREF
-		cmdArgs["-ucAdditionalCounts_refclust"] = "";
+	if (cmdArgs->find("-ucAdditionalCounts_refclust") == cmdArgs->end()) {//.ADDREF
+		(*cmdArgs)["-ucAdditionalCounts_refclust"] = "";
 	}
-	if (cmdArgs.find("-optimalRead2Cluster_ref") == cmdArgs.end()) {//.ADDREF
-		cmdArgs["-optimalRead2Cluster_ref"] = "";
+	if (cmdArgs->find("-optimalRead2Cluster_ref") == cmdArgs->end()) {//.ADDREF
+		(*cmdArgs)["-optimalRead2Cluster_ref"] = "";
 	}
 	//just for debuggin purposes: write out all seqs, where no BC can be detected..
-	if (cmdArgs.find("-o_fastq_noBC") == cmdArgs.end()) {
-		cmdArgs["-o_fastq_noBC"] = "";
+	if (cmdArgs->find("-o_fastq_noBC") == cmdArgs->end()) {
+		(*cmdArgs)["-o_fastq_noBC"] = "";
 	}
-	if (cmdArgs.find("-ucAdditionalCounts_refclust1") == cmdArgs.end()) {//.RESTREF
-		cmdArgs["-ucAdditionalCounts_refclust1"] = "";
+	if (cmdArgs->find("-ucAdditionalCounts_refclust1") == cmdArgs->end()) {//.RESTREF
+		(*cmdArgs)["-ucAdditionalCounts_refclust1"] = "";
 	}
-	if (cmdArgs.find("-ucAdditionalCounts_refclust1") == cmdArgs.end()) {//.RESTREF
-		cmdArgs["-ucAdditionalCounts_refclust1"] = "";
+	if (cmdArgs->find("-ucAdditionalCounts_refclust1") == cmdArgs->end()) {//.RESTREF
+		(*cmdArgs)["-ucAdditionalCounts_refclust1"] = "";
 	}
 	
-	if (cmdArgs.find("-XfirstReads") == cmdArgs.end()) {
-		cmdArgs["-XfirstReads"] = "";
+	if (cmdArgs->find("-XfirstReads") == cmdArgs->end()) {
+		(*cmdArgs)["-XfirstReads"] = "";
 	}
-			//filter sequence file for a specific subset of sequences
+	if (cmdArgs->find("-iniBlockSize") == cmdArgs->end()) {
+		(*cmdArgs)["-iniBlockSize"] = "100";
+	}
+	//filter sequence file for a specific subset of sequences
 	//these arguments can only occur together
-	if (cmdArgs.find("-specificReads") == cmdArgs.end()) {
-		cmdArgs["-specificReads"] = "";
-	} else if (cmdArgs.find("-excludeFile") == cmdArgs.end()) {
-		cmdArgs["-excludeFile"] = "";
+	if (cmdArgs->find("-specificReads") == cmdArgs->end()) {
+		(*cmdArgs)["-specificReads"] = "";
+	} else if (cmdArgs->find("-excludeFile") == cmdArgs->end()) {
+		(*cmdArgs)["-excludeFile"] = "";
 	}
-	if (cmdArgs.find("-onlyPair") == cmdArgs.end()) {
-		cmdArgs["-onlyPair"] = "";
+	if (cmdArgs->find("-onlyPair") == cmdArgs->end()) {
+		(*cmdArgs)["-onlyPair"] = "";
 	}
-	if (cmdArgs.find("-pairedDemulti") == cmdArgs.end()) {
-		cmdArgs["-pairedDemulti"] = "0"; // by default: do not only report proper pairs
+	if (cmdArgs->find("-pairedDemulti") == cmdArgs->end()) {
+		(*cmdArgs)["-pairedDemulti"] = "0"; // by default: do not only report proper pairs
 	}
 	
-	if (cmdArgs.find("-uparseVer") == cmdArgs.end()) {
-		cmdArgs["-uparseVer"] = "";
+	if (cmdArgs->find("-uparseVer") == cmdArgs->end()) {
+		(*cmdArgs)["-uparseVer"] = "";
 	}
 
 
-	if (cmdArgs.find("-i_path")  == cmdArgs.end()){ //ok files are not given in mapping file
+	if (cmdArgs->find("-i_path")  == cmdArgs->end()){ //ok files are not given in mapping file
 		//check if dna and qual_ are passed
-		if (cmdArgs.find("-i") != cmdArgs.end()) {
-			string fmt = detectSeqFmt(cmdArgs["-i"]);
+		if (cmdArgs->find("-i") != cmdArgs->end()) {
+			string fmt = detectSeqFmt((*cmdArgs)["-i"]);
 			if (fmt == "empty") {
 				//exit(0);
 				cerr << "Only empty input files\n";
 			}
-			cmdArgs[fmt] = cmdArgs["-i"];
+			(*cmdArgs)[fmt] = (*cmdArgs)["-i"];
 		}
-		if (cmdArgs.find("-i_fastq")  == cmdArgs.end()){ // fasta + quality format
-			if (cmdArgs.find("-i_fna")  == cmdArgs.end()){
+		if (cmdArgs->find("-i_fastq")  == cmdArgs->end()){ // fasta + quality format
+			if (cmdArgs->find("-i_fna")  == cmdArgs->end()){
 				cerr<<"You did not supply a fasta file. \nPlease give the path to your fasta file as command line argument:\n  -i_fna <yourFastaFile>\n";
 				exit(2);
 			}
-			if (cmdArgs.find("-i_qual")  == cmdArgs.end()){
-				string newQ = cmdArgs["-i_fna"];
+			if (cmdArgs->find("-i_qual")  == cmdArgs->end()){
+				string newQ = (*cmdArgs)["-i_fna"];
 				int pos = (int)newQ.find_last_of(".");
 				newQ = newQ.substr(0,pos);
 				newQ += string(".qual_");
@@ -587,59 +602,62 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 				fin.open(newQ.c_str(),ios::in);
 				if( fin.is_open() )	{
 					cerr<<"Using quality file: "<<newQ <<endl;
-				} else if ((cmdArgs.find("-number")!=  cmdArgs.end() && cmdArgs["-number"] =="T")||
-					(cmdArgs["-specificReads"] != "")) {
-					cmdArgs["-i_qual"] = "";
+				} else if ((cmdArgs->find("-number")!=  cmdArgs->end() && (*cmdArgs)["-number"] =="T")||
+					((*cmdArgs)["-specificReads"] != "")) {
+					(*cmdArgs)["-i_qual"] = "";
 				} else {
 					cerr<<"You did not supply a quality file. \nPlease give the path to your quality file as command line argument:\n  -i_qual <PathToQualityFile>\n";
 					newQ = "";
 					//fin.close();	exit(2);
 				}
 				fin.close();
-				cmdArgs["-i_qual"] = newQ;
+				(*cmdArgs)["-i_qual"] = newQ;
 			}
 		}
 		//auto create output file name
-		if (cmdArgs.find("-o_fna")  == cmdArgs.end()){
-			if (cmdArgs.find("-o_fastq")  == cmdArgs.end()){
-				//cmdArgs["-o_fna"] = cmdArgs["-i_fna"]+string(".sdm");
-				//cerr<<"Writing output fasta into "<<cmdArgs["-o_fna"]<<endl;
+		if (cmdArgs->find("-o_fna")  == cmdArgs->end()){
+			if (cmdArgs->find("-o_fastq")  == cmdArgs->end()){
+				//(*cmdArgs)["-o_fna"] = (*cmdArgs)["-i_fna"]+string(".sdm");
+				//cerr<<"Writing output fasta into "<<(*cmdArgs)["-o_fna"]<<endl;
 				cerr << "No output file will be written\n";
 			}
 		} else {
-			if (cmdArgs.find("-o_fastq")  != cmdArgs.end()){
+			if (cmdArgs->find("-o_fastq")  != cmdArgs->end()){
 				cerr<<"\"-o_fna\" was over-writen by \"-o_fastq\"\n";
-				cmdArgs["-o_fna"] = "";
+				(*cmdArgs)["-o_fna"] = "";
 			}
 		}
 	} else {
-		if (cmdArgs.find("-o_fna")  == cmdArgs.end() && cmdArgs.find("-o_fastq")  == cmdArgs.end()){
+		if (cmdArgs->find("-o_fna")  == cmdArgs->end() && cmdArgs->find("-o_fastq")  == cmdArgs->end()){
 			cerr<<"Please give an output file (\"-o_fna\" || \"-o_fastq\") if you use sdm \"-i_path\" option.\n  Aborting..\n";
 			exit(2);
 		}
 	}
 
-	/*	if (cmdArgs.find("-base_map")  == cmdArgs.end()){
+	/*	if (cmdArgs->find("-base_map")  == cmdArgs->end()){
 	cerr<<"You did not supply a mapping file. \nPlease give the path to your mapping file as command line argument:\n  -base_map <PathToMappingFile>\n";
 	exit(2);
 	}  */
-	if (cmdArgs.find("-o_qual")  == cmdArgs.end()){
-		cmdArgs["-o_qual"] = "";
+	if (cmdArgs->find("-o_qual")  == cmdArgs->end()){
+		(*cmdArgs)["-o_qual"] = "";
 	} else {
-		if (cmdArgs.find("-o_fastq")  != cmdArgs.end()){
+		if (cmdArgs->find("-o_fastq")  != cmdArgs->end()){
 			cerr<<"\"-o_qual\" was over-writen by \"-o_fastq\"\n";
-			cmdArgs["-o_qual"] = "";
+			(*cmdArgs)["-o_qual"] = "";
 		}
 	}
-	if (cmdArgs.find("-options")  == cmdArgs.end()){
-		cmdArgs["-options"] = string("sdm_options.txt");
+	if (cmdArgs->find("-options")  == cmdArgs->end()){
+		(*cmdArgs)["-options"] = string("sdm_options.txt");
 	}
-	if (cmdArgs.find("-threads")  == cmdArgs.end()){
-		cmdArgs["-threads"] = "1";
+	if (cmdArgs->find("-threads") == cmdArgs->end()) {
+		(*cmdArgs)["-threads"] = "1";
 	}
-	if (cmdArgs.find("-log")  == cmdArgs.end()){
-		string ofile1 = cmdArgs["-o_fna"];
-		if (ofile1==""){ofile1 = cmdArgs["-o_fastq"];}
+	if (cmdArgs->find("-threadIO") == cmdArgs->end()) {
+		(*cmdArgs)["-threadIO"] = "1";
+	}
+	if (cmdArgs->find("-log")  == cmdArgs->end()){
+		string ofile1 = (*cmdArgs)["-o_fna"];
+		if (ofile1==""){ofile1 = (*cmdArgs)["-o_fastq"];}
 		vector<string> tvec = splitByComma(ofile1,false); 
 		ofile1 = tvec[0];
 		//remove file ending
@@ -650,160 +668,76 @@ bool readCmdArgs(int argc, char* argv[],OptContainer& cmdArgs){
 			pos =  ofile1.find_last_of(".");
 			if (pos != string::npos){ofile1 = ofile1.substr(0,pos);	}
 		}
-		cmdArgs["-log"] = ofile1 + string(".log");
+		(*cmdArgs)["-log"] = ofile1 + string(".log");
 	}
-	string ofile1 = cmdArgs["-log"];
+	string ofile1 = (*cmdArgs)["-log"];
 	//ofile1.find_last_of(".log");
 	size_t logPos = ofile1.find_last_of(".");
 	if (logPos != std::string::npos){
 		ofile1 = ofile1.substr(0,logPos);
 	}
-	if (cmdArgs.find("-length_hist")  == cmdArgs.end()){
-		cmdArgs["-length_hist"]  = ofile1 + string("_lenHist.txt");
+	if (cmdArgs->find("-length_hist")  == cmdArgs->end()){
+		(*cmdArgs)["-length_hist"]  = ofile1 + string("_lenHist.txt");
 	}
-	if (cmdArgs.find("-qual_hist") == cmdArgs.end()) {
-		cmdArgs["-qual_hist"] = ofile1 + string("_qualHist.txt");
+	if (cmdArgs->find("-qual_hist") == cmdArgs->end()) {
+		(*cmdArgs)["-qual_hist"] = ofile1 + string("_qualHist.txt");
 	}
-	if (cmdArgs.find("-merg_readpos") == cmdArgs.end()) {
-		cmdArgs["-merg_readpos"] = ofile1 + string("_mergRpos.txt");
+	if (cmdArgs->find("-merg_readpos") == cmdArgs->end()) {
+		(*cmdArgs)["-merg_readpos"] = ofile1 + string("_mergRpos.txt");
 	}
-	if (cmdArgs.find("-	qual_readpos") == cmdArgs.end()) {
-		cmdArgs["-qual_readpos"] = ofile1 + string("_qualRpos.txt");
+	if (cmdArgs->find("-	qual_readpos") == cmdArgs->end()) {
+		(*cmdArgs)["-qual_readpos"] = ofile1 + string("_qualRpos.txt");
 	}
 
 		//-length_hist   -qual_hist
 
-	if (cmdArgs.find("-sample_sep")  == cmdArgs.end()){
-		cmdArgs["-sample_sep"] = DEFAULT_BarcodeNameSep;
-	} else 	if (cmdArgs["-sample_sep"]==""){
+	if (cmdArgs->find("-sample_sep")  == cmdArgs->end()){
+		(*cmdArgs)["-sample_sep"] = DEFAULT_BarcodeNameSep;
+	} else 	if ((*cmdArgs)["-sample_sep"]==""){
 		cerr<<"Invalid sample separator (empty).\nAborting..\n";exit(82);
 	}
 
 
-	if (cmdArgs.find("-o_qual_offset") == cmdArgs.end()) {
-		cmdArgs["-o_qual_offset"] = DEFAULT_output_qual_offset;
+	if (cmdArgs->find("-o_qual_offset") == cmdArgs->end()) {
+		(*cmdArgs)["-o_qual_offset"] = DEFAULT_output_qual_offset;
 	}
-	if (cmdArgs.find("-pairedRD_HD_out") == cmdArgs.end()) {
-		cmdArgs["-pairedRD_HD_out"] = DEFAULT_pairedRD_HD_out;
+	if (cmdArgs->find("-pairedRD_HD_out") == cmdArgs->end()) {
+		(*cmdArgs)["-pairedRD_HD_out"] = DEFAULT_pairedRD_HD_out;
 	}
-	if (cmdArgs.find("-5PR1cut") == cmdArgs.end()) {
-		cmdArgs["-5PR1cut"] = DEFAULT_5PR1cut;
+	if (cmdArgs->find("-5PR1cut") == cmdArgs->end()) {
+		(*cmdArgs)["-5PR1cut"] = DEFAULT_5PR1cut;
 	}
-	if (cmdArgs.find("-5PR2cut") == cmdArgs.end()) {
-		cmdArgs["-5PR2cut"] = DEFAULT_5PR2cut;
+	if (cmdArgs->find("-5PR2cut") == cmdArgs->end()) {
+		(*cmdArgs)["-5PR2cut"] = DEFAULT_5PR2cut;
 	}
 
 	
 
-	if (cmdArgs.find("-ignore_IO_errors") == cmdArgs.end()) {
-		cmdArgs["-ignore_IO_errors"] = DEFAULT_ignore_IO_errors;
-	} else if (cmdArgs["-ignore_IO_errors"] != "0" && cmdArgs["-ignore_IO_errors"] != "1") {
-		cerr << "Argument \"ignore_IO_errors\" can only be \"1\" or \"0\". Instead it has value: " << cmdArgs["-ignore_IO_errors"] << endl;
+	if (cmdArgs->find("-ignore_IO_errors") == cmdArgs->end()) {
+		(*cmdArgs)["-ignore_IO_errors"] = DEFAULT_ignore_IO_errors;
+	} else if ((*cmdArgs)["-ignore_IO_errors"] != "0" && (*cmdArgs)["-ignore_IO_errors"] != "1") {
+		cerr << "Argument \"ignore_IO_errors\" can only be \"1\" or \"0\". Instead it has value: " << (*cmdArgs)["-ignore_IO_errors"] << endl;
 		exit(323);
 	}
-	if (cmdArgs.find("-o_dereplicate") == cmdArgs.end()) {
-		cmdArgs["-o_dereplicate"] = "";
+	if (cmdArgs->find("-o_dereplicate") == cmdArgs->end()) {
+		(*cmdArgs)["-o_dereplicate"] = "";
 	}
-	if (cmdArgs.find("-derep_map") == cmdArgs.end()) {
-		cmdArgs["-derep_map"] = "";
+	if (cmdArgs->find("-derep_map") == cmdArgs->end()) {
+		(*cmdArgs)["-derep_map"] = "";
 	}
 
 	
 
-	//if (cmdArgs.count("-i_fna")==0){}
+	//if (cmdArgs->count("-i_fna")==0){}
 
 	return true;
 }
 
 
-/*******************************************
-*				read_fasta   			   *
-*******************************************
-
-void openOutFiles(string files, string fmt, string xtr){
-	ofstream fnaOut;
-
-	vector<string> tfnaout(0);
-	if (files.find(",") != string::npos){
-		tfnaout = splitByCommas(files);
-	} else {
-		tfnaout.push_back(files);
-	}
-	bool multiple = tfnaout.size() > 1;
-	string xtr2 = "";
-	if (multiple){xtr2 = "paired ";}
-	for (uint i =0; i< tfnaout.size(); i++){
-		fnaOut.open ( tfnaout[i].c_str(),ios_base::out);
-		if (!fnaOut){	cerr<<"Could not open "<<xtr2<<xtr<<fmt<<" output file "<<i<<": "<<tfnaout[i]<<endl;exit(4);	}
-		fnaOut.close();
-		if (multiple){//also singletonfiles
-			string tmp = tfnaout[0]+SingletonFileDescr;
-			fnaOut.open(tmp.c_str(),ios_base::out);
-			if (!fnaOut){	cerr<<"Could not open Singleton "<<xtr<<fmt<<" output file "<<i<<": "<<tmp<<endl;exit(4);	}
-			fnaOut.close();
-		}
-	}
-
-}
-
-void prepareOutFiles(OptContainer& cmdArgs){
-	ofstream fnaOut;
-	
-	//additional output files (secondary filtering)
-	if (cmdArgs.find("-o_fastq2")  != cmdArgs.end() && cmdArgs["-o_fastq2"] != ""){
-		openOutFiles(cmdArgs["-o_fastq2"],"fastq","add ");
-	}
-	if (cmdArgs.find("-o_fna2")  != cmdArgs.end() && cmdArgs["-o_fna2"] != ""){
-		openOutFiles(cmdArgs["-o_fna2"],"fna","add ");
-	}
-
-	//fastq
-	if (cmdArgs["-o_fna"]=="" && cmdArgs["-o_fastq"] != ""){
-		openOutFiles(cmdArgs["-o_fastq"],"fastq","");
-		return;
-	}
-
-	//fasta output
-	vector<string> tfnaout = splitByComma(cmdArgs["-o_fna"],false);
-	for (unsigned int i=0; i<tfnaout.size();i++){
-		fnaOut.open(tfnaout[i].c_str(),ios_base::out);
-		if (!fnaOut){	cerr<<"Could not open Fasta "<< i<<" output file "<<tfnaout[0]<<endl;exit(4);	}
-		fnaOut.close();
-	}
-	if (tfnaout.size()==2){//PE - singleton file
-		string tmp = tfnaout[0]+SingletonFileDescr;
-		fnaOut.open(tmp.c_str(),ios_base::out);
-		if (!fnaOut){	cerr<<"Could not open Singleton Fasta output file "<<tmp<<endl;exit(4);	}
-		fnaOut.close();
-		tmp = tfnaout[1]+SingletonFileDescr;
-		fnaOut.open(tmp.c_str(),ios_base::out);
-		if (!fnaOut){	cerr<<"Could not open Singleton Fasta output file "<<tmp<<endl;exit(4);	}
-		fnaOut.close();
-	}
-	if (cmdArgs["-o_qual"] != ""){
-		vector<string> tqout = splitByComma(cmdArgs["-o_qual"],false);
-		for (unsigned int i=0; i<tqout.size();i++){
-			fnaOut.open (tqout[0].c_str() ,ios_base::out);
-			if (!fnaOut){			cerr<<"Could not open Quality "<<i<<" output file "<<tqout[0]<<endl;			exit(4);		}
-			fnaOut.close();
-		}
-		if (tqout.size()==2){//PE - singleton file
-			string tmp = tqout[0]+SingletonFileDescr;
-			fnaOut.open(tmp.c_str(),ios_base::out);
-			if (!fnaOut){	cerr<<"Could not open Singleton Quality output file "<<tmp<<endl;exit(4);	}
-			fnaOut.close();
-			tmp = tqout[1]+SingletonFileDescr;
-			fnaOut.open(tmp.c_str(),ios_base::out);
-			if (!fnaOut){	cerr<<"Could not open Singleton Quality output file "<<tmp<<endl;exit(4);	}
-			fnaOut.close();
-		}
-	}
-}
-*/
 
 
 //manages read in of several input files and associated primers / tags to each file
-void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
+void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_benchmark){
 #ifdef DEBUG
 	cerr << "separateByFile"<<endl;
 #endif
@@ -819,7 +753,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 
     // mainFile for processing
 	string mainFile = "";
-	string outFile = cmdArgs["-o_fna"];
+	string outFile = (*cmdArgs)["-o_fna"];
 	
 	//special sdm functions ini
 	UClinks *ucl = nullptr; // Seed extension ?
@@ -844,8 +778,8 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
     //ThreadPool *pool = nullptr;
     int threads = 1;
     if (multithreading) {
-        if (cmdArgs.find("-threads") != cmdArgs.end()) {
-            threads = stoi(cmdArgs["-threads"]);
+        if (cmdArgs->find("-threads") != cmdArgs->end()) {
+            threads = stoi((*cmdArgs)["-threads"]);
         }
 		/*if ( threads > 1) {
 			pool = DBG_NEW ThreadPool(threads);
@@ -886,8 +820,11 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		//main input of fastx, handles input IO
 		cdbg("Ini InputStream");
 		shared_ptr<InputStreamer> IS = make_shared<InputStreamer>(
-			!files.isFastq, mainFilter->getuserReqFastqVer(),cmdArgs["-ignore_IO_errors"],
-			cmdArgs["-pairedRD_HD_out"], threads);
+			!files.isFastq, mainFilter->getuserReqFastqVer(),(*cmdArgs)["-ignore_IO_errors"],
+			(*cmdArgs)["-pairedRD_HD_out"], threads);
+		if ((*cmdArgs)["-threadIO"] == "1") { IS->setTIO(true); }
+		if ((*cmdArgs)["-threadIO"] == "0") { IS->setTIO(false); }
+
 
 		// there is an entry in tar for each barcode for this file. If files.idx[i].size() is 1 there is only one barcode
 		if (files.idx[i].size() == 1 && files.uniqueFastxFiles.size() > 1) {
@@ -910,7 +847,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 				files.deLog += "Dereplication of SequencingRun " + lastSRblock.back() + ":\n";
 			}
 			files.deLog += deLogLocal;
-			//if (cmdArgs["-log"] != "nolog") {
+			//if ((*cmdArgs)["-log"] != "nolog") {
 			//	dereplicator->writeLog(files.logF.substr(0, files.logF.length() - 3) + "dere", deLogLocal);//files.deLog
 			//}
 			//in this case also needs to recheck merger prob
@@ -919,8 +856,8 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 				for (size_t x = 0; x < merger.size(); x++) {
 					cMerg->addRMstats(merger[x]);
 				}
-				cMerg->printMergeHisto(subfile(cmdArgs["-merg_readpos"], lastSRblock.back()));
-				cMerg->printQualHisto(subfile(cmdArgs["-qual_readpos"], lastSRblock.back()));
+				cMerg->printMergeHisto(subfile((*cmdArgs)["-merg_readpos"], lastSRblock.back()));
+				cMerg->printQualHisto(subfile((*cmdArgs)["-qual_readpos"], lastSRblock.back()));
 				cMerg->restStats();
 				delete cMerg;
 			}
@@ -937,8 +874,9 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		}
 
 		string mainFileShort;
+		
 		mainFile = IS->setupInput(files.path, tarID, uFX.first, files, filter->setPaired(),
-			cmdArgs["-onlyPair"], mainFileShort, false);
+			(*cmdArgs)["-onlyPair"], mainFileShort, false);
 		if (!IS->qualityPresent()) {
 			filter->deactivateQualFilter();
 			cerr << "\n*********\nWarning:: Quality file is not present.\nRecommended to abort demultiplexing.\n*********\n\n";
@@ -965,6 +903,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 		OutStreamer->attachReadMerger(merger);
 		OutStreamer->setBPwrittenInSR(accumBPwrite);
 		OutStreamer->setBPwrittenInSRmerg(accumBPwriteMerg);	
+		OutStreamer->attachBenchmark(sdm_benchmark);
 		filter->setMultiDNA(OutStreamer);
 		if (maxReads > 0) {
 			OutStreamer->setReadLimit(maxReads - totalReadsRead);
@@ -980,7 +919,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 
 		//only pull out a subset of sequences
 		if (mainFilter->doSubselReads()) {
-			if (cmdArgs.find("-mocatFix") != cmdArgs.end()) {
+			if (cmdArgs->find("-mocatFix") != cmdArgs->end()) {
 				cerr << "MOCAT fix appplies\n";
 				RDSset->findMatches(IS, OutStreamer, true);
 			}	else {
@@ -1036,7 +975,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 				//write log file
 		if (files.uniqueFastxFiles.size() > 1) {//only print sub log if neccessary
 			ofstream log;
-			string logF2 = cmdArgs["-log"] + string("0") + itos(i);
+			string logF2 = (*cmdArgs)["-log"] + string("0") + itos(i);
 			log.open(logF2.c_str(), ios_base::out);
 			filter->printStats(log, mainFile, outFile, true);
 			log.close();
@@ -1069,32 +1008,32 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
     if (mainFilter->doOptimalClusterSeq()){
         //finish up dereplication file (creating pseudo seeds with counts)
         ucl->finishMAPfile();
-        if (cmdArgs["-ucAdditionalCounts"] != ""){
+        if ((*cmdArgs)["-ucAdditionalCounts"] != ""){
             ucl->set2UC();
-            ucl->finishUCfile(mainFilter, cmdArgs["-ucAdditionalCounts"], true);//with smplHead (.mid)
-            ucl->finishUCfile(mainFilter, cmdArgs["-ucAdditionalCounts1"], false);//without smplHead (.rest)
+            ucl->finishUCfile(mainFilter, (*cmdArgs)["-ucAdditionalCounts"], true);//with smplHead (.mid)
+            ucl->finishUCfile(mainFilter, (*cmdArgs)["-ucAdditionalCounts1"], false);//without smplHead (.rest)
         }
 
 
-        if (cmdArgs["-ucAdditionalCounts_refclust"] != ""){
+        if ((*cmdArgs)["-ucAdditionalCounts_refclust"] != ""){
             //reference based clustering has some high qual_ seqs (no replacement with reads..)
             //takeOver even found high qual_ hits with these default seeds..
             shared_ptr<InputStreamer> FALL = make_shared<InputStreamer>(true,
-				mainFilter->getuserReqFastqVer(), cmdArgs["-ignore_IO_errors"], 
-				cmdArgs["-pairedRD_HD_out"],1);
+				mainFilter->getuserReqFastqVer(), (*cmdArgs)["-ignore_IO_errors"], 
+				(*cmdArgs)["-pairedRD_HD_out"],1);
             //this reads in the SLV fna's & creates matrix entries for these
-            FALL->setupFna(cmdArgs["-OTU_fallback_refclust"]);
+            FALL->setupFna((*cmdArgs)["-OTU_fallback_refclust"]);
             ucl->setRefMode();
             ucl->addDefSeeds(FALL, mainFilter);
             ucl->set2UC();
             //mapping from ref OTU clustering
-            ucl->finishUCfile(mainFilter, cmdArgs["-optimalRead2Cluster_ref"], false);
+            ucl->finishUCfile(mainFilter, (*cmdArgs)["-optimalRead2Cluster_ref"], false);
             //mid / rest mappings
-            ucl->finishUCfile(mainFilter, cmdArgs["-ucAdditionalCounts_refclust"], true);//with smplHead (.rest)
-            ucl->finishUCfile(mainFilter, cmdArgs["-ucAdditionalCounts_refclust1"], false);//without smplHead (.rest)
+            ucl->finishUCfile(mainFilter, (*cmdArgs)["-ucAdditionalCounts_refclust"], true);//with smplHead (.rest)
+            ucl->finishUCfile(mainFilter, (*cmdArgs)["-ucAdditionalCounts_refclust1"], false);//without smplHead (.rest)
 
         }
-        if (cmdArgs["-log"] != "nolog") {
+        if ((*cmdArgs)["-log"] != "nolog") {
             log.open(files.logF.c_str(), ios_base::out);
             ucl->printStats(cerr);
             ucl->printStats(log);
@@ -1102,14 +1041,13 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
         }
 
         //everything done on DNA? Then write & delete
-        if (cmdArgs["-otu_matrix"] != "") {
-            ucl->writeOTUmatrix(cmdArgs["-otu_matrix"]);
+        if ((*cmdArgs)["-otu_matrix"] != "") {
+            ucl->writeOTUmatrix((*cmdArgs)["-otu_matrix"]);
         }
         //polished OTU seeds need to be written after OTU matrix (renaming scheme)
         OutputStreamer* MDx = DBG_NEW OutputStreamer(mainFilter, cmdArgs, 
 			ios::out, RDSset,0);
-		vector<ReadMerger*> DerepM = vector<ReadMerger*>(1,NULL);
-		DerepM[0] = DBG_NEW ReadMerger(false);
+		ReadMerger* DerepM = DBG_NEW ReadMerger(false);
 		MDx->attachReadMerger(DerepM);
         mainFilter->setMultiDNA(MDx);
         ucl->writeNewSeeds(MDx, mainFilter, false);
@@ -1123,7 +1061,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
         ucl->writeNewSeeds(MDx, mainFilter, true, true);
 		*/
         delete MDx;
-		delete DerepM[0];
+		delete DerepM;
         return;
     } else if (mainFilter->doDereplicate()) {
 		//this is either the last time dereplicate is written (SRblocks),
@@ -1137,7 +1075,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 			files.deLog += "Dereplication of SamplingRun " + lastSRblock.back() + ":\n";
 		}
 		files.deLog += deLogLocal;
-		if (cmdArgs["-log"] != "nolog") {
+		if ((*cmdArgs)["-log"] != "nolog") {
 			dereplicator->writeLog(files.logF.substr(0, files.logF.length() - 3) + "dere" , files.deLog);
 		}
 		dereplicator->finishMap();
@@ -1148,8 +1086,8 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 			for (size_t x = 0; x < merger.size(); x++) {
 				cMerg->addRMstats(merger[x]);
 			}
-			cMerg->printMergeHisto(subfile(cmdArgs["-merg_readpos"], lastSRblock.back()));
-			cMerg->printQualHisto(subfile(cmdArgs["-qual_readpos"], lastSRblock.back()));
+			cMerg->printMergeHisto(subfile((*cmdArgs)["-merg_readpos"], lastSRblock.back()));
+			cMerg->printQualHisto(subfile((*cmdArgs)["-qual_readpos"], lastSRblock.back()));
 			delete cMerg;
 		}
 
@@ -1162,7 +1100,7 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
     cerr << "Logging almost finished" << endl;
 #endif
 
-    if (cmdArgs["-log"] == "nolog") {
+    if ((*cmdArgs)["-log"] == "nolog") {
         return;
     }
     if (shortStats) {
@@ -1203,18 +1141,18 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 
 
     //length histogram
-    string logF2 = cmdArgs["-length_hist"];
+    string logF2 = (*cmdArgs)["-length_hist"];
     log.open (logF2.c_str() ,ios_base::out);
     mainFilter->printHisto(log, 0);
     log.close();
     //quality histogram
-    logF2 = cmdArgs["-qual_hist"];
+    logF2 = (*cmdArgs)["-qual_hist"];
     log.open (logF2.c_str() ,ios_base::out);
     mainFilter->printHisto(log, 1);
     log.close();
 
 	//length vs qual log file (large!!)
-	logF2 = cmdArgs["-logLvsQ"];
+	logF2 = (*cmdArgs)["-logLvsQ"];
 	if (logF2 != ""){
 		if (logF2 == "1") {
 			logF2 = files.logF.substr(0, files.logF.length() - 3) + "Len.Qual.txt";
@@ -1239,14 +1177,14 @@ void separateByFile(Filters* mainFilter, OptContainer& cmdArgs){
 
 }
 
-void rewriteNumbers(OptContainer& cmdArgs){
+void rewriteNumbers(OptContainer* cmdArgs){
     //no renumbering asked for
-    if (!(cmdArgs.find("-number")  != cmdArgs.end() && cmdArgs["-number"]=="T")){
+    if (!(cmdArgs->find("-number")  != cmdArgs->end() && (*cmdArgs)["-number"]=="T")){
         return;
     }
     string prefix="";
-    if (cmdArgs.find("-prefix")  != cmdArgs.end()){
-        prefix = cmdArgs["-prefix"];
+    if (cmdArgs->find("-prefix")  != cmdArgs->end()){
+        prefix = (*cmdArgs)["-prefix"];
     }
     //read fasta & write with new headers
     int cnt=0;
@@ -1258,8 +1196,8 @@ void rewriteNumbers(OptContainer& cmdArgs){
 
     //        rerwite input fasta file
     string tname="",tseq="";
-    fna.open(cmdArgs["-i_fna"].c_str(),ios::in);
-    ofna.open(cmdArgs["-o_fna"].c_str(),ios::out);
+    fna.open((*cmdArgs)["-i_fna"].c_str(),ios::in);
+    ofna.open((*cmdArgs)["-o_fna"].c_str(),ios::out);
     while (getline(fna,line,'\n')){
 
         if (line[0]=='$'){ //$ marks comment

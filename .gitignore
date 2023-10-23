@@ -15,6 +15,7 @@ Makefile_d
 MakefileD
 MakefileF
 DEBUG/
+tests/
 
 sdmN
 sdmD

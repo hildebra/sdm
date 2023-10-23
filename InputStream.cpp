@@ -282,6 +282,8 @@ string detectSeqFmt(const string inF) {
 		string fileS = tfas[0];
 		istream* fnax(NULL);
 		string file_type = "test file";
+		string tmp("");
+		string ret = "";
 		if (fileS != "") {
             // auto detect gzip
 #ifdef _gzipread
@@ -290,40 +292,27 @@ string detectSeqFmt(const string inF) {
             fnax = DBG_NEW ifstream(fileS.c_str(), ios::in);
 #endif
 		    
-//			if (isGZfile(fileS)) {
-//#ifdef _gzipread
-//				file_type = "gzipped fasta file";
-//				fnax = DBG_NEW igzstream(fileS.c_str(), ios::in);
-//#else
-//				cerr << "gzip not supported in your sdm build\n" << fileS; exit(50);
-//#endif
-//			}
-//			else {
-//				fnax = DBG_NEW ifstream(fileS.c_str(), ios::in);
-//
-//			}
 
 			if (!*(fnax)) { cerr << "\nCouldn't find " << file_type << " file \"" << fileS << "\"!\n Aborting..\n"; exit(4); }
 			//char Buffer[RDBUFFER];
 			//fasta_istreams[0]->rdbuf()->pubsetbuf(Buffer, RDBUFFER);
-		}
-		string tmp("");
-		string ret = "";
-		while (safeGetline(*fnax, tmp)) {
-			if (tmp[0] == '>') {
-				ret = "-i_fna"; break;
+			while (safeGetline(*fnax, tmp)) {
+				if (tmp[0] == '>') {
+					ret = "-i_fna"; break;
+				}
+				else if (tmp[0] == '@') {
+					ret = "-i_fastq"; break;
+				}
+				else if (tmp.length() == 0) {//do nothing
+					;
+				}
+				else {
+					cerr << " Could not auto detect input format. First non-empty line of your file looked like:\n" << tmp << endl;
+					exit(888);
+				}
 			}
-			else if (tmp[0] == '@') {
-				ret = "-i_fastq"; break;
-			}
-			else if (tmp.length() == 0) {//do nothing
-				;
-			}
-			else {
-				cerr << " Could not auto detect input format. First non-empty line of your file looked like:\n" << tmp << endl;
-				exit(888);
-			}
-		}
+	}
+		
 		delete fnax;
 		if (ret == "") {
 			cerr << "Empty input file detected:\n" << fileS << endl;
@@ -568,6 +557,7 @@ DNA::DNA(vector<string> fq, qual_score fastQver):DNA(){
 	this->setQual(move(Iqual));
 }
 
+/*
 DNA::DNA(FastxRecord* FR, qual_score & minQScore, qual_score & maxQScore, qual_score fastQver) :DNA(){
     id_ = FR->header.substr(1);
     sequence_=FR->sequence;
@@ -591,6 +581,7 @@ DNA::DNA(FastxRecord* FR, qual_score & minQScore, qual_score & maxQScore, qual_s
 
 	}
 }
+*/
 
 string DNA::getPositionFreeId() { // remove /1 /2 #1:0 etc
 	string s = this->getShortId();
@@ -1256,7 +1247,6 @@ void DNA::writeFastQ(string& ret, bool newHD) {
 	}
 	ret += sequence_.substr(0, this->length()) + "\n";
 	ret += "+\n" ;//new_id_<<endl;
-	//char* qual_traf_ = DBG_NEW char[qual_.size()+1];
 	ret += qual_traf_ + "\n";
 }
 /*
@@ -1281,9 +1271,7 @@ void DNA::writeFastQEmpty(ostream& wr) {
 	wr << "@" << new_id_ << endl;
 	wr << "" << endl;
 	wr << "+" << endl;//new_id_<<endl;
-	//char* qual_traf_ = DBG_NEW char[qual_.size()+1];
 	wr << "" << endl;
-	//delete [] qual_traf_;
 }
 
 void DNA::changeHeadPver(int ver){
@@ -2125,9 +2113,9 @@ void InputStreamer::allStreamClose(){
 		if (gzfastq[i]){ gzfastq[i].close(); }
 #endif
 		*/
-		if (fasta_istreams[i] != NULL) { delete fasta_istreams[i]; } fasta_istreams[i] = NULL;
-		if (quality_istreams[i] != NULL) { delete quality_istreams[i]; } quality_istreams[i] = NULL;
-		if (fastq_istreams[i] != NULL) { delete fastq_istreams[i];   }fastq_istreams[i] = NULL;
+		if (fasta_istreams[i] != NULL) { delete fasta_istreams[i];  fasta_istreams[i] = NULL;}
+		if (quality_istreams[i] != NULL) { delete quality_istreams[i];  quality_istreams[i] = NULL; }
+		if (fastq_istreams[i] != NULL) { delete fastq_istreams[i];   fastq_istreams[i] = NULL; }
 	}
 
 	if (!isFasta && minQScore < SCHAR_MAX) {
@@ -2139,7 +2127,7 @@ void InputStreamer::jumpToNextDNA(bool& stillMore, int pos) {
 	    // Read fasta entry
 		stillMore = read_fasta_entry(fasta_istreams[pos], quality_istreams[pos], dnaTemp1[pos], dnaTemp2[pos], lnCnt[pos]);
         dnaTemp1[pos] = dnaTemp2[pos];
-		dnaTemp2[pos].reset(DBG_NEW DNA("", ""));
+		dnaTemp2[pos] = make_shared <DNA>("", "");
 	} else {
 		//jmp_fastq(*fastq_istreams[pos], lnCnt[pos]);
 		fastq_istreams[pos]->jumpLines(4);
@@ -2479,25 +2467,34 @@ shared_ptr<DNA> str2DNA(vector<string>& in, bool keepPairHD,int fastQver, int re
 }
 */
 
-void InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse) {
-	vector<string>tmpLines2(4, "");
-	vector<vector<string>> tmpLines(3, tmpLines2);
-	tmpO->tmp.resize(blocks, tmpLines);
+bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse) {
 
-	for (size_t k = 0; k < blocks; k++) {
-		this->getDNAlines(tmpO->tmp[k][0], 0);
-		this->getDNAlines(tmpO->tmp[k][1], 1);
+	assert(tmpO->size() == blocks);
+	size_t k(0); bool b1(true), b2(true);
+	for (k = 0; k < blocks; k++) {
+		b1 = this->getDNAlines(tmpO->tmp[k][0], 0);
+		if (numPairs > 1) {
+			b2 = this->getDNAlines(tmpO->tmp[k][1], 1);
+		}
 		if (MIDuse) {
 			this->getDNAlines(tmpO->tmp[k][2], 2);
 		}
+		if (!b1 || !b2) {
+			if (b1 != b2 && numPairs == 2) {
+				cerr << "Problem: read 1 and read2 appear not be of the same size!\n";
+			}
+			tmpO->setSize(k);
+			return false;
+		}
 	}
+	return true;
 }
-void InputStreamer::getDNAlines(vector<string>& ret, int pos) {
+bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 	
 	//vector<string> ret(4,"");
 	bool stillMore = true;
 	if (pos == 1 && numPairs <= 1) {
-		return ;
+		return false;
 	}
 	bool repairInStream(false);
 	//vector<string>tmpLines(4, "");
@@ -2513,13 +2510,15 @@ void InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 			stillMore = quality_istreams[pos]->getlines(ret[2], lnRd, true);//qual
 		}
 	}
-	else {
+	else {// fastq format
 		//fqRead
-		for (int xx = 0; xx < 4; xx++) {
+		stillMore = fastq_istreams[pos]->get4lines(ret);
+		/*for (int xx = 0; xx < 4; xx++) {
 			stillMore = fastq_istreams[pos]->getline(ret[xx]);
-		}
+		}*/
 		lnCnt[pos] += 4;
 		if (fastQver == 0 || lnCnt[pos] == 0) { // ok first time just has to be done in function, after this can be unloaded outside
+			//cerr << "AutoFQ!!";
 			shared_ptr<DNA> tdn = make_shared<DNA>(ret, fastQver);
 			minmaxQscore(tdn);
 			auto_fq_version();
@@ -2534,7 +2533,7 @@ void InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 	if (stillMore) {
 		pairs_read[pos]++;
 	}
-	return ;
+	return stillMore;
 }
 
 shared_ptr<DNA> InputStreamer::getDNA(int pos){
@@ -2654,7 +2653,7 @@ void InputStreamer::openMIDseqs(string p,string in){
 	string tmp = (p + in);
 	bool doMC = num_threads > 1;
 
-	fastq_istreams[2] = DBG_NEW ifbufstream(tmp, (size_t)round(INPUT_BUFFER_SIZE*0.6),doMC);
+	fastq_istreams[2] = DBG_NEW ifbufstream(tmp, (size_t)round(INPUT_BUFFER_SIZE*0.6),doTIO);
 	if (fastq_istreams[2]->eof()) {
 		cerr << "\nCouldn't find " << file_type << " " << tmp << "!\n Aborting..\n";		exit(4);
 	}
@@ -2785,13 +2784,13 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 
 	size_t bufS = INPUT_BUFFER_SIZE ;
 
-	bool doMC = num_threads > 1;
+	//bool doMC = num_threads > 1;
 
 	//        INPUT   files
 	if (!p1.empty()){ // first file exists
 		file_type = "fastq file 1";
 		//setup buffer of different sizes for p1,p2 to avoid simultaneous read
-		fastq_istreams[0] = DBG_NEW ifbufstream(p1, (size_t)round(bufS*0.8), doMC);
+		fastq_istreams[0] = DBG_NEW ifbufstream(p1, (size_t)round(bufS*0.8), doTIO);
 		if (fastq_istreams[0]->eof()){ 
 			cerr << "\nCouldn't find " << file_type << " " << p1 << "!\n Aborting..\n";		exit(4); 
 		}
@@ -2799,7 +2798,7 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 	//second pair_
 	if (!p2.empty()){
 		file_type = "fastq file 2";
-		fastq_istreams[1] = DBG_NEW ifbufstream(p2, (size_t)round(bufS * 1.2), doMC);
+		fastq_istreams[1] = DBG_NEW ifbufstream(p2, (size_t)round(bufS * 1.2), doTIO);
 		if (fastq_istreams[1]->eof()) {
 			cerr << "\nCouldn't find " << file_type << " " << p2 << "!\n Aborting..\n";		exit(4);
 		}
@@ -2810,7 +2809,7 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 	}
 	return true;
 }
-//mainFile = IS->setupInput(path, uniqueFas[i], FastqF[tarID], FastaF[tarID], QualF[tarID], MIDfq[tarID], fil->isPaired(), cmdArgs["-onlyPair"]);
+//mainFile = IS->setupInput(path, uniqueFas[i], FastqF[tarID], FastaF[tarID], QualF[tarID], MIDfq[tarID], fil->isPaired(), (*cmdArgs)["-onlyPair"]);
 string InputStreamer::setupInput(string path, int t, const string& uniqueFastxFile, filesStr& files, int &paired, string onlyPair,
                                  string& mainFilename, bool simulate) {
 	string mainFilepath("");
@@ -2864,8 +2863,8 @@ bool InputStreamer::setupFastaQual(string path, string sequenceFile, string qual
 	}
 
 	numPairs = paired;
-	dnaTemp1[0].reset(DBG_NEW DNA("", ""));
-	dnaTemp2[0].reset(DBG_NEW DNA("", ""));
+	dnaTemp1[0]= make_shared<DNA>("", "");
+	dnaTemp2[0] = make_shared <DNA>("", "");
     
     fastaFilepathTemp[0] = path + sequenceFile;
     qualityFilepathTemp[0] = path + qualityFile;
@@ -2890,10 +2889,10 @@ bool InputStreamer::setupFastaQual(string path, string sequenceFile, string qual
 bool InputStreamer::setupFastaQual2(string sequenceFile, string qualityFile, string fileType) {
 	string file_typeq = "quality file";
 	size_t iBufS = INPUT_BUFFER_SIZE;
-	bool doMC = num_threads > 1;
+	//bool doMC = num_threads > 1;
 	//        INPUT   file
 	if (sequenceFile != "") { // sequence not empty
-		fasta_istreams[0] = DBG_NEW ifbufstream(sequenceFile.c_str(), (size_t)round(iBufS * 0.4), doMC);
+		fasta_istreams[0] = DBG_NEW ifbufstream(sequenceFile.c_str(), (size_t)round(iBufS * 0.4), doTIO);
 
 		if (fasta_istreams[0]->eof()) {
 		    cerr << "\nCouldn't find " << fileType << " file \"" << sequenceFile << "\"!\n Aborting..\n";
@@ -2902,7 +2901,7 @@ bool InputStreamer::setupFastaQual2(string sequenceFile, string qualityFile, str
 	}
 	//quality file
 	if (!qualityFile.empty()) {
-		quality_istreams[0] = DBG_NEW ifbufstream(qualityFile, (size_t)round(iBufS*0.5),doMC);
+		quality_istreams[0] = DBG_NEW ifbufstream(qualityFile, (size_t)round(iBufS*0.5),doTIO);
 		if (quality_istreams[0]->eof()) {
 			cerr << "\nCouldn't find " << file_typeq << " file \"" << qualityFile << "\"!\n Running in no qual_ filter mode\n";
 			qualAbsent = true;
@@ -2921,7 +2920,6 @@ bool InputStreamer::setupFastaQual2(string sequenceFile, string qualityFile, str
 		} else {
 			cerr << "Reading Fasta.\n";
 		}
-        //quality_istreams[0] = DBG_NEW ifstream();
 		quality_istreams[0] = nullptr;
 		qualAbsent = true;
 	}
@@ -2931,28 +2929,8 @@ void InputStreamer::setupFna(string fileS){
 	allStreamClose();
 	resetLineCounts();
 	numPairs = 1;
-	dnaTemp1[0].reset(DBG_NEW DNA("", "")); dnaTemp2[0].reset(DBG_NEW DNA("", ""));
+	dnaTemp1[0] = make_shared<DNA>("", ""); dnaTemp2[0] = make_shared <DNA>("", "");
 	setupFastaQual2(fileS, "","seq");
-	/*cerr << "Reading Fasta file.\n" << fileS << endl;
-	string file_type = "seq";
-	//        INPUT   file
-	if (isGZfile(fileS)){
-#ifdef _gzipread
-		fasta_istreams[0] = DBG_NEW igzstream(fileS.c_str(), ios::in);
-		file_type = "gzipped seq";
-#else
-		cerr << "gzip not supported in your sdm build"; exit(50);
-#endif
-	}
-	else {
-		//fna[0].open(fileS.c_str(), ios::in);
-		fasta_istreams[0] = DBG_NEW ifstream(fileS.c_str(), ios::in);
-	}
-	if (!fasta_istreams[0]){ cerr << "\nCouldn't find "<<file_type<<" file \"" << fileS << "\"!\n Aborting..\n"; exit(4); }
-	//set quality to empty read buffer
-	quality_istreams[0] = DBG_NEW ifstream();
-	qualAbsent = true;
-	*/
 }
 
 int InputStreamer::auto_fq_version() {
@@ -3043,6 +3021,7 @@ void ofbufstream::activate() {
 	if (primary != nullptr) {
 		return;
 	}
+	delete primary;
 	if (isGZ) {
 #ifdef _gzipread
 		primary = DBG_NEW zstr::ofstream(file.c_str(), std::ios::app);
@@ -3052,7 +3031,7 @@ void ofbufstream::activate() {
 #endif
 	}
 	else {
-		//cout << "new str" << endl;
+		//cout << "new str" << endl;	
 		primary = DBG_NEW ofstream(file.c_str(), ios::app);
 	}
 }
@@ -3104,6 +3083,7 @@ void ofbufstream::writeStream(bool doKickoff ) {
 		return;
 	}
 	//do this first to prevent keeper/keeperW getting corrupted
+	output_mtx.lock();
 	if (hasKickoff) { writeKickoff.get(); hasKickoff = false; }
 	bool closeThis = false;
 	if (primary == nullptr) {
@@ -3111,11 +3091,12 @@ void ofbufstream::writeStream(bool doKickoff ) {
 		closeThis = false;
 	}
 	//swap operation
-	output_mtx.lock();
 	/*char* keeperTmp = keeperW;
 	keeperW = keeper;
 	keeper = keeperTmp;*/
 	swap(keeper, keeperW);
+	usedW = used;
+	used = 0;
 	//rewrite keeperW with keeper, so append can continue..
 	//strcpy(keeperW, keeper);
 	output_mtx.unlock();
@@ -3130,7 +3111,6 @@ void ofbufstream::writeStream(bool doKickoff ) {
 		});
 	/**/
 	//multithreading via kickoff
-	usedW = used;
 	if (doMC && doKickoff) {
 		writeKickoff = async(std::launch::async, &ofbufstream::internalWrite,
 			this, closeThis);
@@ -3139,9 +3119,19 @@ void ofbufstream::writeStream(bool doKickoff ) {
 	else {
 		// Without multithreading
 		internalWrite(closeThis);
-}
-	used = 0;
 	}
+}
+
+dualOfBufStream::dualOfBufStream(void):buf1S(20000), buf2S(30000), bufs(2, ""), 
+FileNames(2,""),ostr(2, nullptr), opened(2, false), active(false)
+{
+	bufs[0].reserve(buf1S); bufs[1].reserve(buf2S);
+}
+
+dualOfBufStream::~dualOfBufStream() {
+	emptyStreams(true);
+	for (size_t i = 0; i < ostr.size(); i++) { delete ostr[i]; }
+}
 
 
 #ifdef _gzipread2

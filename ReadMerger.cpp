@@ -213,6 +213,7 @@ void ReadMerger::reverseStringInPlace(char *str, int len) {
 	}
 }
 
+/*
 void ReadMerger::testMergeWithReads(std::istream &is1, std::istream &is2) {
 	Benchmark merge_bm("Merge");
 	merge_bm.start();
@@ -278,7 +279,7 @@ void ReadMerger::testMergeWithReads(std::istream &is1, std::istream &is2) {
 	merge_bm.printResults();
 }
 
-
+*/
 
 
 ///// alll important initial routine to find the best place to merge

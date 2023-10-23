@@ -25,8 +25,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 int main(int argc, char* argv[])
 {
-    Benchmark sdm_benchmark("Time taken: ");
-    sdm_benchmark.start();
+    Benchmark* sdm_benchmark = new Benchmark("Time taken: ");
+    sdm_benchmark->start();
     
 	if (argc<3){
 		//help_options,help_map,help_commands
@@ -52,7 +52,7 @@ int main(int argc, char* argv[])
 
 	Announce_sdm();
 
-	OptContainer cmdArgs;
+	OptContainer* cmdArgs = new OptContainer;
 	readCmdArgs(argc, argv, cmdArgs);
 	cdbg("CmdArgs read\n");
 
@@ -76,11 +76,10 @@ int main(int argc, char* argv[])
 	fil->setcmdArgsFiles();
 	cdbg("CmdArgs set in filter\n");
 
-	clock_t tStart = clock();
-	
+	//clock_t tStart = clock();
 	
 	//main function
-	separateByFile(fil, cmdArgs);
+	separateByFile(fil, cmdArgs, sdm_benchmark);
 	//end main function	
  
 	delete fil;
@@ -88,8 +87,12 @@ int main(int argc, char* argv[])
 
 //	fprintf(stderr,"Time taken: %.2fs\n", (double)(clock() - tStart) / CLOCKS_PER_SEC);
 
-	sdm_benchmark.stop();
-	sdm_benchmark.printResults(std::cerr);
+	sdm_benchmark->stop();
+	sdm_benchmark->printResults(std::cerr);
+
+	//clean up
+	delete sdm_benchmark;
+	delete cmdArgs;
 
 	//report mem leaks
 #if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)

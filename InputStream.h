@@ -26,7 +26,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define IOsep
 
 #include "DNAconsts.h"
-#include "FastxReader.h"
+//#include "FastxReader.h"
 #include <functional> 
 #include <cctype>
 #include <locale>
@@ -102,8 +102,8 @@ struct filesStr {//used in separateByFile
 	string path = "";
 	//set up some log structures
 	string deLog = "";//dereplication main log
-	string logF = "";// cmdArgs["-log"];
-	string logFA = "";// cmdArgs["-log"].substr(0, cmdArgs["-log"].length() - 3) + "add.log";
+	string logF = "";// (*cmdArgs)["-log"];
+	string logFA = "";// (*cmdArgs)["-log"].substr(0, (*cmdArgs)["-log"].length() - 3) + "add.log";
 
 	// Unique Fas initialized with first element of tar (can be b_derep_as_fasta_ and fastq)
 	// Contains all unique b_derep_as_fasta_ or fastq files from the mapping file
@@ -125,6 +125,7 @@ struct filesStr {//used in separateByFile
 struct multi_tmp_lines {
 	multi_tmp_lines() :tmp(0) {}
 	size_t size() { return tmp.size(); }
+	void setSize(size_t X) { tmp.resize(X); }
 	vector< vector< vector< string>>> tmp;
 	bool lastInFile = false;
 };
@@ -278,11 +279,22 @@ public:
 		return true;
 	}
 	//specific function that gets fasta line looking for pattern '\n>'
+	bool get4lines(vector<string>& in) {
+		bool ret(false);
+		
+		ret = this->getline(in[0]);
+		ret = this->getline(in[1]);
+		ret = this->getline(in[2]);
+		ret = this->getline(in[3]);
+		
+		return ret;
+	}
 	bool getline(string& ret) {
-		ret.clear();
 		if (atEnd && at >= bufS) {
 			return false;
 		}
+		ret.clear(); locBuffer.clear();
+		size_t inStrPos = 0;
 		for (;;) {
 			char c = keeper[at];
 			at++;
@@ -294,21 +306,27 @@ public:
 
 			switch (c) {
 			case '\n':				
+				//ret = locBuffer;
 				return true;
 			case '\r':
 				if (keeper[at] == '\n') {
 					at+=1; 
+					ret = locBuffer;
 					return true;
 				}
 			case EOF:
 				// Also handle the case when the last line has no line ending
 				atEnd = true;
 				//primary->setstate(std::ios::eofbit);
+				//ret = locBuffer;
 				return false;
 			default:
 				ret += c;
+				//locBuffer+=c;
+				//inStrPos++;
 			}
 		}
+		//ret = locBuffer;
 		if (atEnd && at >= bufS) {
 			return false;
 		}
@@ -374,6 +392,7 @@ private:
 	}
 	string file;
 	char* keeper; char* keeperW;
+	string locBuffer;
 	ios_base::openmode modeIO;
 	size_t at;
 	bool  isGZ, atEnd, hasKickoff, doMC;
@@ -383,7 +402,6 @@ private:
 	mutex localMTX;// , input_mtx2;
 	shared_mutex input_mtx;
 };
-
 
 
 
@@ -418,9 +436,9 @@ private:
 	mutex append_mtx_;
 	mutex output_mtx;
 	bool internalWrite(bool closeThis){
-		output_mtx.lock();
+		//output_mtx.lock();
 		primary->write(keeperW, usedW);
-		output_mtx.unlock();
+		//output_mtx.unlock();
 		//delete[] keeperW;//clean up
 		if (closeThis) {
 			deactivate();
@@ -457,6 +475,74 @@ private:
 	bool hasKickoff=false;
 
 };
+
+
+
+class dualOfBufStream {
+public:
+	dualOfBufStream(void);
+	~dualOfBufStream(void);
+	void write(const string& in, int stream) {
+		assert(stream < bufs.size());
+		dualMtx.lock();
+		bufs[stream] += in;
+		dualMtx.unlock();
+		emptyStreams(false);
+	}
+	void write2(const string& in, const string& in2 ) {
+//		assert(opened[0]);
+//		if (!active) { activate(); }
+		dualMtx.lock();
+		//bufs[0] += in;bufs[1] += in2;
+		(*ostr[1]) << in2; (*ostr[0]) << in;
+		dualMtx.unlock();
+//		emptyStreams(false);
+	}
+	bool open(const string IF, int mif, int pair, bool isMC = false, size_t bufferS = 20000) {
+		assert(!opened[pair]);
+		ostr[pair] = DBG_NEW ofbufstream(IF, mif, isMC, bufferS);
+		opened[pair] = true;
+		FileNames[pair] = IF;
+		if (!ostr[pair]) { return false; }
+		return true;
+	}
+	bool activate() {
+		if (active) {return true;}
+		for (size_t i = 0; i < ostr.size(); i++) { if (ostr[i] != nullptr) { ostr[i]->activate(); } }
+		active = true;
+		cerr << "\nActivating dual ostreams: " << FileNames[0] << "," << FileNames[1] << endl;
+		return true;
+	}
+	bool deactivate() {
+		for (size_t i = 0; i < ostr.size(); i++) { if (ostr[i] != nullptr) { ostr[i]->deactivate(); } }
+		active = false;
+		return true;
+	}
+	void emptyStreams(bool force) {
+		if (force || bufs[1].size() >= buf2S) {
+			dualMtx.lock();
+			(*ostr[1]) << bufs[1];
+			bufs[1].clear();
+			dualMtx.unlock();
+		}
+		if (force || bufs[0].size() >= buf1S) {
+			dualMtx.lock();
+			(*ostr[0]) << bufs[0];
+			bufs[0].clear();
+			dualMtx.unlock();
+		}
+	}
+private:
+	size_t buf1S, buf2S;
+	vector<string> bufs;
+	vector<string> FileNames;
+	vector<ofbufstream*> ostr; 
+	vector<bool> opened;
+	bool active;
+	mutex dualMtx;
+
+};
+
 
 
 
@@ -531,9 +617,10 @@ public:
            read_position_(-1),
            FtsDetected(),
            id_fixed_(false), tempFloat(0.f), merge_offset_(-1) {
+		sequence_.reserve(151);//set to resonable expectation
 	}
 	//starts with fastx record
-	DNA(FastxRecord*, qual_score & minQScore, qual_score & maxQScore, qual_score fastQver);
+	//DNA(FastxRecord*, qual_score & minQScore, qual_score & maxQScore, qual_score fastQver);
 	//works directly with 4 lines in fastq format
 	DNA(vector<string> fq, qual_score fastQver);//fastq input
 	DNA(vector<string> fas);//this is for fasta only..
@@ -713,9 +800,12 @@ public:
 		if (mid_quality_) { return false; } 
 		return good_quality_;
 	}
-	bool isYellowQual(void){
+	bool isYellowQual(void) {
 		if (good_quality_) { return false; }
 		return mid_quality_;
+	}
+	bool isGreenYellowQual(void) {
+		return (mid_quality_ || good_quality_);
 	}
 	string getSubSeq(int sta, int sto){return sequence_.substr(sta, sto);}
 	void resetQualOffset(int off, bool solexaFmt);
@@ -1055,7 +1145,7 @@ public:
             qualAbsent(false),
             fqReadSafe(true), fqPassedFQsdt(true),
             fqSolexaFmt(false), 
-            ErrorLog(0), DieOnError(true), at_thread(0), num_threads(1)
+            ErrorLog(0), DieOnError(true), at_thread(0), num_threads(1), doTIO(true)
 	{
 		cdbg("Ini inputstreamer");
 		opos[0] = 1; if (fastQver == 0) { QverSet = false; }
@@ -1068,8 +1158,8 @@ public:
 	
 //most used routine to get a new DNA entry		// stillMore = is fastq file empty? pos = read pair to return [0/1/-1]
 	shared_ptr<DNA> getDNA(int pos);
-	void getDNAlines(vector<string>&,int pos);
-	void getDNAlines(multi_tmp_lines*, int blocks, bool);
+	bool getDNAlines(vector<string>&,int pos);
+	bool getDNAlines(multi_tmp_lines*, int blocks, bool);
 	vector<shared_ptr<DNA>> getDNApairs();
 	//mutli core version
 	//vector < shared_ptr<DNA>> getDNAMC();
@@ -1091,6 +1181,7 @@ public:
 	bool hasMIDseqs(){return hasMIDs;}
 	void allStreamClose();
 	void allStreamReset();
+	void setTIO(bool x) { doTIO = x; }
 	void openMIDseqs(string,string);
 	int pairNum() { return numPairs; }
 	bool qualityPresent() { return !qualAbsent; }
@@ -1130,6 +1221,7 @@ private:
 	void _measure(istream &);
 	inline bool _drawbar(istream &);
 	inline void _print(int cur, float prog);
+	
 	int _fileLength, _max, _last;
 	
 	//abstraction to real file type
@@ -1173,6 +1265,7 @@ private:
 
 	mutex protect;
 	int num_threads;
+	bool doTIO;//multi thread IO?
 	int at_thread; 
 #ifdef togRead
 	vector <jobC> slots;

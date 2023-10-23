@@ -185,7 +185,7 @@ public:
 	bool findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2);
 
 
-	void testMergeWithReads(std::istream &is1, std::istream &is2);
+	//void testMergeWithReads(std::istream &is1, std::istream &is2);
 
 
     
