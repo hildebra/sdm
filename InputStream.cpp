@@ -2728,7 +2728,7 @@ bool InputStreamer::setupFastq(string path, string fileS, int& pairs, string sub
 		//cerr << p1 << endl;
 	}
 	if (verbose) {
-		cerr << "At " << file1 << ": ";
+		cerr << "At " << file1 << ":\n";
 	}
 
 

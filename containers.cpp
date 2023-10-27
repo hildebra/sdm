@@ -1130,12 +1130,13 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair, int thr,int& Cstr
 	}
 	d->prepareWrite(fastQoutVer);
 
-	if (curFil->passedReads(10000)) {
+	if (curFil->passedReads(25000)) {
 		if (pairedSeq > 1) {
-			cerr << "10k read pairs/" << _benchmark->now_interval_secs(2) << "s\r";
+			cerr << "25k read pairs/" << _benchmark->now_interval_secs(2) << "s\r";
 		} else {
-			cerr << "10k reads/" << _benchmark->now_interval_secs(2) << "s\r";
+			cerr << "25k reads/" << _benchmark->now_interval_secs(2) << "s\r";
 		}
+		//cerr.flush();
 	}
 
 	//sqfqostrMTX.lock();
