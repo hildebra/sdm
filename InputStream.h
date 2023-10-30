@@ -510,7 +510,7 @@ public:
 		if (active) {return true;}
 		for (size_t i = 0; i < ostr.size(); i++) { if (ostr[i] != nullptr) { ostr[i]->activate(); } }
 		active = true;
-		cerr << "\nActivating dual ostreams: " << FileNames[0] << "," << FileNames[1] << endl;
+		cerr << "Activating dual ostreams: " << FileNames[0] << "," << FileNames[1] << endl;
 		return true;
 	}
 	bool deactivate() {

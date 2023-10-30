@@ -1130,14 +1130,14 @@ bool  OutputStreamer::saveForWrite(shared_ptr<DNA> d,int Pair, int thr,int& Cstr
 	}
 	d->prepareWrite(fastQoutVer);
 
-	if (curFil->passedReads(25000)) {
+	/*if (curFil->passedReads(25000)) {
 		if (pairedSeq > 1) {
 			cerr << "25k read pairs/" << _benchmark->now_interval_secs(2) << "s\r";
 		} else {
 			cerr << "25k reads/" << _benchmark->now_interval_secs(2) << "s\r";
 		}
 		//cerr.flush();
-	}
+	}*/
 
 	//sqfqostrMTX.lock();
 	if (write) {
@@ -3035,8 +3035,7 @@ UClinks * Filters::ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDS
 			FALL->setupFna((*cmdArgs)["-OTU_fallback"]);
 			ucl->setupDefSeeds(FALL, SampleID);
 		}
-		ReadMerger* merg = DBG_NEW ReadMerger(); //create special object for these functions
-		ucl->attachMerger(merg);
+		ucl->activateMerger();
 	}
 	else if (this->doSubselReads()) {
 		//this will select a list of reads and distribute these into multiple files
@@ -3044,8 +3043,8 @@ UClinks * Filters::ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDS
 	}
 	else if (this->doDereplicate()) {
 		Dere = make_shared<Dereplicate>(cmdArgs, this);
-		ReadMerger* merg = DBG_NEW ReadMerger(); //create special object for these functions
-		Dere->attachMerger(merg);
+	//	ReadMerger* merg = DBG_NEW ReadMerger(); //create special object for these functions
+		Dere->activateMerger();
 	}
 	return ucl;
 }

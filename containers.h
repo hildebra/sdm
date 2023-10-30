@@ -843,8 +843,8 @@ public:
 	void reset();
 	bool DerepPerSR() { return b_derepPerSR; }
 	bool mergeDereRead() {return b_merge_pairs_derep_;	}
-	void attachMerger(ReadMerger* m) {if (merger != nullptr) { delete merger; } merger = m;
-	}
+	//void attachMerger(ReadMerger* m) {if (merger != nullptr) { delete merger; } merger = m;}
+	void activateMerger() { if (merger == nullptr) { merger = DBG_NEW ReadMerger(); } }
 
 	void finishMap();
 
@@ -904,7 +904,8 @@ public:
 	void writeOTUmatrix(string outfile);
 	void resetInputUcUp(){ UpUcFnd = false; }
 	void set2UC(){ UPARSE8up = false; }
-	void attachMerger(ReadMerger* merg) {if (merger != nullptr) { delete merger; } merger = merg;}
+	void activateMerger() { if (merger == nullptr) { merger = DBG_NEW ReadMerger(); } }
+	//void attachMerger(ReadMerger* merg) {if (merger != nullptr) { delete merger; } merger = merg;}
 	void setRefMode(){ RefDBmode = true; RefDBotuStart = (int)oriKey.size(); }//from now on only count adds or ref DB seqs
 private:
 	void addUCdo(string,bool );
