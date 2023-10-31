@@ -744,7 +744,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 
 //	mainFilter->ini_filestruct(cmdArgs);
 	//setup once at start
-	vector<ReadMerger*> merger(0);
+	//vector<ReadMerger*> merger(0);
 	//contains info on input files, format, order etc
 	filesStr files;
 
@@ -788,11 +788,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
     }
 
 	//set up a read merger for each thread..
-	merger.resize(threads, nullptr);
 	bool detailedMergeStats(false);
-	for (int x = 0; x < threads; x++) {
-		merger[x] = DBG_NEW ReadMerger(detailedMergeStats);
-	}
 
 
     //---------------------------------
@@ -851,8 +847,11 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 			//	dereplicator->writeLog(files.logF.substr(0, files.logF.length() - 3) + "dere", deLogLocal);//files.deLog
 			//}
 			//in this case also needs to recheck merger prob
-			if (merger[0] != NULL) {
-				ReadMerger * cMerg = DBG_NEW ReadMerger();
+
+			dereplicator->printMergeStats(subfile((*cmdArgs)["-merg_readpos"], lastSRblock.back()), 
+				subfile((*cmdArgs)["-qual_readpos"], lastSRblock.back()));
+				/*if (merger[0] != NULL) {
+				ReadMerger* cMerg = DBG_NEW ReadMerger();
 				for (size_t x = 0; x < merger.size(); x++) {
 					cMerg->addRMstats(merger[x]);
 				}
@@ -860,7 +859,8 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 				cMerg->printQualHisto(subfile((*cmdArgs)["-qual_readpos"], lastSRblock.back()));
 				cMerg->restStats();
 				delete cMerg;
-			}
+				
+			}*/
 
 
 		//continue?
@@ -900,7 +900,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		OutputStreamer* OutStreamer = DBG_NEW OutputStreamer(filter, cmdArgs, 
 			writeStatus, RDSset, threads,"");
 		OutStreamer->attachDereplicator(dereplicator);
-		OutStreamer->attachReadMerger(merger);
+		OutStreamer->activateReadMerger(threads);
 		OutStreamer->setBPwrittenInSR(accumBPwrite);
 		OutStreamer->setBPwrittenInSRmerg(accumBPwriteMerg);	
 		OutStreamer->attachBenchmark(sdm_benchmark);
@@ -1047,8 +1047,8 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
         //polished OTU seeds need to be written after OTU matrix (renaming scheme)
         OutputStreamer* MDx = DBG_NEW OutputStreamer(mainFilter, cmdArgs, 
 			ios::out, RDSset,0);
-		ReadMerger* DerepM = DBG_NEW ReadMerger(false);
-		MDx->attachReadMerger(DerepM);
+		//ReadMerger* DerepM = DBG_NEW ReadMerger(false);
+		MDx->activateReadMerger(1);
         mainFilter->setMultiDNA(MDx);
         ucl->writeNewSeeds(MDx, mainFilter, false);
         
@@ -1061,7 +1061,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
         ucl->writeNewSeeds(MDx, mainFilter, true, true);
 		*/
         delete MDx;
-		delete DerepM;
+		//delete DerepM;
         return;
     } else if (mainFilter->doDereplicate()) {
 		//this is either the last time dereplicate is written (SRblocks),
@@ -1081,7 +1081,10 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		dereplicator->finishMap();
 
 		//last time merger stats to write
-		if (merger[0] != nullptr) {
+
+		dereplicator->printMergeStats(subfile((*cmdArgs)["-merg_readpos"], lastSRblock.back()),
+			subfile((*cmdArgs)["-qual_readpos"], lastSRblock.back()));
+		/*if (merger[0] != nullptr) {
 			ReadMerger* cMerg = DBG_NEW ReadMerger();
 			for (size_t x = 0; x < merger.size(); x++) {
 				cMerg->addRMstats(merger[x]);
@@ -1089,7 +1092,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 			cMerg->printMergeHisto(subfile((*cmdArgs)["-merg_readpos"], lastSRblock.back()));
 			cMerg->printQualHisto(subfile((*cmdArgs)["-qual_readpos"], lastSRblock.back()));
 			delete cMerg;
-		}
+		}*/
 
 
 #ifdef DEBUG
@@ -1169,11 +1172,11 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
     // multithreading
     //delete pool;
 	//ReadMerger no longer needed
-	for (size_t x = 0; x < merger.size(); x++) {
+	/*for (size_t x = 0; x < merger.size(); x++) {
 		if (merger[x] != nullptr) {
 			delete merger[x];
 		}
-	}
+	}*/
 
 }
 

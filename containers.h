@@ -845,6 +845,12 @@ public:
 	bool mergeDereRead() {return b_merge_pairs_derep_;	}
 	//void attachMerger(ReadMerger* m) {if (merger != nullptr) { delete merger; } merger = m;}
 	void activateMerger() { if (merger == nullptr) { merger = DBG_NEW ReadMerger(); } }
+	void printMergeStats(string R1, string R2) {
+		if (merger != nullptr) {
+			if (R1 != "") { merger->printMergeHisto(R1); }
+			if (R2 != "") { merger->printQualHisto(R2); }
+		}
+	}
 
 	void finishMap();
 
@@ -1078,10 +1084,11 @@ public:
 	uint getBPwrittenInSRmerg(void) { return BPwrittenInSRmerg; }
 
 	void attachBenchmark(Benchmark* bench) { _benchmark = bench; }
-	void attachReadMerger(vector<ReadMerger*> merg) {
-		for (size_t x = 0; x < merger.size(); x++) { if (merger[x] != nullptr) { delete merger[x]; } } merger.clear(); merger = merg;
+	void activateReadMerger(int sz) {
+		if (sz >= mergers.size()) { mergers.resize(sz,nullptr); }
+		for (size_t x = 0; x < sz; x++) { if (mergers[x] != nullptr) { delete mergers[x]; } mergers[x] = DBG_NEW ReadMerger();}
 	}
-	void attachReadMerger(ReadMerger* merg) { if (merger.size() > 0 && merger.back() == nullptr) { merger.back() = merg; } else { merger.push_back(merg); } }
+	//void attachReadMerger(ReadMerger* merg) { if (merger.size() > 0 && merger.back() == nullptr) { merger.back() = merg; } else { merger.push_back(merg); } }
 	bool Demulti2Fls() { return bDoDemultiplexIntoFiles; }
 	bool doDeriplicate() { return	b_doDereplicate; }
 	bool doWriteNonBCrds() { return fqNoBCFile.size() == 2; }
@@ -1196,7 +1203,7 @@ private:
 	bool b_merge_pairs_ = false;
 	bool b_merge_pairs_filter_ = false;
 	bool b_merge_pairs_demulti_ = false;
-	vector<ReadMerger*> merger;
+	vector<ReadMerger*> mergers;
 	mutex mergStatMTX;
 
 	Benchmark* _benchmark;

@@ -247,7 +247,7 @@ OutputStreamer::OutputStreamer(Filters* fil, OptContainer* cmdArgs,
 		demultiMergeFiles(0),
         onlyCompletePairsDemulti(false),
 		b_merge_pairs_demulti_(false), b_merge_pairs_filter_(false),
-		b_merge_pairs_(false), merger(1,nullptr),
+		b_merge_pairs_(false), mergers(0,nullptr),
 		Nthrds(numThreads),_benchmark(nullptr)
 {
 	MFil = fil;
@@ -334,6 +334,9 @@ OutputStreamer::~OutputStreamer(){
 	closeOutFilesDemulti();
 	for (uint i=0; i<subFilter.size();i++){
 		if (subFilter[i] != nullptr) { delete subFilter[i]; }
+	}
+	for (size_t x = 0; x < mergers.size(); x++) {
+		if (mergers[x] != nullptr) { delete mergers[x]; mergers[x] = nullptr; }
 	}
 	dmltMTX.unlock();
 	cdbg("Subfilters deleted, streams closed\n" );
@@ -678,7 +681,7 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 	//merging attempts/prep, requires paired reads
 	if (this->isPEseq() == 2 && 
 		(green1 || green2) && b_merge_pairs_demulti_ && d1->merge_seed_pos_ > 0) {
-		shared_ptr<DNA> dna_merged = merger[curThread]->merge(d1, d2);
+		shared_ptr<DNA> dna_merged = mergers[curThread]->merge(d1, d2);
 		if (dna_merged) {
 			// write out merged DNA
 			dna_merged->prepareWrite(fastQoutVer);
@@ -1243,7 +1246,7 @@ bool OutputStreamer::saveForWrite_merge(shared_ptr<DNAunique> d,
 	if (!dna_merged && d2 != nullptr) {
 		findSeedForMerge(d, d2, 0);
 		if (d->merge_seed_pos_ > 0) {
-			shared_ptr<DNA> tdM = merger[curThread]->merge(d, d2);
+			shared_ptr<DNA> tdM = mergers[curThread]->merge(d, d2);
 			if (tdM != nullptr) {
 				dna_merged = make_shared<DNAunique>(tdM, -1);
 			}
@@ -1827,7 +1830,7 @@ void OutputStreamer::findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2
 	if (dna1->length() == 0 || dna2->length() == 0) {
 		total_read_preMerge_++;  return; 
 	}
-	bool didMerge = merger[thrPos]->findSeedForMerge(dna1, dna2);
+	bool didMerge = mergers[thrPos]->findSeedForMerge(dna1, dna2);
     /*if (merger[thrPos]->findSeed(dna1->getSequence(), dna2->getSequence())) {
 		didMerge = true;
         dna1->merge_seed_pos_ = (int) merger[thrPos]->result.seed.pos1;
