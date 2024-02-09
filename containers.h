@@ -461,6 +461,7 @@ public:
 	uint getDemultiBPperSR() { return demultiBPperSR; }
 	void setWrittenReads(int x){ReadsWritten=x;}
 	int getFileIncrementor(){return OFileIncre;}
+	int getReadsWritten() { return ReadsWritten; }
 	void incrementFileIncrementor(){ OFileIncre++; ReadsWritten = 0; }//
 	void setBCoffset(int x) { 
 		BCoffset = x; }
@@ -565,7 +566,7 @@ public:
 
 	//combiner of samples base_map to collect the group number
 	unordered_map<string, int> combiMapCollectGrp;
-	int getXreads() {		return Xreads;	}
+	int getXreads() {		return firstXreads;	}
 	int totalAccepts() { //just plain number of successes..
 		if (pairedSeq > 1) {
 			return collectStatistics[0]->totalSuccess + collectStatistics[1]->totalSuccess;
@@ -722,7 +723,7 @@ protected:
 		void fix() { BChit = 0; BCrevhit = 0; b_BCdirFix = true; reversedBCs = false; }
 	};
 	vector<BCdecide> BCdFWDREV;
-	int Xreads;//just prints the first X reads for experiment (read pairs being counted as 2)
+	int firstXreads;//just prints the first X reads for experiment (read pairs being counted as 2)
 	bool restartSet;//start from beginning, i.e. wrong BC direction
 	bool b_optiClusterSeq;//SEED extension
 	bool b_subselectionReads;//filter out a specific set of reads

@@ -126,7 +126,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //2.13: fixed mem leak in output
 //2.14: new model of preallocating space for input strings
 
-static const float sdm_version = 2.14f;
+static const float sdm_version = 2.15f;
 static const char* sdm_status = "beta";
 
 

@@ -2467,6 +2467,16 @@ shared_ptr<DNA> str2DNA(vector<string>& in, bool keepPairHD,int fastQver, int re
 }
 */
 
+string InputStreamer::current_infiles() {
+	string ret(""); int pos(0);
+	if (isFasta) {
+		fasta_istreams[pos]->getInFile();
+	} else {// fastq format
+		fastq_istreams[pos]->getInFile();
+	}
+	return ret;
+}
+
 bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse) {
 
 	assert(tmpO->size() == blocks);
@@ -2481,7 +2491,8 @@ bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse) 
 		}
 		if (!b1 || !b2) {
 			if (b1 != b2 && numPairs == 2) {
-				cerr << "Problem: read 1 and read2 appear not be of the same size!\n";
+				//cerr << "Currently reading: "<<current_infiles()<<endl;
+				cerr << "Problem: in file "<< current_infiles () << " read1 and read2 appear not be of the same size!\n";
 			}
 			tmpO->setSize(k);
 			return false;
@@ -2509,15 +2520,14 @@ bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 			stillMore = quality_istreams[pos]->getline(ret[2]);//qual
 			stillMore = quality_istreams[pos]->getlines(ret[2], lnRd, true);//qual
 		}
-	}
-	else {// fastq format
+	} else {// fastq format
 		//fqRead
 		stillMore = fastq_istreams[pos]->get4lines(ret);
 		/*for (int xx = 0; xx < 4; xx++) {
 			stillMore = fastq_istreams[pos]->getline(ret[xx]);
 		}*/
 		lnCnt[pos] += 4;
-		if (fastQver == 0 || lnCnt[pos] == 0) { // ok first time just has to be done in function, after this can be unloaded outside
+		if (fastQver == 0 || lnCnt[pos] == 4) { // ok first time just has to be done in function, after this can be unloaded outside
 			//cerr << "AutoFQ!!";
 			shared_ptr<DNA> tdn = make_shared<DNA>(ret, fastQver);
 			minmaxQscore(tdn);
@@ -2934,6 +2944,7 @@ void InputStreamer::setupFna(string fileS){
 }
 
 int InputStreamer::auto_fq_version() {
+	//if (QverSet) { return 33; }
 	int fqDiff(0);
 	if (minQScore >= 100 || maxQScore < 2) {
 		return fqDiff;
@@ -2952,8 +2963,11 @@ int InputStreamer::auto_fq_version() {
 		fqDiff = (fastQver - 33); fastQver = 33;
 		//cerr << "Setting to Sanger fastq version (q offset = 33).";
 	} else {
-		cerr << "\nUndecided fastq version..\n";
-		fqDiff = (fastQver - 33); fastQver = 0;
+		if (verbose) {
+			cerr << "\nUndecided fastq version..\n"; verbose = 0;
+		}
+		//fallback to sensible std..
+		fqDiff = (fastQver - 33); fastQver = 33;
 		//exit(53);
 	}
 	QverSet = true;

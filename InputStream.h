@@ -332,6 +332,9 @@ public:
 		}
 		return true;
 	}
+
+	string getInFile() { return file; }
+
 private:
 	bool internalReadChunk() {
 		if (!*(primary)) {
@@ -1145,7 +1148,8 @@ public:
             qualAbsent(false),
             fqReadSafe(true), fqPassedFQsdt(true),
             fqSolexaFmt(false), 
-            ErrorLog(0), DieOnError(true), at_thread(0), num_threads(1), doTIO(true)
+            ErrorLog(0), DieOnError(true), at_thread(0), num_threads(1), 
+			doTIO(true), verbose(1)
 	{
 		cdbg("Ini inputstreamer");
 		opos[0] = 1; if (fastQver == 0) { QverSet = false; }
@@ -1201,6 +1205,7 @@ public:
    //             shared_ptr<DNA> *dna1, shared_ptr<DNA> *dna2, shared_ptr<DNA> *mid);
 
 private:
+	string current_infiles();
 	inline qual_score minmaxQscore(qual_score t);// , int lnCnt);
 	void minmaxQscore(shared_ptr<DNA> t);// , int lnCnt);
 	bool setupFastq_2(string, string, string);
@@ -1272,6 +1277,7 @@ private:
 #else
 	vector <job3> slots;
 #endif
+	int verbose;
     
     /*shared_ptr<DNA> getDNA(bool &has_next);
     

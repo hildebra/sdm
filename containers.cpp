@@ -767,13 +767,20 @@ void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil,
 		gzReport = "gzipped ";
 	}
 
+	bool displayInfo(false);
+	if (fil->getReadsWritten() == 0) {
+		displayInfo = true;
+	}
+
 	struct stat info;
 	if (stat(path.c_str(), &info) != 0) {
 		cerr << "Output path for demultiplexed files does not exist, please create this directory:\n" << path << endl;
 		exit(833);
 	}
 	else if (info.st_mode & S_IFDIR) { // S_ISDIR() doesn't exist on my windows 
-		cerr << "\nWriting "<< gzReport<<"demultiplexed files to : " << path << endl;// printf(" % s is a directory\n", path);
+		if (displayInfo) {
+			cerr << "\nWriting " << gzReport << "demultiplexed files to : " << path << endl;// printf(" % s is a directory\n", path);
+		}
 	}
 	else {
 		cerr << path << " is no directory\n"; exit(834);
@@ -2434,7 +2441,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
         pairedSeq(-1),
         //revConstellationN(0),
         BCdFWDREV(2),
-        Xreads(-1),
+        firstXreads(-1),
         restartSet(false), b_optiClusterSeq(false),
         b_subselectionReads(false), b_doQualFilter(true),
         b_doFilter(true),
@@ -2557,7 +2564,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		getline(ss,segs2,'\t');
 
 		if ((*cmdArgs)["-XfirstReads"] != "") {
-			Xreads = atoi((*cmdArgs)["-XfirstReads"].c_str());
+			firstXreads = atoi((*cmdArgs)["-XfirstReads"].c_str());
 		}
 
 
@@ -2815,7 +2822,8 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
         pairedSeq(of->pairedSeq),
         //revConstellationN(0),
         BCdFWDREV(of->BCdFWDREV),
-        restartSet(false),
+		firstXreads(of->firstXreads),
+		restartSet(false),
         b_optiClusterSeq(of->b_optiClusterSeq), b_subselectionReads(of->b_subselectionReads),
         b_doQualFilter(of->b_doQualFilter),
         b_doFilter(of->b_doFilter),
