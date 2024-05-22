@@ -382,6 +382,9 @@ public:
 
 	UClinks * ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDSset,
 		shared_ptr<Dereplicate>& Dere);// , ReadMerger* merg);
+	//checks some basic parameters of DNA quality in UClinks seed finding..
+	void miniCheckDNA(shared_ptr<DNA> d, shared_ptr<DNA> d2);
+
 
 	Filters* newFilterPerBCgroup(const vector<int>);
 
@@ -447,6 +450,8 @@ public:
 	bool doReversePrimers() { return bPrimerR; }
 	//routine checks, and reverses/swaps DNA objects
 	bool swapReverseDNApairs(vector< shared_ptr<DNA>>&);
+	//for single PB reads: check if they are reversed?
+	bool isReversedAmplicon(shared_ptr<DNA>);
 	void preFilterSeqStat(shared_ptr<DNA> d,int pair);
 //    void preFilterSeqStatMT(shared_ptr<DNA> d, data_MT *data, int pair_);
 	inline void updateMaxSeqL(int x);
@@ -479,6 +484,7 @@ public:
 	bool doDemultiplex(){ return bDoMultiplexing; }
 	bool doDereplicate() { return bDoDereplicate; }
 	bool doFilterAtAll() { return b_doFilter; }
+	bool doSeedExtension() { return bDoSeedExtension; }
 	uint getcut5PR2() { return cut5PR2; }
 	uint getcut5PR1() { return cut5PR1; }
 
@@ -731,6 +737,7 @@ protected:
 	bool b_doFilter; //option file not provided? just crunch files through, but careful about demultiplexing..
 
 	bool bDoDereplicate;
+	bool bDoSeedExtension;
 	bool bDoCombiSamples;
 
 	//controls output file size

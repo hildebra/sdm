@@ -125,8 +125,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //2.11: added ".1" ".2" end of fastq header pairs; removed a few warnings
 //2.13: fixed mem leak in output
 //2.14: new model of preallocating space for input strings
+//2.16: new threading model (no more dynamic threadpool) (reversed to old model)
+//2.17: fixed PB rev seq checks..
 
-static const float sdm_version = 2.15f;
+static const float sdm_version = 2.17f;
 static const char* sdm_status = "beta";
 
 
@@ -153,8 +155,8 @@ static const char DNA_SPACE[15] = {'A','C','G','T','N','R','Y','M','K','W','S','
 static const int DNA_MAX_IN_MEM = 5000;
 static const unsigned int MAX_FILE_STREAMS = 500;
 static const int RDBUFFER = 4096;
-static size_t INPUT_BUFFER_SIZE = 50000;
-static size_t OUTPUT_BUFFER_SIZE = 70000;
+static size_t INPUT_BUFFER_SIZE = 80000;
+static size_t OUTPUT_BUFFER_SIZE = 50000;
 
 typedef unsigned int uint;
 typedef unsigned long ulong;

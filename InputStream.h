@@ -124,6 +124,14 @@ struct filesStr {//used in separateByFile
 
 struct multi_tmp_lines {
 	multi_tmp_lines() :tmp(0) {}
+	multi_tmp_lines(int s) :tmp(0)
+	{
+		string empty(""); empty.reserve(151); vector<string>tmpLines2(4, empty);
+		vector<vector<string>> tmpLines(3, tmpLines2);
+		tmp.resize(s, tmpLines);
+	}
+
+
 	size_t size() { return tmp.size(); }
 	void setSize(size_t X) { tmp.resize(X); }
 	vector< vector< vector< string>>> tmp;
@@ -133,6 +141,7 @@ struct multi_tmp_lines {
 //static mutex input_mtx;
 
 class ifbufstream {//: private std::streambuf, public std::ostream {
+
 public:
 	ifbufstream(const string& inF, size_t buf1=20000,bool isMC=false,bool test=false) :
 		file(inF),modeIO(ios::in),at(0),isGZ(false), atEnd(false), hasKickoff(false), 
@@ -142,12 +151,7 @@ public:
 			cerr << "Buffer size chosen too small: " << bufS << endl << "class ifbufstream\n";
 			exit(236);
 		}
-		cdbg("Ini ibufstream");
-		keeper = DBG_NEW char[bufS];
-		keeperW = DBG_NEW char[bufS];
-		for (uint x = 0; x < bufS; x++) {
-			keeper[x] = EOF; keeperW[x] = EOF;
-		}
+		iniBufStrm();
 		
 		if (isGZfile(file)) { //write a gzip out??
 			isGZ = true;
@@ -156,17 +160,7 @@ public:
 			exit(51);
 #endif
 		}
-		if (isGZ) {
-#ifdef _gzipread
-			primary = DBG_NEW zstr::ifstream(file.c_str());
-#else
-			cerr << "gzip not supported in your sdm build\n (ifbufstream) " << file; exit(50);
-#endif
-		}
-		else {
-			primary = DBG_NEW ifstream(file, modeIO);
-		}
-		//primary->set_rdbuf(0);
+		openFstream();
 
 		if (!primary){
 			atEnd = true;
@@ -182,30 +176,35 @@ public:
 		input_mtx.lock();
 		primary->read(keeper, bufS);
 		if (!(*primary) || bufS > primary->gcount()) {
-			bufS = (size_t)primary->gcount()+1;
-			atEnd = true;
-			delete[] keeperW;
-			keeperW = nullptr;
-		} else {
-			kickOff();
-		}
+			bufS = (size_t)primary->gcount()+1;atEnd = true;
+			delete[] keeperW;keeperW = nullptr;
+		} else {kickOff();}
 		input_mtx.unlock();
 	}
 	~ifbufstream() {
 		cdbg("destroy ibufstream ");
 		input_mtx.lock();
 		if (hasKickoff) { readKickoff.get(); hasKickoff = false;}
-		delete[] keeper; 
-		delete[] keeperW; 
+		delete[] keeper; keeper = nullptr;
+		delete[] keeperW; keeperW = nullptr;
 		delete primary;
 		input_mtx.unlock();
 	}
-	void clear() {
+	void reset() {
 		input_mtx.lock();
+		if (hasKickoff) { readKickoff.get(); hasKickoff = false; }
 		at = 0;
 		primary->clear();
 		delete primary;
-		primary = DBG_NEW ifstream(file, modeIO);
+		openFstream();
+		delete[] keeper; keeper = nullptr;
+		delete[] keeperW; keeperW = nullptr;
+		iniBufStrm();
+		primary->read(keeper, bufS);
+		if (!(*primary) || bufS > primary->gcount()) {
+			bufS = (size_t)primary->gcount() + 1; atEnd = true;
+			delete[] keeperW; keeperW = nullptr;
+		}else { kickOff(); }
 		input_mtx.unlock();
 	}
 	void setMC(bool b) { doMC = b; }
@@ -351,6 +350,19 @@ private:
 		}
 		return true;
 	}
+	void openFstream() {
+		if (isGZ) {
+#ifdef _gzipread
+			primary = DBG_NEW zstr::ifstream(file.c_str());
+#else
+			cerr << "gzip not supported in your sdm build\n (ifbufstream) " << file; exit(50);
+#endif
+		}
+		else {
+			primary = DBG_NEW ifstream(file, modeIO);
+		}
+	}
+	
 	bool kickOff() {
 		if (doMC) {//do MC?
 			if (!atEnd) {
@@ -393,6 +405,15 @@ private:
 		//primary->read(keeperW, bufS);
 		return true;
 	}
+	void iniBufStrm(){
+		cdbg("Ini ibufstream");
+		keeper = DBG_NEW char[bufS];
+		keeperW = DBG_NEW char[bufS];
+		for (uint x = 0; x < bufS; x++) {
+			keeper[x] = EOF; keeperW[x] = EOF;
+		}
+	}
+
 	string file;
 	char* keeper; char* keeperW;
 	string locBuffer;
@@ -737,9 +758,9 @@ public:
 	bool cutSeq(int start, int stop=-1, bool = false);
 	bool cutSeqPseudo(int start) { return cutSeq(start, -1, true); }
 	bool HomoNTRuns(int);
-	int matchSeq(string, int, int, int);
+	int matchSeq(string, int, int, int,bool=false);
 	void reverse_compliment(bool reset=true);
-	int matchSeqRev(const string&, int, int, int=0);
+	int matchSeqRev(const string&, int, int, int=0,bool=false);
 	int matchSeq_tot(const string&, int, int, int&);
 	void writeSeq(ostream&, bool singleLine = false);
 	string writeSeq(bool singleLine = false);
@@ -1163,7 +1184,7 @@ public:
 //most used routine to get a new DNA entry		// stillMore = is fastq file empty? pos = read pair to return [0/1/-1]
 	shared_ptr<DNA> getDNA(int pos);
 	bool getDNAlines(vector<string>&,int pos);
-	bool getDNAlines(multi_tmp_lines*, int blocks, bool);
+	bool getDNAlines(multi_tmp_lines*, int blocks, bool,bool=false);
 	vector<shared_ptr<DNA>> getDNApairs();
 	//mutli core version
 	//vector < shared_ptr<DNA>> getDNAMC();
@@ -1184,7 +1205,7 @@ public:
 	//shared_ptr<DNA> getDNA_MID(bool&);
 	bool hasMIDseqs(){return hasMIDs;}
 	void allStreamClose();
-	void allStreamReset();
+	void allStreamReset();//go back to line 1
 	void setTIO(bool x) { doTIO = x; }
 	void openMIDseqs(string,string);
 	int pairNum() { return numPairs; }
@@ -1219,7 +1240,12 @@ private:
 	void maxminQualWarns_fq();
 	int auto_fq_version();
 	int auto_fq_version(qual_score minQScore, qual_score maxQScore=0);
-	void resetLineCounts(){ lnCnt[0] = 0;	lnCnt[1] = 0;	lnCnt[2] = 0; }
+	void resetStats() {
+		for (size_t i = 0; i < lnCnt.size(); i++) { lnCnt[i] = 0; }
+		for (size_t i = 0; i < pairs_read.size(); i++) { pairs_read[i] = 0; }
+		for (size_t i = 0; i < opos.size(); i++) { opos[i] = 0; }
+		currentFile = 0; totalFileNumber = 0; BCnumber = 0;
+	}
 	bool desync(int pos) { if ( abs(pairs_read[pos] - pairs_read[opos[pos]]) > 1 ) {return true; } return false; }
 	void IO_Error(string x);
 	//bar on file read progress

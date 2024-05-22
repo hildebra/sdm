@@ -96,6 +96,21 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 }
 */
 //converts str to DNA
+
+void multi_read_paired_STRget(shared_ptr<InputStreamer> IS, OutputStreamer* MD, int curThread, 
+	int tmpBlockSize, bool MIDuse, bool keepPairHd, qual_score FastqVer) {
+
+
+	multi_tmp_lines* tmpLines = new multi_tmp_lines(tmpBlockSize);
+	bool cont(true);
+	while (cont) {
+		cont = IS->getDNAlines(tmpLines, tmpBlockSize, MIDuse, true);
+		multi_read_paired_STRready(tmpLines, MIDuse, MD, curThread, keepPairHd, FastqVer);
+	}
+
+	delete tmpLines;
+
+}
 bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 	bool MIDuse, OutputStreamer* MD, int curThread,
 	bool keepPairHd, qual_score FastqVer) {
@@ -188,7 +203,12 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 
 	//manage reversed / swapped reads by detecting where the fwd primer is
-	curFil->swapReverseDNApairs(tdn);
+	bool wasReversed;
+	if (pairedRd == 2) {
+		wasReversed= curFil->swapReverseDNApairs(tdn);
+	} else if (tdn[1] == nullptr) {
+		wasReversed = curFil->isReversedAmplicon(tdn[0]);
+	}
 
 
     /*if (checkBC2ndRd) {
@@ -361,9 +381,61 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	return true;
 }
 
+
+
+
+bool read_paired2(OptContainer* cmdArgs, OutputStreamer* MD,
+	shared_ptr<InputStreamer> IS, bool MIDuse, int Nthreads) {
+
+	DNAmap oldMIDs;
+	bool fqHeadVer(true);
+	cdbg("Paired reads routine v2\n");
+
+	//multithreading setup
+	//int Nthrds = atoi((*cmdArgs)["-threads"].c_str()) -1 ;
+	vector<std::thread> slots;
+
+	int DNAinMem(0);
+	bool cont(true), cont2(true), cont3(true);
+	bool keepPairedHD = IS->keepPairedHD();
+	int tmpBlockSize = atoi((*cmdArgs)["-iniBlockSize"].c_str());
+
+	
+	//find out the fastqVer, fix across fastq's
+	qual_score fastqVer;
+	multi_tmp_lines* tmpO = new multi_tmp_lines(tmpBlockSize);
+	cont = IS->getDNAlines(tmpO, tmpBlockSize, MIDuse,true);
+	fastqVer = IS->fastQscore();
+	shared_ptr<DNA> tmp = str2DNA(tmpO->tmp[0][0], keepPairedHD, fastqVer, 0);
+	MD->checkFastqHeadVersion(tmp);			fqHeadVer = false;
+	delete tmpO;
+	IS->allStreamReset();
+
+
+
+	for (int i = 0; i < Nthreads; ++i) {
+		// Each thread adds two numbers
+		slots.emplace_back(multi_read_paired_STRget, 
+			IS, MD, i, tmpBlockSize, MIDuse,  keepPairedHD, fastqVer);
+	}
+
+
+	for (auto& thread : slots) {
+		thread.join();
+	}
+
+	//close shop
+	//MD->revConstellationCnts(revConstellation);
+	MD->closeOutStreams();
+
+	return true;
+}
+
+
 struct job2 {
 	bool inUse = false;
 	future<bool> job;
+	//thread job;
 };
 
 bool read_paired(OptContainer* cmdArgs, OutputStreamer* MD, 
@@ -394,7 +466,7 @@ bool read_paired(OptContainer* cmdArgs, OutputStreamer* MD,
 	bool keepPairedHD = IS->keepPairedHD();
 	//int revConstellation(0);
 	//int cnt(0); 
-	bool switching(true); // important to keep track of this, to fix swapped read pairs
+	//bool switching(true); // important to keep track of this, to fix swapped read pairs
 
 	//vector<string>tmpLines2(4, "");
 	//vector<vector<string>> tmpLines(3, tmpLines2);
@@ -433,6 +505,9 @@ bool read_paired(OptContainer* cmdArgs, OutputStreamer* MD,
 			cont = IS->getDNAlines(tmpStrHolders[thrCnt], tmpBlockSize, MIDuse);
 			fastqVer = IS->fastQscore();
 			if (fqHeadVer) { //some things just need to be done
+				if (tmpStrHolders[thrCnt]->tmp[0][0].size() < 0) {
+					cerr << "Error: empty fastq object. Please check that your input fastq contains sequences?"; exit(623);
+				}
 				shared_ptr<DNA> tmp = str2DNA(tmpStrHolders[thrCnt]->tmp[0][0], keepPairedHD, fastqVer, 0);
 				MD->checkFastqHeadVersion(tmp);			fqHeadVer = false;
 			}
@@ -938,13 +1013,24 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		
 		
 		
+
+
+
 		
 		
 		//**********************
 		//heavy reading, demultiplexing, dereplicating routine
 		//**********************
 		read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
-		
+		//read_paired2(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
+
+
+
+
+
+
+
+
 
 
 		//here all subfilter can be merged (to get stats right)

@@ -2445,7 +2445,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
         restartSet(false), b_optiClusterSeq(false),
         b_subselectionReads(false), b_doQualFilter(true),
         b_doFilter(true),
-        bDoDereplicate(false), bDoCombiSamples(false),
+        bDoDereplicate(false), bDoSeedExtension(false), bDoCombiSamples(false),
         maxReadsPerOFile(0), ReadsWritten(0), OFileIncre(0),
 		demultiBPperSR(0),
         barcodeLengths1_(0), barcodeLengths2_(0),
@@ -2828,6 +2828,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
         b_doQualFilter(of->b_doQualFilter),
         b_doFilter(of->b_doFilter),
         bDoDereplicate(of->bDoDereplicate),
+		bDoSeedExtension(of->bDoSeedExtension),
         bDoCombiSamples(of->bDoCombiSamples),
         maxReadsPerOFile(of->maxReadsPerOFile),
 		demultiBPperSR(of->demultiBPperSR),
@@ -3026,6 +3027,58 @@ Filters* Filters::newFilterPerBCgroup(const vector<int> idxi) {
 	return filter;
 }
 
+void Filters::miniCheckDNA(shared_ptr<DNA> d, shared_ptr<DNA> d2) {
+
+	int BCoffs = getBCoffset();
+	bool checkSwitchedRdPairs = this->checkSwitchedRdPairs();
+	bool dualBCs = this->doubleBarcodes();
+	bool doBCsAtAll = this->doBarcodes();
+	int pairedRd = this->isPaired();
+
+	//needs some basic cleanups here..
+	bool wasReversed;
+	if (pairedRd == 2) {
+		vector< shared_ptr<DNA>>tdn(0); tdn.push_back(d);
+		if (d2 != nullptr) { tdn.push_back(d2); }
+		else { tdn.push_back(nullptr); }
+		wasReversed = this->swapReverseDNApairs(tdn);
+	}
+	else if (d2 == nullptr) {
+		wasReversed = this->isReversedAmplicon(d);
+	}
+
+	//remove base pairs 3' or 5' ?
+	if (getcut5PR1()) { d->cutSeq(0, getcut5PR1()); }
+	if (getcut5PR2()) { d2->cutSeq(0, getcut5PR2()); }
+	if (removeAdapter) { remove_adapter(d); }
+
+
+	if (BcutPrimer || Bcheck4illuAdapts) {
+		int tagIdx = 0; //for now just set to 0.. if an experiment uses > 1 primers this would need to change
+		bool fwdRC = false; bool revRC = true;//if this gets changed, the read needs to be reverse complemented
+		cutPrimer(d, PrimerIdx[tagIdx], fwdRC, 0, BextensivePrimerChecks);
+		if (bShortAmplicons) {//also check other end of primer.. also use for PacBio amplicons
+			//case for 1) long read 2) look for both primers 3) rev required
+			cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, BextensivePrimerChecks);
+		}
+		if (d2 != nullptr) {//pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
+			bool revCheck = false;// pair == -1 || pair == 0;//1:false for RC, else always a reverse check
+			cutPrimerRev(d2, PrimerIdxRev[tagIdx], revCheck, false);
+			if (bShortAmplicons) {//also check other end of primer..
+				cutPrimer(d, PrimerIdx[tagIdx], revCheck, 1);
+			}
+		}
+		//conditions for failing read on not finding fwd primer
+		if (!d->getFwdPrimCut() && bRequireFwdPrim) {
+			d->setYellowQual(true);
+		}
+		//conditions for failing read on not finding rev primer
+		if (d2 != nullptr && bRequireRevPrim && !d->getRevPrimCut()) {//failed to find reverse primer
+			d->setYellowQual(true);
+		}
+	}
+
+}
 
 //service function to ini OTU Seed extension 
 UClinks * Filters::ini_SeedsReadsDerep(UClinks *ucl, shared_ptr<ReadSubset>& RDSset, 
@@ -3177,6 +3230,30 @@ void Filters::reverseTS_all_BC2() {
 	}
 
 }
+
+bool Filters::isReversedAmplicon( shared_ptr<DNA> tdn) {
+	if ((!checkRevRd() ) ) {
+		return false;
+	}
+	int tagIdx = 0;//just try
+
+	//method 1: just check if primer is found reversed, most basic and seems to work fine..
+	//simple check if fwd rev primer is in reverse position: then reverse transcribe
+
+	bool fwdRd1Primer = checkIfPrimerHits(tdn, 0, 0);
+	bool fwdRd1PrimerRev = checkIfRevPrimerHits(tdn, 0, 0);
+	if (fwdRd1Primer ) {
+		return false;
+	}
+	if (fwdRd1PrimerRev) {
+		tdn->reverse_compliment();
+		collectStatistics[0]->reversedRds++;//take stats on this
+		return true;
+	} 
+
+	return false;
+}
+
 bool Filters::swapReverseDNApairs(vector< shared_ptr<DNA>>& tdn){
 	if ((!checkRevRd() && !checkSwitchedRdPairs()) || tdn[1] == nullptr) {
 		return false;
@@ -3195,13 +3272,11 @@ bool Filters::swapReverseDNApairs(vector< shared_ptr<DNA>>& tdn){
 		collectStatistics[0]->reversedRds++;
 		if (tdn[1] != nullptr) { 
 			tdn[1]->reverse_compliment(); 
-			collectStatistics[1]->reversedRds++;
-		}
-		
 		//take stats on this
-
-	}
-	else if (checkSwitchedRdPairs() && isPaired() == 2 && tdn[1] != nullptr) {
+			collectStatistics[1]->reversedRds++;
+			return true;
+		}
+	} else if (checkSwitchedRdPairs() && isPaired() == 2 && tdn[1] != nullptr) {
 		//more complex: check if second pair has reversed primer: whole pair swap
 		if (checkIfRevPrimerHits(tdn[1], 0, 0)) {//switched pairs && reversed
 			tdn[0]->reverse_compliment();
@@ -3214,11 +3289,12 @@ bool Filters::swapReverseDNApairs(vector< shared_ptr<DNA>>& tdn){
 			//but redundant logging..
 			tdn[1]->constellationPairRev(true);
 			tdn[0]->constellationPairRev(true);
-		}
-		else if (checkIfPrimerHits(tdn[1], 0, 0)) {//switched pairs only
+			return true;
+		} else if (checkIfPrimerHits(tdn[1], 0, 0)) {//switched pairs only
 			swap(tdn[1], tdn[0]);
 			tdn[1]->setpairREV();		tdn[0]->setpairFWD();
 			collectStatistics[0]->swappedRds++;
+			return true;
 
 		}
 	}
@@ -3552,8 +3628,9 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre,
 	int pair = max(0, pairPre);//corrects for -1 (undefined pair_) to set to 0
 	
 	//remove technical adapter
-	if (pairPre == -1 && removeAdapter)
-	    remove_adapter(d);
+	if (pairPre == -1 && removeAdapter) {
+		remove_adapter(d);
+	}
 	
 	//set in outer routines that check mid (-1) or needs to be checked here(-2)
 	if (tagIdx == -2){
@@ -3571,8 +3648,7 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre,
 	    return false;
 	}
 	
-	bool extensivePrimerCheck = BextensivePrimerChecks;
-	if (extensivePrimerCheck) {
+	if (BextensivePrimerChecks) {
 		if (checkIfRevPrimerHits(d, PrimerIdx[tagIdx], 0, bShortAmplicons)) {
 			d->reverse_compliment(false);
 		}
@@ -3581,9 +3657,9 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre,
 	if (BcutPrimer || Bcheck4illuAdapts) {
 		bool fwdRC = false; bool revRC = true;//if this gets changed, the read needs to be reverse complemented
 		if (pair != 1  ) {//0 or -1
-			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, extensivePrimerCheck);
+			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, BextensivePrimerChecks);
 			if (bShortAmplicons) {//also check other end of primer.. also use for PacBio amplicons
-				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, extensivePrimerCheck);
+				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, BextensivePrimerChecks);
 				//case for 1) long read 2) look for both primers 3) rev required
 			}
 		} else if (pair != 0) {//pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
@@ -4087,7 +4163,7 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 		int startX(-1), stopX(-1);
 		string presentBCX(""); int c_errX(0);
 		int scanRegionX = 44;
-		int idxX = -2;
+		int idxX = idx;
 		scanBC_back(d, startX, stopX, idxX, c_errX, scanRegionX, presentBCX, false,true);
 		if (idxX >= 0 && BcutTag) {
 			d->cutSeq(startX);
@@ -4309,7 +4385,7 @@ void Filters::scanBC_back(shared_ptr<DNA> d, int& start, int& stop, int& idx, in
 
 	//check each possible BC for a match
 	if (barcodeErrors_ == 0) {
-		for (idx = 0; idx < BCs; idx++) {
+		for (; idx < BCs; idx++) {
 			start = d->matchSeqRev((*locBC)[idx], 0, scanRegion, c_err);
 			if (start != -1) {
 				presentBC = (*locBC)[idx];
@@ -4322,8 +4398,8 @@ void Filters::scanBC_back(shared_ptr<DNA> d, int& start, int& stop, int& idx, in
 		vector<int> stars(0), idxses(0);
 		bool zeroErr = false;
 		//this version tries all BC's and if there are more than one possible match, will reject all matches
-		for (idx = 0; idx < BCs; idx++) {
-			start = d->matchSeqRev((*locBC)[idx], barcodeErrors_, scanRegion, c_err);
+		for (; idx < BCs; idx++) {
+			start = d->matchSeqRev((*locBC)[idx], (*locBC)[idx].size(), scanRegion, c_err);
 			if (start != -1) {
 				if (c_err == 0) {
 					stop = start + (int)(*locBC)[idx].length();
@@ -4353,7 +4429,7 @@ void Filters::scanBC_back(shared_ptr<DNA> d, int& start, int& stop, int& idx, in
 		}
 
 	}
-	if (start == -1) {
+	if (start < 0) {
 		idx = -1;
 	}
 }
@@ -4553,24 +4629,28 @@ bool Filters::cutPrimer(shared_ptr<DNA> d,int primerID,bool& RC,int pair, bool e
 		return true;
 	}
 	int start(-1) ,stop(-1);
-	int tolerance(30), startSearch(0);
+	int limit(50), startSearch(0),limit2(50);
 	if (Bcheck4illuAdapts) {
-		tolerance = 22;
-	} else	if (!d->getBarcodeCut() && maxBCLength1_ > 0) { tolerance = maxBCLength1_ + 4;
-	} else { tolerance = 22; }//in this case nothing is known about 5' end
-	if (extensivePrimerCheck) { tolerance = min((d->length() / (uint)2), (uint)250); }
+		limit = 40;
+	} else	if (!d->getBarcodeCut() && maxBCLength1_ > 0) {
+		limit = maxBCLength1_ + 4;
+	} else { limit = 22; }//in this case nothing is known about 5' end
+	if (extensivePrimerCheck) { 
+		int QS = (int)d->length(); limit = min(QS - 1, max(((int)((float)d->length() * 0.75)), 250));
+		limit2 = (d->length() - 100);;
+	}
 
 	if (!BcutTag){
 		//Tag was not cut out of sequence_, take this into account
 		startSearch = minBCLength1_ - 2;
-		tolerance += (maxBCLength1_ - minBCLength1_) + 4;
+		limit += (maxBCLength1_ - minBCLength1_) + 4;
 	}
 	if (!RC) {
-		start = d->matchSeq(PrimerL[primerID], PrimerErrs, tolerance, startSearch);
+		start = d->matchSeq(PrimerL[primerID], PrimerErrs, limit, startSearch);
 		stop = start + (int)PrimerL[primerID].length();
 	} else {
 	//if (1 && start == -1){
-		int QS = d->length();int limit = max(QS / 2, QS - 250); stop = QS;
+		int QS = d->length();int limit = max(int(QS *0.75), QS - 250); stop = QS;
 		start = d->matchSeqRev(PrimerL_RC[primerID], PrimerErrs, limit, startSearch);
 //		start = d->matchSeq(PrimerL_RC[primerID], PrimerErrs, tolerance, startSearch);
 		if (0 && start != -1) {
@@ -4583,11 +4663,11 @@ bool Filters::cutPrimer(shared_ptr<DNA> d,int primerID,bool& RC,int pair, bool e
 		//sPrimerFail(pair_);// max(0, (int)d->getReadMatePos()));
 		if (alt_PrimerErrs!= 0 && PrimerErrs < alt_PrimerErrs){
 			if (!RC) {
-				start = d->matchSeq(PrimerL[primerID], alt_PrimerErrs, tolerance, startSearch);
+				start = d->matchSeq(PrimerL[primerID], alt_PrimerErrs, limit, startSearch);
 				stop = start + (int)PrimerL[primerID].length();
 			} else {
-				int QS = d->length(); int limit = max(QS / 2 , QS - 150); stop = QS;
-				start = d->matchSeqRev(PrimerL_RC[primerID], alt_PrimerErrs, limit, startSearch);
+				int QS = d->length();  stop = QS;
+				start = d->matchSeqRev(PrimerL_RC[primerID], alt_PrimerErrs, limit2, startSearch);
 			}
 		}
 		if (start < 0){
@@ -4643,41 +4723,23 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d,int primerID,bool& RC,bool extraChe
 	int start(-1) ,stop(d->length());
 	int QS = d->length(); 
 	int limit=max(QS>>1,QS-250);
+	int limit2 = 50;
+	if (true) {
+		limit = min(QS - 1, max(((int)((float)d->length() * 0.75)), 250));
+		limit2 = (d->length() - 100);
+	}
+
 	//int limit = QS>>1;
 
 	if (RC) {
-		start = d->matchSeqRev(PrimerR_RC[primerID], PrimerErrs, limit);	
+		start = d->matchSeqRev(PrimerR_RC[primerID], PrimerErrs, limit, extraCheck);
 	} else {
-		start = d->matchSeq(PrimerR[primerID], PrimerErrs, 33, 0);
+		start = d->matchSeq(PrimerR[primerID], PrimerErrs, limit2, 0, extraCheck);
 		stop = start + (int)PrimerR[primerID].length();
 		if (start >= 0) {
 			RC = false;
 		}
 	}
-	
-	limit = min(QS >> 1,  150);
-	while (extraCheck && start >= 0) { // this will check if there's a primer in the middle of seq.. happens sometimes with PacBio
-		int startX(-1);
-		if (RC) {
-			startX = d->matchSeqRev(PrimerR_RC[primerID], PrimerErrs, limit, d->length()-start+1);
-		}	else {
-			startX = d->matchSeq(PrimerR[primerID], PrimerErrs, (d->length()-100), start+1);
-			//stop = start + (int)PrimerR[primerID].length();
-		}
-		if (startX >= 0) {
-			start = startX;
-			if (!RC) {
-				stop = startX + (int)PrimerR[primerID].length();
-			}
-		} else {
-			extraCheck = false;
-			break;
-			
-		}
-		
-
-	}
-		
 
 	if (start < 0){//failed to match primer
 		//d->QualCtrl.PrimerRevFail = true;
@@ -4708,6 +4770,11 @@ bool Filters::readMap(){//core routine to read map info
 		return true;
 	}
 	string MapF = (*cmdArgs)["-map"];
+	if (cmdArgs->find("-optimalRead2Cluster") != cmdArgs->end()){
+		bDoSeedExtension = true;
+	}
+
+
 
 	string path = ""; bool pathMode = false;
 	if (cmdArgs->find("-i_path")  != cmdArgs->end() && (*cmdArgs)["-i_path"].length() >= 1){
@@ -6399,6 +6466,9 @@ void UClinks::finishMAPfile(){
 
 }
 
+
+
+
 //functions selects optimal read to represent OTU
 void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ, 
 	Filters* fil){
@@ -6423,6 +6493,7 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 	vector<int> curCLID(0,0);
 	//bool sync(false); // syncing of 2 read pairs; not implemented for this function yet
 
+
 	//goes through UC file
 	while ( getMAPPERline(segs, segs2, perID, curCLID, !b_derepAvailable) ) {
 		//int subcnt = 0;
@@ -6436,6 +6507,10 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 			match2 = IS->getDNA(1);
 			if (tmpDNA == NULL) { cont = false; break; }//signal that at end of file
 			
+			//does some basic quality check, such as removing primers, reversing etc
+			fil->miniCheckDNA(tmpDNA, match2);
+
+
 			match = make_shared<DNAunique> (tmpDNA, -1);
 			if (match2 != NULL) {
 				match->attachPair(make_shared<DNAunique>(match2, -1));

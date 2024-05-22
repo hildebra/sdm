@@ -963,7 +963,7 @@ bool DNA::cutSeq(int start, int stop, bool pseudo){
 	return true;
 }
 
-int DNA::matchSeq(std::string PrSt,int Err,int tolerance, int startPos){
+int DNA::matchSeq(std::string PrSt,int Err,int tolerance, int startPos,bool exhaustive){
 	//const char* DN = sequence_.c_str();
 	//const char* Pr = PrSt.c_str();
 	int PrL = (int) PrSt.length();
@@ -972,6 +972,7 @@ int DNA::matchSeq(std::string PrSt,int Err,int tolerance, int startPos){
 	int endPos(-1),pos(startPos), Prp(0), c_err(0),Prp2(0), c_points(0), point_aim(1);
 	point_aim = max(1, int(PrL / 2));
 	//bool res(false);
+	vector<int> potentialMatches(0);
 	for (; pos< tolerance; pos++){
 		if (pos > mthL) {	break;	}
 		c_err=0;Prp=0; Prp2=pos;
@@ -987,10 +988,21 @@ int DNA::matchSeq(std::string PrSt,int Err,int tolerance, int startPos){
 			Prp++; Prp2++;
 			if (sequence_[Prp2] != 'N') { c_points++; }
 		} while ( Prp < PrL);
-		if (c_err<=Err && c_points >= point_aim){endPos=pos;break;}
+		if (c_err<=Err && c_points >= point_aim){
+			endPos=pos;
+			potentialMatches.push_back(endPos);
+			if (!exhaustive) {
+				break;
+			}
+			//break;
+		}
 	}
 	//if(!suc){pos=-1;}
-	return endPos;
+	if (potentialMatches.size() > 0) {
+		return potentialMatches.back();
+	} else {
+		return -1;
+	}
 }
 void DNA::reset() {
     accumulated_error_ = 0.; good_quality_ = false; mid_quality_ = false;
@@ -1016,17 +1028,20 @@ void DNA::reverse_compliment(bool reset) {
 
 //match from end of sequence_ to find rev primer
 int DNA::matchSeqRev(const string& PrSt,int Err, int check_l,
-				  int coverage){
+				  int start,bool exhaustive){
 	//fail::ret -1
 	int PrL = (int) PrSt.length();
-	if (coverage==0){coverage=5;} //default seed set to 5
+	if (start ==0){ 
+		start = PrL; //default seed set to 5
+	}
 	int SeL = (int) sequence_.size();
 	//int wantSc = PrL - Err;
-	int pos(SeL-coverage), Prp(0), c_err(0), endPos(-1), c_points(0), point_aim(1);
+	int pos(SeL- start), Prp(0), c_err(0), endPos(-1), c_points(0), point_aim(1);
+	vector<int> potentialMatches(0);
 	for (; pos> check_l; pos--){
 		c_err = 0; Prp = 0; c_points = 0;
 		int PrL2 = min(PrL,SeL-pos);
-		point_aim = max(1,int(PrL2 / 2)+1);
+		point_aim = max(1,int((float)PrL2 *0.9f));
 		do {
 #ifdef _NEWMATCH
 			uint lpos = pos + Prp;
@@ -1038,12 +1053,17 @@ int DNA::matchSeqRev(const string& PrSt,int Err, int check_l,
 			if (sequence_[lpos] != 'N') { c_points++; }
 		} while (Prp < PrL2);
 		if (c_err<=Err && c_points >=point_aim){
-			endPos=pos;break;}
+			endPos=pos;
+			potentialMatches.push_back(endPos);
+			if (!exhaustive) {
+				break;
+			}
+		}
 	}
 	//secondary check for last few NT's
-	if (endPos==-2){
+	if (endPos==-2 && potentialMatches.size()==0){
 		pos = (SeL-1);
-		for (; pos> (SeL-coverage); pos--){
+		for (; pos> (SeL- start); pos--){
 			c_err=0;Prp=0;
 			int PrL2 = min(PrL,SeL-pos);
 			do {
@@ -1055,10 +1075,19 @@ int DNA::matchSeqRev(const string& PrSt,int Err, int check_l,
 				Prp++;
 			} while (Prp < PrL2);
 			if (c_err<=Err ){
-				endPos=pos;break;}
+				endPos=pos;
+				potentialMatches.push_back(endPos);
+				if (!exhaustive) {
+					break;
+				}
+			}
 		}
 	}
-	return endPos;
+	if (potentialMatches.size() > 0) {
+		return potentialMatches.back();
+	} else {
+		return -1;
+	}
 }
 // looks through total DNA seq
 int DNA::matchSeq_tot(const string& Pr, int error, int maxPos, int& c_err){
@@ -2088,16 +2117,17 @@ bool InputStreamer::checkInFileStatus() {
 	return false;
 }
 void InputStreamer::allStreamReset() {
-	resetLineCounts();
+	resetStats();
 #ifdef DEBUG
 	cerr << "Resetting input streams" << endl;
 #endif
 	//reopen streams in gz case // sdm 1.01: make default
 	
 	for (uint i = 0; i < 3; i++) {
-		if (fasta_istreams[i] != NULL && !fasta_istreams[i]->eof()) { fasta_istreams[i]->clear(); }//fasta_istreams[i]->seekg(0, ios::beg);
-		if (quality_istreams[i] != NULL && !quality_istreams[i]->eof()) { quality_istreams[i]->clear(); }// quality_istreams[i]->seekg(0, ios::beg);
-		if (fastq_istreams[i] != NULL && !fastq_istreams[i]->eof()) { fastq_istreams[i]->clear();  }
+		// && !fasta_istreams[i]->eof()
+		if (fasta_istreams[i] != NULL) { fasta_istreams[i]->reset(); }//fasta_istreams[i]->seekg(0, ios::beg);
+		if (quality_istreams[i] != NULL ) { quality_istreams[i]->reset(); }// quality_istreams[i]->seekg(0, ios::beg);
+		if (fastq_istreams[i] != NULL ) { fastq_istreams[i]->reset();  }
 	}
 	
 	//checkInFileStatus();
@@ -2477,7 +2507,11 @@ string InputStreamer::current_infiles() {
 	return ret;
 }
 
-bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse) {
+bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse,bool safe) {
+
+	if (safe) {
+		protect.lock();
+	}
 
 	assert(tmpO->size() == blocks);
 	size_t k(0); bool b1(true), b2(true);
@@ -2490,14 +2524,17 @@ bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse) 
 			this->getDNAlines(tmpO->tmp[k][2], 2);
 		}
 		if (!b1 || !b2) {
-			if (b1 != b2 && numPairs == 2) {
+			if ((b1 != b2) && tmpO->tmp[k][1].size() != tmpO->tmp[k][0].size() && numPairs == 2) {
 				//cerr << "Currently reading: "<<current_infiles()<<endl;
-				cerr << "Problem: in file "<< current_infiles () << " read1 and read2 appear not be of the same size!\n";
+				cerr << "Problem: in file "<< current_infiles () << " read1 (" << tmpO->tmp[k][0].size() << ") and read2 (" << tmpO->tmp[k][1].size()<< ") appear not be of the same size!\n";
 			}
 			tmpO->setSize(k);
+			if (safe) { protect.unlock(); }
 			return false;
 		}
 	}
+	if (safe) {protect.unlock();}
+
 	return true;
 }
 bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
@@ -2676,7 +2713,7 @@ bool InputStreamer::setupFastq(string path, string fileS, int& pairs, string sub
 	minQScore = SCHAR_MAX;
 	maxQScore = -1;
 	fqSolexaFmt = false;
-	resetLineCounts();
+	resetStats();
 	vector<string> tfas = splitByCommas(fileS);
 	if ( pairs == -1 ) {
 		pairs = (int) tfas.size();
@@ -2853,7 +2890,7 @@ string InputStreamer::setupInput(string path, int t, const string& uniqueFastxFi
 
 
 bool InputStreamer::setupFastaQual(string path, string sequenceFile, string qualityFile, int& paired, string onlyPair, bool simulate) {
-	resetLineCounts();
+	resetStats();
 	allStreamClose();
 	vector<string> splitSequenceFile = splitByCommas(sequenceFile);
 
@@ -2937,7 +2974,7 @@ bool InputStreamer::setupFastaQual2(string sequenceFile, string qualityFile, str
 }
 void InputStreamer::setupFna(string fileS){
 	allStreamClose();
-	resetLineCounts();
+	resetStats();
 	numPairs = 1;
 	dnaTemp1[0] = make_shared<DNA>("", ""); dnaTemp2[0] = make_shared <DNA>("", "");
 	setupFastaQual2(fileS, "","seq");
