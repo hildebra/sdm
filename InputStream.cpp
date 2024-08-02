@@ -1969,10 +1969,10 @@ shared_ptr<DNA> InputStreamer::read_fastq_entry(istream & fna,  qual_score &minQ
 			if ((lnCnt ) % 4 != 0) {
 				fqPassedFQsdt = false;
 			}
-
+			bool printB(false);
 			for (size_t i = 0; i < line.length(); i++) {
 				//really 33?
-				Iqual[qcnt] = minmaxQscore((qual_score)line[i] - fastQver);
+				Iqual[qcnt] = minmaxQscore((qual_score)line[i] - fastQver, printB);
 				qcnt++;
 			}
 			if (qcnt == tdn->length()) {
@@ -2068,27 +2068,34 @@ shared_ptr<DNA> InputStreamer::read_fastq_entry_fast(istream & fna, int& lnCnt, 
 	corrupt = false;
 	return tdn;
 }
-void InputStreamer::minmaxQscore(shared_ptr<DNA> t) {
+void InputStreamer::minmaxQscore(shared_ptr<DNA> t, bool& print) {
 	fqverMTX.lock();
 	vector<qual_score> Qs = t->getQual();
 	for (size_t i = 0; i < Qs.size(); i++) {
-		minmaxQscore(Qs[i]);
+		minmaxQscore(Qs[i], print);
 	}
 	fqverMTX.unlock();
 }
 
-qual_score InputStreamer::minmaxQscore(qual_score t) {
+qual_score InputStreamer::minmaxQscore(qual_score t,bool& print) {
 	if (t < 0) { ////quick hack, since q<13 scores are the only deviants and uninteresting in most cases..
-		if (fqSolexaFmt){
-			if (t < -5) {
+		if (fqSolexaFmt ){
+			if (t < -5 && print) {
 				cerr << "Unusually low sloexa quality score (" << t << "); setting to 0.\n";
+				print = false;
 			}
 		} else {
 			if (t >= -5) {
-				cerr << "Resetting auto format to Solexa (illumina 1.0-1.3) format.\n";
-				fqSolexaFmt = true; 
+				if (print) {
+					cerr << "Resetting auto format to Solexa (illumina 1.0-1.3) format.\n";
+					print = false;
+				}
+				//fqSolexaFmt = true; 
 			} else {
-				cerr << "Unusually low quality score (" << t << "); setting to 0.\n";
+				if (print) {
+					cerr << "Unusually low quality score (" << t << "); setting to 0.\n";
+					print = false;
+				}
 			}
 		}
 		t = 0;
@@ -2565,9 +2572,10 @@ bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 		}*/
 		lnCnt[pos] += 4;
 		if (fastQver == 0 || lnCnt[pos] == 4) { // ok first time just has to be done in function, after this can be unloaded outside
+			bool printB(true);
 			//cerr << "AutoFQ!!";
 			shared_ptr<DNA> tdn = make_shared<DNA>(ret, fastQver);
-			minmaxQscore(tdn);
+			minmaxQscore(tdn,printB);
 			auto_fq_version();
 			//tdn->resetQualOffset(auto_fq_version(), fqSolexaFmt);
 		}
@@ -2983,26 +2991,31 @@ void InputStreamer::setupFna(string fileS){
 int InputStreamer::auto_fq_version() {
 	//if (QverSet) { return 33; }
 	int fqDiff(0);
-	if (minQScore >= 100 || maxQScore < 2) {
+	if (minQScore >= 100 || maxQScore < 2 || fastQver!=0) {
+		//don;t know what to do here..
 		return fqDiff;
 	}
 	fqverMTX.lock();
 	fqSolexaFmt = false;
-	if (minQScore >= 59 && maxQScore > 74){
+
+	if (minQScore >= 33 && maxQScore <= 88 ){
+		fqDiff = (fastQver - 33); fastQver = 33; 
+		
+	} else if (minQScore >= 59 && maxQScore > 74) {
 		fqDiff = (fastQver - 64); fastQver = 64;
 		if (minQScore < 64) { //set to illumina1.0 (solexa)
 			fqSolexaFmt = true;
 			//cerr << "Setting to illumina 1.0-1.3 (solexa) fastq version (q offset = 64, min Q=-5).";
-		} else {
+		}
+		else {
 			//cerr << "Setting to illumina 1.3-1.8 fastq version (q offset = 64).";
 		}
-	} else if (minQScore >= 33 && maxQScore <= 74) {
-		fqDiff = (fastQver - 33); fastQver = 33;
 		//cerr << "Setting to Sanger fastq version (q offset = 33).";
 	} else {
 		if (verbose) {
-			cerr << "\nUndecided fastq version..\n"; verbose = 0;
+			cerr << "\nUndecided fastq version.. reverting to +33\n"; verbose = 0;
 		}
+
 		//fallback to sensible std..
 		fqDiff = (fastQver - 33); fastQver = 33;
 		//exit(53);

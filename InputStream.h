@@ -1227,8 +1227,8 @@ public:
 
 private:
 	string current_infiles();
-	inline qual_score minmaxQscore(qual_score t);// , int lnCnt);
-	void minmaxQscore(shared_ptr<DNA> t);// , int lnCnt);
+	inline qual_score minmaxQscore(qual_score t, bool& print);// , int lnCnt);
+	void minmaxQscore(shared_ptr<DNA> t, bool&);// , int lnCnt);
 	bool setupFastq_2(string, string, string);
 	bool setupFastaQual2(string, string, string = "fasta file");
 	shared_ptr<DNA> read_fastq_entry(istream & fna, qual_score &minQScore,

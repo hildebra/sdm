@@ -127,8 +127,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //2.14: new model of preallocating space for input strings
 //2.16: new threading model (no more dynamic threadpool) (reversed to old model)
 //2.17: fixed PB rev seq checks..
+//2.18: fastq autoversion updated (more robust)
 
-static const float sdm_version = 2.17f;
+static const float sdm_version = 2.18f;
 static const char* sdm_status = "beta";
 
 

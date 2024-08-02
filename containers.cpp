@@ -6876,6 +6876,13 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 				else if (tmp == "noisy_chimera" || tmp == "good_chimera") { //tmp == "perfect_chimera" ||
 					if (!doChimeraCnt) { continue; }
 					chimera = true;
+//M04428:252:000000000-BM3M5:1:1109:4503:15901;size=52;   noisy_chimera   
+// dqt=20;dqm=2;div=9.0;segs=2;parents=M04428:252:000000000-BM3M5:1:2110:24763:14436(1-78/0)+M04428:252:000000000-BM3M5:1:1116:5359:16203(78-186/0);
+
+					getline(ss, tmp, '\t');
+					size_t p1(tmp.find("parents=") + 4);//4
+					size_t p2(tmp.find(");", p1) + 2);
+					segs2 = tmp.substr(p1, p2 - p1 - 1);
 				}
 				else if (tmp == "perfect_chimera") {
 					removeSizeStr(segs);
@@ -6915,12 +6922,20 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 
 		//finished parsing, now reformat to get matching sample
 
-		if ( chimera && UPARSE8up) {
-			tarsV = splitByComma(segs2, false, '+');
-			for ( uint kk = 0; kk < tarsV.size(); kk++ ) {
-				tarsV[kk] = tarsV[kk].substr(0,tarsV[kk].find_last_of("("));
+		if (chimera){
+			if (UPARSE9up) {
+				tarsV = splitByComma(segs2, false, '+');
+				for (uint kk = 0; kk < tarsV.size(); kk++) {
+					tarsV[kk] = tarsV[kk].substr(0, tarsV[kk].find_last_of("("));
+				}
 			}
-		} else if (!chimera){
+			else if (UPARSE8up) {
+				tarsV = splitByComma(segs2, false, '+');
+				for (uint kk = 0; kk < tarsV.size(); kk++) {
+					tarsV[kk] = tarsV[kk].substr(0, tarsV[kk].find_last_of("("));
+				}
+			}
+		} else {
 			tarsV.push_back(segs2);
 		}
 		matrixUnit splChim = (matrixUnit)tarsV.size();
