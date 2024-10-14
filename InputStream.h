@@ -686,6 +686,18 @@ public:
 
 
 	string &getSequence() { return sequence_; }
+	const vector<qual_score>& getQual() const {
+		return qual_;
+	}
+	const vector<qual_score> getQual(int sta , int end ) const {
+		if (sta == 0 && end == 0) {
+			return qual_;
+		}
+		vector<qual_score>::const_iterator first = qual_.begin() + sta;
+		vector<qual_score>::const_iterator last = qual_.begin() + end;
+		vector<qual_score> newVec(first, last);
+		return newVec;
+	}
 
 	string getSeqPseudo() {
 	    return sequence_.substr(0, sequence_length_);
@@ -702,6 +714,8 @@ public:
 	    }
 	    return id_;
 	}
+
+	shared_ptr<DNA> getDNAsubseq(int start, int end, string id);
 
 	string getPositionFreeId(); // remove /1 /2 #1:0 etc
 	const string& getOldId() { return id_; }
@@ -758,9 +772,9 @@ public:
 	bool cutSeq(int start, int stop=-1, bool = false);
 	bool cutSeqPseudo(int start) { return cutSeq(start, -1, true); }
 	bool HomoNTRuns(int);
-	int matchSeq(string, int, int, int,bool=false);
+	int matchSeq(string, int Err, int searchSpace, int startPos,bool exhaustive=false);
 	void reverse_compliment(bool reset=true);
-	int matchSeqRev(const string&, int, int, int=0,bool=false);
+	int matchSeqRev(const string&, int Err, int searchSpace, int start=0,bool=false);
 	int matchSeq_tot(const string&, int, int, int&);
 	void writeSeq(ostream&, bool singleLine = false);
 	string writeSeq(bool singleLine = false);
@@ -809,7 +823,7 @@ public:
 	}
 	
 	//always return BC tag IDX global (no local filter idx accounted for, use getBCoffset() to correct)
-	int getBarcodeNumber() const {
+	int getBCnumber() const {
 		return sample_id_;
 	}
 
@@ -890,7 +904,6 @@ protected:
 	vector<qual_score> qual_;
 
 public:
-    const vector<qual_score> &getQual() const;
 
     int merge_seed_pos_ = -1;
     int seed_length_ = -1;
@@ -1180,7 +1193,6 @@ public:
 		slots.resize(1);//never more than one, otherwise threads read at same time from IO
 	}
 	~InputStreamer();
-	
 //most used routine to get a new DNA entry		// stillMore = is fastq file empty? pos = read pair to return [0/1/-1]
 	shared_ptr<DNA> getDNA(int pos);
 	bool getDNAlines(vector<string>&,int pos);
@@ -1207,6 +1219,7 @@ public:
 	void allStreamClose();
 	void allStreamReset();//go back to line 1
 	void setTIO(bool x) { doTIO = x; }
+
 	void openMIDseqs(string,string);
 	int pairNum() { return numPairs; }
 	bool qualityPresent() { return !qualAbsent; }

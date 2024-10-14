@@ -923,6 +923,19 @@ bool DNA::qualWinPos(unsigned int W, float T){
 	return false;
 }
 
+
+shared_ptr<DNA> DNA::getDNAsubseq(int start, int end, string id) {
+	shared_ptr<DNA> rdn = make_shared<DNA>();
+	rdn->setSequence(this->getSequence().substr(start,end));
+	vector<qual_score> tq = this->getQual(start, end) ;
+	rdn->setQual(tq);
+	rdn->setNewID(id);
+	if (this->getBCnumber() >= 0) {
+		rdn->setBCnumber(this->getBCnumber(),0);
+	}
+	return rdn;
+}
+
 //removes part of seq and qual_ indexes between start & stop
 //set stop to -2 if cut till end in pseudo == true mode
 bool DNA::cutSeq(int start, int stop, bool pseudo){
@@ -963,7 +976,7 @@ bool DNA::cutSeq(int start, int stop, bool pseudo){
 	return true;
 }
 
-int DNA::matchSeq(std::string PrSt,int Err,int tolerance, int startPos,bool exhaustive){
+int DNA::matchSeq(std::string PrSt,int Err,int searchSpace, int startPos,bool exhaustive){
 	//const char* DN = sequence_.c_str();
 	//const char* Pr = PrSt.c_str();
 	int PrL = (int) PrSt.length();
@@ -973,7 +986,7 @@ int DNA::matchSeq(std::string PrSt,int Err,int tolerance, int startPos,bool exha
 	point_aim = max(1, int(PrL / 2));
 	//bool res(false);
 	vector<int> potentialMatches(0);
-	for (; pos< tolerance; pos++){
+	for (; pos< searchSpace; pos++){
 		if (pos > mthL) {	break;	}
 		c_err=0;Prp=0; Prp2=pos;
 		do {
@@ -1027,7 +1040,7 @@ void DNA::reverse_compliment(bool reset) {
 }
 
 //match from end of sequence_ to find rev primer
-int DNA::matchSeqRev(const string& PrSt,int Err, int check_l,
+int DNA::matchSeqRev(const string& PrSt,int Err, int searchSpace,
 				  int start,bool exhaustive){
 	//fail::ret -1
 	int PrL = (int) PrSt.length();
@@ -1038,7 +1051,7 @@ int DNA::matchSeqRev(const string& PrSt,int Err, int check_l,
 	//int wantSc = PrL - Err;
 	int pos(SeL- start), Prp(0), c_err(0), endPos(-1), c_points(0), point_aim(1);
 	vector<int> potentialMatches(0);
-	for (; pos> check_l; pos--){
+	for (; pos> searchSpace; pos--){
 		c_err = 0; Prp = 0; c_points = 0;
 		int PrL2 = min(PrL,SeL-pos);
 		point_aim = max(1,int((float)PrL2 *0.9f));
@@ -1393,9 +1406,7 @@ void DNA::resetQualOffset(int x, bool fqSol) {
 	}
 }
 
-const vector<qual_score> &DNA::getQual() const {
-    return qual_;
-}
+
 
 ///////////////////////////////////////////////////////////////
 //INPUT STREAMER
@@ -2535,7 +2546,11 @@ bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse,b
 				//cerr << "Currently reading: "<<current_infiles()<<endl;
 				cerr << "Problem: in file "<< current_infiles () << " read1 (" << tmpO->tmp[k][0].size() << ") and read2 (" << tmpO->tmp[k][1].size()<< ") appear not be of the same size!\n";
 			}
-			tmpO->setSize(k);
+			tmpO->setSize(k+1);
+			if (tmpO->tmp[k][0][0].length() == 0) {//extra check if maybe entire attempt was empty
+				tmpO->setSize(k);
+			}
+
 			if (safe) { protect.unlock(); }
 			return false;
 		}
@@ -2865,8 +2880,9 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 	return true;
 }
 //mainFile = IS->setupInput(path, uniqueFas[i], FastqF[tarID], FastaF[tarID], QualF[tarID], MIDfq[tarID], fil->isPaired(), (*cmdArgs)["-onlyPair"]);
-string InputStreamer::setupInput(string path, int t, const string& uniqueFastxFile, filesStr& files, int &paired, string onlyPair,
-                                 string& mainFilename, bool simulate) {
+string InputStreamer::setupInput(string path, int t, const string& uniqueFastxFile, 
+		filesStr& files, int &paired, string onlyPair,
+          string& mainFilename, bool simulate) {
 	string mainFilepath("");
 	vector<string> fastqFiles = files.FastqF;
 	vector<string> fastaFiles = files.FastaF;

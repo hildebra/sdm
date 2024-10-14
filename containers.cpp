@@ -664,7 +664,7 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d1, shared_ptr<DNA> d2, int B
 	if (demultFini && demultMrgFini) {
 		return;
 	}
-	int idx = d1->getBarcodeNumber() - BCoffset; //correct for BC offset as well..
+	int idx = d1->getBCnumber() - BCoffset; //correct for BC offset as well..
 
 	if (idx < 0) {
 		return;
@@ -740,7 +740,7 @@ void OutputStreamer::write2Demulti(shared_ptr<DNA> d, int p, int BCoffset) {//th
 	if (demultiBPperSR > 0 && (uint)BPwrittenInSR > demultiBPperSR) {
 		return;
 	}
-	int idx = d->getBarcodeNumber() - BCoffset; //correct for BC offset as well..
+	int idx = d->getBCnumber() - BCoffset; //correct for BC offset as well..
 
 	if (idx < 0 || !d->isGreenQual()) {
 		return;
@@ -888,7 +888,7 @@ void OutputStreamer::incrementOutputFile(){
 ////exit(0);
 //
 //    if (d->isGreenQual() || d->isYellowQual()) {
-////        countBCdetected(d->getBarcodeNumber(), easyPair, false);
+////        countBCdetected(d->getBCnumber(), easyPair, false);
 //        //and register as success
 //    } else {
 //        if (d->getBarcodeDetected()) {
@@ -920,7 +920,7 @@ void OutputStreamer::incrementOutputFile(){
 //    }
 //    if (d->isDereplicated()) {
 //        if (d->getBarcodeDetected() && !d->isGreenQual() && !d->isYellowQual()) {
-//            this->statAddDerepBadSeq(d->getBarcodeNumber());
+//            this->statAddDerepBadSeq(d->getBCnumber());
 //        }
 //    }
 //}
@@ -975,7 +975,7 @@ void Filters::addDNAtoCStats(shared_ptr<DNA> d,int Pair) {
 //exit(0);
 	
 	if (d->isGreenQual() ){//|| d->isYellowQual()) {
-		countBCdetected(d->getBarcodeNumber(), easyPair, false);
+		countBCdetected(d->getBCnumber(), easyPair, false);
 		//and register as success
 	} else {
 		if (d->getBarcodeDetected()) {
@@ -1007,7 +1007,7 @@ void Filters::addDNAtoCStats(shared_ptr<DNA> d,int Pair) {
 	}
 	if (d->isDereplicated()) {
 		if (d->getBarcodeDetected() && !d->isGreenQual() && !d->isYellowQual()) {
-			this->statAddDerepBadSeq(d->getBarcodeNumber());
+			this->statAddDerepBadSeq(d->getBCnumber());
 		}
 	}
 	//csMTX[easyPair]->unlock();
@@ -1063,7 +1063,7 @@ void Filters::addDNAtoCStatsMT(shared_ptr<DNA> d, int pair, int thread_id) {
 //exit(0);
 
     if (d->isGreenQual() || d->isYellowQual()) {
-        countBCdetected(d->getBarcodeNumber(), easyPair, false);
+        countBCdetected(d->getBCnumber(), easyPair, false);
         //and register as success
     } else {
         if (d->getBarcodeDetected()) {
@@ -1095,7 +1095,7 @@ void Filters::addDNAtoCStatsMT(shared_ptr<DNA> d, int pair, int thread_id) {
     }
     if (d->isDereplicated()) {
         if (d->getBarcodeDetected() && !d->isGreenQual() && !d->isYellowQual()) {
-            this->statAddDerepBadSeq(d->getBarcodeNumber());
+            this->statAddDerepBadSeq(d->getBCnumber());
         }
     }
 }
@@ -2002,7 +2002,7 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 	// Get copy of sequence (might have already been modified)
 	//string seq = dna->getSeqPseudo();
 
-	int sample_id = dna->getBarcodeNumber();
+	int sample_id = dna->getBCnumber();
 	bool pass = dna->isGreenQual();
 	//deactivate this for now..
 
@@ -2450,7 +2450,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		demultiBPperSR(0),
         barcodeLengths1_(0), barcodeLengths2_(0),
 		illuPEfwd(""), illuPErev(""), illuSEuni(""), illuSEidx(""), 
-		Bcheck4illuAdapts(false),
+		Bcheck4illuAdapts(false), doGoldAxe(false),
         cmdArgs(cmdArgs1), passed_interval_reads(0)
 		{
 	//csMTX[0].unlock(); 
@@ -2499,6 +2499,8 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	if ((*cmdArgs)["-logLvsQ"].c_str() != "") {
 		collectStatistics[0]->setbLvsQlogsPreFilt(true);
 	}
+	if ((*cmdArgs)["-GoldenAxe"] == "1") { this->setGoldAxe(true); }
+
 
 	//delimit output file size to X reads
 	if (cmdArgs->find("-maxReadsPerOutput") != cmdArgs->end()) {
@@ -2837,7 +2839,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	
 		illuPEfwd(of->illuPEfwd), illuPErev(of->illuPErev), illuSEuni(of->illuSEuni), illuSEidx(of->illuSEidx),
 		Bcheck4illuAdapts(of->Bcheck4illuAdapts),
-
+		doGoldAxe(of->doGoldAxe),
 		SequencingRun(0),cmdArgs(of->cmdArgs), passed_interval_reads(0)
 {
 	cdbg("New Filter object from copy\n");
@@ -3235,7 +3237,10 @@ bool Filters::isReversedAmplicon( shared_ptr<DNA> tdn) {
 	if ((!checkRevRd() ) ) {
 		return false;
 	}
-	int tagIdx = 0;//just try
+
+
+	//BC should be already cut at this point..
+	//int tagIdx = 0;//just try
 
 	//method 1: just check if primer is found reversed, most basic and seems to work fine..
 	//simple check if fwd rev primer is in reverse position: then reverse transcribe
@@ -3252,6 +3257,63 @@ bool Filters::isReversedAmplicon( shared_ptr<DNA> tdn) {
 	} 
 
 	return false;
+}
+
+
+vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
+	vector<shared_ptr<DNA>> retDNA(0);
+	if (!this->isGoldAxe() || this->isPaired() != 1) {
+		return retDNA;
+	}
+	int idx = tdn[0]->getBCnumber();
+	if (idx < 0) {
+		string presentBC(""); int c_err(0);
+		idx = this->detectCutBC(tdn[0], presentBC, c_err, true);
+		tdn[0]->setBCnumber(idx, getBCoffset() );
+	}
+	if (idx < 0) {
+		return retDNA;
+	}
+	shared_ptr<DNA> dn = tdn[0];
+
+	int limitF = 0;
+	int limitR = 0;
+	int SearchL = 6000;
+
+	vector<int> posF(0), posR(0);
+	vector<bool> isRC(0);
+	
+
+	//do fwd amplicon search
+	while (1) {
+		limitF = dn->matchSeq(PrimerL[idx], PrimerErrs, SearchL + limitR, limitR);
+		//records reverse-searched primer positions
+		limitR = dn->matchSeq(PrimerR_RC[idx], PrimerErrs, SearchL + limitF, limitF + 1);
+		if (limitF < 0 || limitR < 0) { break; }
+		posF.push_back(limitF);	posR.push_back(limitR); isRC.push_back(false);
+	}
+	//do rev amplicon search
+/*	limitF = 0; limitR = 0;
+	while (1) {
+		limitF = dn->matchSeq(PrimerL_RC[idx], PrimerErrs, SearchL + limitR, limitR);
+		//records reverse-searched primer positions
+		limitR = dn->matchSeq(PrimerR[idx], PrimerErrs, SearchL + limitF, limitF + 1);
+		if (limitF < 0 || limitR < 0) { break; }
+		posF.push_back(limitF);	posR.push_back(limitR); isRC.push_back(false);
+	}
+*/
+
+	//create new DNA objects from each subset..
+	for (size_t i = 0; i < posF.size(); i++) {
+		retDNA.push_back(
+			dn->getDNAsubseq(posF[0], posR[0] + PrimerR_RC[idx].length(), dn->getId() + "_" + itos(i))
+			);
+
+	}
+	int X = 0;
+
+	return retDNA;
+
 }
 
 bool Filters::swapReverseDNApairs(vector< shared_ptr<DNA>>& tdn){
@@ -4074,7 +4136,7 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 	}
 	//already detected barcode
 	if (d->getBarcodeCut()){// && !scndBC) {
-		return d->getBarcodeNumber() - BCoffset;
+		return d->getBCnumber() - BCoffset;
 	}
 	if ((isPair1 && !bDoBarcode) || (!isPair1 && !bDoBarcode2)) {
 		d->setBCnumber(0, BCoffset);
@@ -4175,7 +4237,7 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 
 		//check a second time that barcode was correctly identified, just to be double sure...
 		if (idx != idxX ) {
-			cerr << "(2) Unequal BC numbers:" << idx << " : " << idxX << "; in object: " << d->getBarcodeNumber() << endl;
+			cerr << "(2) Unequal BC numbers:" << idx << " : " << idxX << "; in object: " << d->getBCnumber() << endl;
 			cerr << "In read:" << d->getId() << endl;
 			exit(835);
 		}
@@ -5152,7 +5214,7 @@ void Filters::resetStats(){
 void Filters::failedStats2(shared_ptr<DNA> d,int pair){
 	int pa = max(pair, 0);
 	if (bDoMultiplexing){
-		int idx = d->getBarcodeNumber() - BCoffset;
+		int idx = d->getBCnumber() - BCoffset;
 		if ( bOneFileSample ) {
 			collectStatistics[pa]->BarcodeDetectedFail[0]++;
 		} else if (idx >= 0) {

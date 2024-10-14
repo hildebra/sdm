@@ -457,6 +457,10 @@ public:
 	inline void updateMaxSeqL(int x);
 	bool betterSeed(shared_ptr<DNAunique>, shared_ptr<DNAunique>, float,  int,bool);
 	bool secondaryOutput(){return bAdditionalOutput;}
+
+	void setGoldAxe(bool b) { doGoldAxe = b; }
+	bool isGoldAxe() { return doGoldAxe; }// reads are GoldenAxe PacBio?
+	vector<shared_ptr<DNA>>  GoldenAxe(vector< shared_ptr<DNA>>& tdn); //GoldenAxe deconcat
 	inline bool checkSwitchedRdPairs() { return b2ndRDBcPrimCk; }
 	inline bool checkRevRd() { return bRevRdCk; }
 	
@@ -598,6 +602,8 @@ public:
 	bool checkIfPrimerHits(shared_ptr<DNA> d, int primerID, int pair = 0);
 
 	bool passedReads(int n);
+
+
 
 protected:
 	bool check_lengthXtra(shared_ptr<DNA> d, int hindrance=0, int leng=-1){
@@ -754,6 +760,8 @@ protected:
 
 	string illuPEfwd, illuPErev, illuSEuni, illuSEidx;
 	bool Bcheck4illuAdapts;
+
+	bool doGoldAxe; // reads are GoldenAxe PacBio?h
 	
 	
 	OptContainer* cmdArgs;

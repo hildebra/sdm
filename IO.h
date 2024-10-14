@@ -35,8 +35,8 @@ bool read_paired2(OptContainer* cmdArgs, OutputStreamer* MD,
 	shared_ptr<InputStreamer>, bool, int Nthreads);
 bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn, bool MIDuse,
 	OutputStreamer* MD, int curThread);
-bool read_paired_STRready(vector<vector< string >> tdn, bool MIDuse,
-	OutputStreamer* MD, int curThread, bool keepPairHd, qual_score FastqVer);
+//bool read_paired_STRready(vector<vector< string >> tdn, bool MIDuse,
+//	OutputStreamer* MD, int curThread, bool keepPairHd, qual_score FastqVer);
 bool multi_read_paired_STRready(multi_tmp_lines* tdn, bool MIDuse,
 	OutputStreamer* MD, int curThread, bool keepPairHd, qual_score FastqVer);
 void multi_read_paired_STRget(shared_ptr<InputStreamer> IS, OutputStreamer* MD, int curThread, 
