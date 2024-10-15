@@ -2140,7 +2140,7 @@ void Dereplicate::finishMap() {
 }
 string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	ofstream of, omaps, of2, ofRest, of2p2, of_merged;
-	cerr << "Evaluating and writing dereplicated reads..\n";
+	cerr << "\nEvaluating and writing dereplicated reads..\n";
 	int fastqVer = mf->getuserReqFastqOutVer();
 	
 	//set the correct file names for dereplication output files
@@ -2306,7 +2306,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 
 		
 		
-	cerr << "\n" << report << endl << endl;
+	cerr  << report << endl << endl;
 	if (this->b_derepPerSR) {
 		return report;
 	}
@@ -2456,11 +2456,16 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	//csMTX[0].unlock(); 
 	//csMTX[1].unlock();
 
+	//set up objects to collect statistics on run
     collectStatistics[0] = make_shared<collectstats>(); 
 	collectStatistics[1] = make_shared<collectstats>();
 
 	statAddition[0] = make_shared<collectstats>(); 
 	statAddition[1] = make_shared<collectstats>();
+	
+	GAstatistics = make_shared<GAstats>();
+
+	mergeStats = make_shared<MEstats>();
 	
 	bool alt_bRequireRevPrimSet=false;
 
@@ -2852,7 +2857,11 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	collectStatistics[0] = make_shared<collectstats>(); 
 	collectStatistics[1] = make_shared<collectstats>();
 	collectStatistics[0]->setbLvsQlogsPreFilt (of->collectStatistics[0]->getbLvsQlogsPreFilt());
-    statAddition[0] = make_shared<collectstats>(); statAddition[1] = make_shared<collectstats>(); ;
+    statAddition[0] = make_shared<collectstats>(); statAddition[1] = make_shared<collectstats>(); 
+	GAstatistics = make_shared<GAstats>();
+	mergeStats = make_shared<MEstats>();
+
+
 	cdbg("New Filter::resize collectStatistics done\n");
 	if (takeAll) {
         this->allResize((uint)of->PrimerIdx.size());
@@ -3306,11 +3315,15 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 	//create new DNA objects from each subset..
 	for (size_t i = 0; i < posF.size(); i++) {
 		retDNA.push_back(
-			dn->getDNAsubseq(posF[0], posR[0] + PrimerR_RC[idx].length(), dn->getId() + "_" + itos(i))
+			dn->getDNAsubseq(posF[i], posR[i] + PrimerR_RC[idx].length(), 
+				dn->getId() + "_" + itos(i))
 			);
 
 	}
-	int X = 0;
+	//int X = 0;
+
+	//collect some stats
+	this->addGAstats(dn,retDNA);
 
 	return retDNA;
 
@@ -5231,6 +5244,16 @@ void Filters::failedStats2(shared_ptr<DNA> d,int pair){
 	}
 
 }
+
+void Filters::addMergeStats(OutputStreamer* out) {
+	mergeStats->BPwritten = out->getBPwrittenInSR();
+	mergeStats->BPmergeWritte = out->getBPwrittenInSRmerg();
+	mergeStats->total_read_preMerge_ = out->total_read_preMerge_;
+	mergeStats->merged_counter_ = out->merged_counter_;
+
+
+
+}
 void Filters::prepStats() {
 	float remSeqs = float(collectStatistics[0]->total - collectStatistics[0]->totalRejected);
 	for (size_t i = 0; i < 2; i++) {
@@ -5799,54 +5822,79 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 		if ( p2stat ) { give << "; " << intwithcommas((int)cst2->PrimerRevFail) << endl; }
 		else { give << endl; }
 	}
-	if (bDoMultiplexing){
-		if (bDoBarcode){
+	if (bDoMultiplexing) {
+		if (bDoBarcode) {
 			give << "  -Barcode unidentified (max " << barcodeErrors_ << " errors) : " << spaceX(19 - digitsInt(barcodeErrors_)) << intwithcommas((int)cst->TagFail);
 			if (p2stat && (cst2->TagFail > 0 || doubleBarcodes())) { give << "; " << intwithcommas((int)cst2->TagFail); give << " (" << intwithcommas((int)cst->dblTagFail) << " pairs failed)"; }
 			give << endl;
 
-			if (barcodeErrors_ > 0){
+			if (barcodeErrors_ > 0) {
 				give << "    -corrected barcodes: " << spaceX(18) << intwithcommas((int)cst->suc_correct_BC);
-				if (p2stat){give << "; " << intwithcommas((int)cst2->suc_correct_BC);	}
+				if (p2stat) { give << "; " << intwithcommas((int)cst2->suc_correct_BC); }
 				give << endl;
 				//<< ", failed to correct barcode: " << spaceX(5 - digitsInt(FQWwidth)) << intwithcommas((int)cst->fail_correct_BC) << endl;
 			}
-			
-			if ( bDoBarcode2 ) {
+
+			if (bDoBarcode2) {
 				give << "    -used dual index barcodes";
-				if ( BCdFWDREV[0].reversedBCs || BCdFWDREV[1].reversedBCs ) {
+				if (BCdFWDREV[0].reversedBCs || BCdFWDREV[1].reversedBCs) {
 					give << " (reversed_ ";
-					if ( BCdFWDREV[1].reversedBCs && BCdFWDREV[0].reversedBCs ) {
+					if (BCdFWDREV[1].reversedBCs && BCdFWDREV[0].reversedBCs) {
 						give << " fwd & rev";
-					} else	if ( BCdFWDREV[0].reversedBCs ) {
+					}
+					else	if (BCdFWDREV[0].reversedBCs) {
 						give << " fwd";
-					} else	if ( BCdFWDREV[1].reversedBCs ) {
+					}
+					else	if (BCdFWDREV[1].reversedBCs) {
 						give << " rev";
 					}
 					give << " BCs)" << endl;
 				}
-				
-			} else if ( BCdFWDREV[0].reversedBCs ) {
+
+			}
+			else if (BCdFWDREV[0].reversedBCs) {
 				give << "    -reversed_ all barcodes" << endl;
 			}
+
+
+		}
+		else if (bDoHeadSmplID) {
+			give << "  -Failed to assign sequences to header tag : " << intwithcommas((int)barcodeErrors_) << endl;
+		}
+	}
+	
+	
+	
+	if (isGoldAxe()) {
+		GAstatistics->setBCs(SampleID, Barcode, Barcode2);
+		GAstatistics->printSummary(give);
+		//GAstatistics->printBCtabs(give);
+	}
+
+	mergeStats->print(give);
+
+
+	if (bDoMultiplexing) {
+
+		if (bDoBarcode) {
 			give << endl << "SampleID";
-			if (bDoCombiSamples){
+			if (bDoCombiSamples) {
 				give << "\tSampleGroup";
 			}
 			give << "\tBarcode";
-			if ( bDoBarcode2 ) {give << "\tBarcode2";}
+			if (bDoBarcode2) { give << "\tBarcode2"; }
 			give << "\tInstances\n";
-			for (unsigned int i =0; i<Barcode.size();i++){
+			for (unsigned int i = 0; i < Barcode.size(); i++) {
 				give << SampleID[i] << "\t";
-				if (bDoCombiSamples){ give << SampleID_Combi[i] << "\t"; }
+				if (bDoCombiSamples) { give << SampleID_Combi[i] << "\t"; }
 				give << Barcode[i];
-				if ( bDoBarcode2 ) {
-					give << "\t"<<Barcode2[i];
+				if (bDoBarcode2) {
+					give << "\t" << Barcode2[i];
 				}
 				give << "\t" << intwithcommas((int)cst->BarcodeDetected[i]) << endl;
 			}
-		} else if (bDoHeadSmplID){
-			give << "  -Failed to assign sequences to header tag : " << intwithcommas((int)barcodeErrors_ ) << endl;
+
+		} else if (bDoHeadSmplID) {
 			give << endl << "SampleID\t";
 			if (bDoCombiSamples){	give << "\tSampleGroup";	}
 			give << "\tSampleID\tInstances\n"; 
@@ -5857,6 +5905,7 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 			}
 		}
 	}
+
 }
 
 //statistics for each single sample 
@@ -5928,6 +5977,7 @@ void ReportStats::calcSummaryStats(float remSeqs, unsigned int min_l, float min_
 			( (float(rstat_qualSum)/remSeqs) / min_q) ) / 2.f;
 }
 
+
 void Filters::addStats(Filters* fil, vector<int>& idx){
 	for (size_t i = 0; i < 2; i++) {
 		collectStatistics[i]->addStats(fil->collectStatistics[i], idx); 
@@ -5938,10 +5988,16 @@ void Filters::addStats(Filters* fil, vector<int>& idx){
 	maxReadsPerOFile = fil->maxReadsPerOFile;
 	ReadsWritten = fil->writtenReads();//the idea here is to have a number of reads in CURRENT file, not total reads
 	OFileIncre = fil->getFileIncrementor();
+
+	GAstatistics->addStats(fil->GAstatistics);
+	mergeStats->addStats(fil->mergeStats);
 	//revConstellationN += fil->revConstellationN;
 }
 
 
+void Filters::addGAstats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA) {
+	GAstatistics->addBaseGAStats(dn, GA);
+}
 
 
 void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx){
@@ -6109,6 +6165,81 @@ void ReportStats::printLvsQ(ostream& give) {
 	}
 	
 }
+
+
+
+void GAstats::addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA) {
+	totalRds++; totalGAs += GA.size();
+	totalRdLen += dn->length();
+	double totL(0.f);
+	for (size_t i = 0; i < GA.size(); i++) {
+		totL += (double)GA[i]->length();
+	}
+	totalGALen += totL;
+
+	if (dn->getBCnumber() >= 0) {
+		int idx = dn->getBCnumber();
+		if ((idx+1) > GAperBC.size()) {
+			GAperBC.resize(idx+1, 0); CNTperBC.resize(idx+1, 0);
+			GALENperBC.resize(idx+1, 0); rdLENperBC.resize(idx+1, 0);
+		}
+		GAperBC[idx] += GA.size();
+		CNTperBC[idx]++;
+		GALENperBC[idx] += totL;
+		rdLENperBC[idx] += dn->length();
+	}
+}
+void GAstats::setBCs(vector<string> SI, vector<string> B1, vector<string> B2) {
+	assert(SI.size() >= GAperBC.size());
+	SmplIDBC = SI; BC1 = B1; BC2 = B2;
+	size_t idx = SI.size();
+	GAperBC.resize(idx, 0); CNTperBC.resize(idx, 0);
+	GALENperBC.resize(idx, 0); rdLENperBC.resize(idx, 0);
+
+}
+
+void GAstats::addStats(shared_ptr<GAstats> o) {
+	totalRds += o->totalRds;
+	totalGAs += o->totalGAs;
+	totalRdLen += o->totalRdLen;
+	totalGALen += o->totalGALen;
+	size_t idx = o->GAperBC.size();
+	if (idx > GAperBC.size()) {
+		GAperBC.resize(idx ,0); CNTperBC.resize(idx ,0);
+		GALENperBC.resize(idx,0 ); rdLENperBC.resize(idx ,0);
+		SmplIDBC.resize(idx, ""); BC1.resize(idx, ""); BC2.resize(idx, "");
+	}
+	for ( idx = 0; idx < GAperBC.size(); idx++) {
+		if (o->GAperBC.size() <= idx) {break;}
+		GAperBC[idx] += o->GAperBC[idx];
+		CNTperBC[idx] += o->CNTperBC[idx];
+		GALENperBC[idx] += o->GALENperBC[idx];
+		rdLENperBC[idx] += o->rdLENperBC[idx];
+
+	}
+
+}
+
+
+void GAstats::printBCtabs(ostream& give) {
+	give <<  "SampleID";
+	give << "\t#Reads\t#GA/Read\tmean Read length\tmean GA length\n";
+	assert(GAperBC.size() == CNTperBC.size() == GALENperBC.size() == rdLENperBC.size());
+	assert(GAperBC.size() == SmplIDBC.size() );
+	for (unsigned int i = 0; i < GAperBC.size(); i++) {
+		give << SmplIDBC[i] << "\t" << CNTperBC[i] << "\t" << float(GAperBC[i]) / float(CNTperBC[i]) << "\t";
+		give << int(float(rdLENperBC[i]) / float(CNTperBC[i])+0.5f) << "\t" << int(float(GALENperBC[i]) / float(GAperBC[i]) + 0.5f) << "\n";
+	}
+
+}
+
+void GAstats::printSummary(ostream& give) {
+	give << "GoldenAxe Stats\n";
+	give << "  Total reads; amplicons/read: " << totalRds << "; "<< (float)totalGAs/(float)totalRds <<endl;
+	give << "  Length reads; amplicon     : " << totalRdLen / (double)totalRds << "; " << totalGALen / (double)totalGAs << endl;
+}
+
+
 void ReportStats::printGCstats(ostream& give) {
 	//NT_POS['A'] = 0; NT_POS['T'] = 1; NT_POS['G'] = 2; NT_POS['C'] = 3;	NT_POS['N'] = 4;
 	vector<string> NTs(6, "X"); NTs[0] = "A"; NTs[1] = "T";

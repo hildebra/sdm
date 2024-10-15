@@ -131,15 +131,14 @@ bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 		//GoldenAxe requires some extra rounds of checking DNA
 		if (MD->getFilters(curThread)->isGoldAxe()) {
 			vector<shared_ptr<DNA>> multDNA = MD->getFilters(curThread)->GoldenAxe(ret);
-
+			vector<shared_ptr<DNA>> ret2(3, nullptr);
 			for (size_t xi = 0; xi < multDNA.size(); xi++) {
-				read_paired_DNAready(ret, MIDuse, MD, curThread);
+				ret2[0] = multDNA[xi];
+				isOK=read_paired_DNAready(ret2, MIDuse, MD, curThread);
 			}
-
-			return (multDNA.size() > 0);
+		} else {
+			isOK = read_paired_DNAready(ret, MIDuse, MD, curThread);
 		}
-
-		isOK = read_paired_DNAready(ret, MIDuse, MD, curThread);
 		if (!isOK) {
 			break;
 		}
@@ -1042,6 +1041,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 
 		//stats
 		// at this point subfilters have already been merged in clouseOutStreams
+		filter->addMergeStats(OutStreamer);
 		filter->prepStats();
 		if (IS->getCurFileN() == 0) {
 			filter->printStats(cerr, mainFile, outFile, true);
@@ -1065,11 +1065,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 
         mainFilter->addStats(filter, files.idx[i]);
         // Print out merged read count (move to stort stats)
-		if (OutStreamer->total_read_preMerge_) {
-			std::cerr << "merged reads: " << OutStreamer->merged_counter_ << "/" 
-				<< OutStreamer->total_read_preMerge_ << " (" << (double)OutStreamer->merged_counter_ / OutStreamer->total_read_preMerge_ 
-				<< ")" << std::endl;
-		}
+
 		//OutStreamer.reset();
 		delete OutStreamer;
 		delete filter;
@@ -1083,7 +1079,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
     // ------------------------------------------------
 
 //write log files
-	cdbg("Prep final logging");
+	cdbg("Prep final logging (derep etc)");
     if (files.uniqueFastxFiles.size() > 1){ mainFile = "several";}
     ofstream log; 
     //different logfile for SEED extension
@@ -1191,6 +1187,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
     if (shortStats) {
         mainFilter->printStats(std::cerr, mainFile, outFile, true);
     }
+
 #ifdef DEBUG
     cerr << "other logs start" << endl;
 #endif
@@ -1212,6 +1209,13 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
     log.open(logFGC.c_str(), ios_base::out);
     mainFilter->printGC(log, mainFilter->isPaired());
     log.close();
+
+
+	string logFGA = files.logF.substr(0, files.logF.length() - 3) + "GoldAxe.txt";
+	log.open(logFGA.c_str(), ios_base::out);
+	mainFilter->GAstatistics->printBCtabs(log);
+	log.close();
+
 #ifdef DEBUG
     cerr << "other logs end" << endl;
 #endif

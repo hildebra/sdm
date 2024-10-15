@@ -233,6 +233,55 @@ private:
 };
 
 
+class MEstats {
+public:
+	MEstats():total_read_preMerge_(0), merged_counter_(0) {}
+	~MEstats() {}
+	void addStats(shared_ptr<MEstats> o) {
+		total_read_preMerge_ += o->total_read_preMerge_; merged_counter_ += o->merged_counter_;
+		BPwritten += o->BPwritten; BPmergeWritte += o->BPmergeWritte;
+	}
+
+	void print(ostream& give) {
+		if (!merged_counter_) { return; }
+		give << "merged reads: " << merged_counter_ << "/"
+			<< total_read_preMerge_ << " (" << (double)merged_counter_ / total_read_preMerge_
+			<< ")" << std::endl;
+
+	}
+//variables
+	int total_read_preMerge_, merged_counter_;
+	uint BPwritten, BPmergeWritte;
+
+
+};
+
+class GAstats {
+public:
+	GAstats():totalRds(0), totalGAs(0),
+		totalRdLen(0.f), totalGALen(0.f),
+		GAperBC(0), CNTperBC(0), GALENperBC(0), rdLENperBC(0),
+		SmplIDBC(0), BC1(0), BC2(0)
+	{}
+	~GAstats() {}
+	void reset() {
+		totalRds = 0; totalGAs = 0;
+		totalRdLen = 0.f; totalGALen = 0.f;
+		GAperBC.resize(0); CNTperBC.resize(0);
+		GALENperBC.resize(0); rdLENperBC.resize(0);
+	}
+	void setBCs(vector<string> SI, vector<string> B1, vector<string> B2);
+	void addStats(shared_ptr<GAstats> o);
+
+	void printSummary(ostream& give);
+	void printBCtabs(ostream& give);
+	void addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA);
+	uint totalRds, totalGAs; //total reads, total amplicons
+	double totalRdLen, totalGALen; //length in bp
+	vector<int> GAperBC,CNTperBC, GALENperBC, rdLENperBC;
+	vector<string> SmplIDBC, BC1, BC2;
+
+};
 
 class collectstats{
 public:
@@ -301,56 +350,7 @@ public:
 
 
 };
-/*
-class StatisticsMultithreaded {
-public:
-    StatisticsMultithreaded () : main_read_stats_(2), mid_qual_stats_(2) {
-		main_read_stats_[0] = make_shared< collectstats>();
-		main_read_stats_[1] = make_shared< collectstats>();
-		mid_qual_stats_[0] = make_shared< collectstats>();
-		mid_qual_stats_[1] = make_shared< collectstats>();
-	}
 
-//                maxReadsPerOFile = fil->maxReadsPerOFile;
-//            ReadsWritten = fil->ReadsWritten;//the idea here is to have a number of reads in CURRENT file, not total reads
-//            OFileIncre = fil->OFileIncre;
-//            revConstellationN += fil->revConstellationN;
-
-    std::vector<shared_ptr<collectstats>> main_read_stats_; // Former collectStatistics
-    std::vector<shared_ptr<collectstats>> mid_qual_stats_; // Former statAddition
-
-    std::size_t merged_reads_cnt_ = 0;
-    std::size_t merged_reads_rev_cnt_ = 0;
-    std::size_t merged_overlap_sum_ = 0;
-    std::size_t merged_dovetail_cnt_ = 0;
-    std::size_t total_reads_cnt_ = 0;
-    std::size_t top_qual_cnt_ = 0;
-    std::size_t mid_qual_cnt_ = 0;
-
-    static void mergeStatisticsInto(vector<shared_ptr<collectstats>> &all_stats_into, 
-		vector<shared_ptr<collectstats>> &mid_stats_into, 
-		std::vector<StatisticsMultithreaded> &from, vector<int>& idx) {
-        // Check if both vectors have the same length and are not empty
-        if (!from.empty()) {
-            std::cerr << "Trying to merge qualities failed." << std::endl;
-            exit(90);
-        }
-
-        for (int i = 0; i < from.size(); i++) {
-            auto &tmp = from[i];
-            auto &all_stats_from = tmp.main_read_stats_;
-            auto &mid_stats_from = tmp.mid_qual_stats_;
-
-            for (size_t i = 0; i < 2; i++) {
-                all_stats_into[i]->addStats(all_stats_from[0], idx);
-                mid_stats_into[i]->addStats(mid_stats_from[i], idx);
-            }
-//            OFileIncre = fil->OFileIncre;
-//            revConstellationN += fil->revConstellationN;
-        }
-    }
-};
-*/
 
 //filters a fasta file for certain reads
 class ReadSubset{
@@ -496,6 +496,7 @@ public:
 	//*************************
 	//DNA statistic collection
 	void prepStats();
+	void addMergeStats(OutputStreamer* out);
 	//void revConstellationCnts(int x) { revConstellationN += x; }//number of read pairs, where pair1/2 are changed (mo)
 	void addDNAtoCStats(shared_ptr<DNA> d,int);
 	void sTotalPlus(int pair) {  
@@ -504,6 +505,8 @@ public:
 		//csMTX[pair]->unlock();
 	}
 	void addStats(Filters* fil, vector<int>& idx);
+	void addGAstats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>>);
+
 	void DNAstatLQ(shared_ptr<DNA> d, int pair,bool Additional) {
 		if (Additional) {
 			statAddition[pair]->addPostFilt(d);//PostFilt.addDNAStats(d);
@@ -570,6 +573,9 @@ public:
 	mutex csMTX1, csMTX2;
     // stats for additional reads to be output (yellow)
 	vector<shared_ptr<collectstats>> statAddition; // mid quality statistics
+	shared_ptr<GAstats> GAstatistics;//GoldenAxe statistics
+	shared_ptr<MEstats> mergeStats;
+
 
 
 

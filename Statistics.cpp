@@ -178,7 +178,7 @@ inline float Statistics::calc_median(vector<unsigned int> &in, float perc) {
 ////exit(0);
 //
 //    if (d->isPassed() || d->isMidQual()) {
-//        countBCdetected(d->getBarcodeNumber(), easyPair, false);
+//        countBCdetected(d->getBCnumber(), easyPair, false);
 //        //and register as success
 //    } else {
 //        if (d->getBarcodeDetected()) {
@@ -210,7 +210,7 @@ inline float Statistics::calc_median(vector<unsigned int> &in, float perc) {
 //    }
 ////    if (d->isDereplicated()) {
 ////        if (d->getBarcodeDetected() && !d->isPassed() && !d->isMidQual()) {
-////            this->statAddDerepBadSeq(d->getBarcodeNumber());
+////            this->statAddDerepBadSeq(d->getBCnumber());
 ////        }
 ////    }
 //}

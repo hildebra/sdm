@@ -926,12 +926,17 @@ bool DNA::qualWinPos(unsigned int W, float T){
 
 shared_ptr<DNA> DNA::getDNAsubseq(int start, int end, string id) {
 	shared_ptr<DNA> rdn = make_shared<DNA>();
-	rdn->setSequence(this->getSequence().substr(start,end));
+	rdn->setSequence(this->getSequence().substr(start,(end-start)) );
 	vector<qual_score> tq = this->getQual(start, end) ;
 	rdn->setQual(tq);
-	rdn->setNewID(id);
+	rdn->setHeader(id);
 	if (this->getBCnumber() >= 0) {
 		rdn->setBCnumber(this->getBCnumber(),0);
+		if (getBarcodeCut()) {
+			rdn->setBarcodeCut();
+		}
+		rdn->setBarcodeDetected(getBarcodeDetected());
+
 	}
 	return rdn;
 }
