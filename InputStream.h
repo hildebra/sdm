@@ -936,6 +936,7 @@ public:
 	void setMergeLength(int x) { FtsDetected.mergeLength = x; }
 	int getMergeErrors() {	return FtsDetected.errInOverlap;}
 	qual_score getMergeErrorsQual() { return FtsDetected.meanQInOverlapMismatch; }
+	bool isReversed() {return reversed_;}
 
 protected:
     std::string qual_traf_;

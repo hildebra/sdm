@@ -3281,6 +3281,13 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 		tdn[0]->setBCnumber(idx, getBCoffset() );
 	}
 	if (idx < 0) {
+		if (isReversedAmplicon(tdn[0])) {
+			string presentBC(""); int c_err(0);
+			idx = this->detectCutBC(tdn[0], presentBC, c_err, true);
+			tdn[0]->setBCnumber(idx, getBCoffset());
+		}
+	}
+	if (idx < 0) {
 		return retDNA;
 	}
 	shared_ptr<DNA> dn = tdn[0];
@@ -3295,18 +3302,19 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 
 	//do fwd amplicon search
 	while (1) {
-		limitF = dn->matchSeq(PrimerL[idx], PrimerErrs, SearchL + limitR, limitR);
+		limitF = dn->matchSeq(PrimerL[PrimerIdx[idx]], PrimerErrs, SearchL + limitR, limitR);
+		if (limitF < 0 ) { break; }
 		//records reverse-searched primer positions
-		limitR = dn->matchSeq(PrimerR_RC[idx], PrimerErrs, SearchL + limitF, limitF + 1);
-		if (limitF < 0 || limitR < 0) { break; }
+		limitR = dn->matchSeq(PrimerR_RC[PrimerIdx[idx]], PrimerErrs, SearchL + limitF, limitF + 1);
+		if ( limitR < 0) { break; }
 		posF.push_back(limitF);	posR.push_back(limitR); isRC.push_back(false);
 	}
 	//do rev amplicon search
 /*	limitF = 0; limitR = 0;
 	while (1) {
-		limitF = dn->matchSeq(PrimerL_RC[idx], PrimerErrs, SearchL + limitR, limitR);
+		limitF = dn->matchSeq(PrimerL_RC[PrimerIdx[idx]], PrimerErrs, SearchL + limitR, limitR);
 		//records reverse-searched primer positions
-		limitR = dn->matchSeq(PrimerR[idx], PrimerErrs, SearchL + limitF, limitF + 1);
+		limitR = dn->matchSeq(PrimerR[PrimerIdx[idx]], PrimerErrs, SearchL + limitF, limitF + 1);
 		if (limitF < 0 || limitR < 0) { break; }
 		posF.push_back(limitF);	posR.push_back(limitR); isRC.push_back(false);
 	}
@@ -3315,7 +3323,7 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 	//create new DNA objects from each subset..
 	for (size_t i = 0; i < posF.size(); i++) {
 		retDNA.push_back(
-			dn->getDNAsubseq(posF[i], posR[i] + PrimerR_RC[idx].length(), 
+			dn->getDNAsubseq(posF[i], posR[i] + PrimerR_RC[PrimerIdx[idx]].length(),
 				dn->getId() + "_" + itos(i))
 			);
 
@@ -3452,20 +3460,6 @@ void Filters::preFilterSeqStat(shared_ptr<DNA> d, int pair) {
 	//csMTX[easyPair]->unlock();
 }
 
-/*
-void Filters::preFilterSeqStatMT(shared_ptr<DNA> d, int pair, uint thread) {
-    if (d == NULL)
-        return;
-
-
-    if (pair <= 0) {
-        statistics_[thread].main_read_stats_[0]->PreFilt.addDNAStats(d);
-    } else if (pair == 1) {
-        statistics_[thread].main_read_stats_[1]->PreFilt.addDNAStats(d);
-    }
-    updateMaxSeqL(d->length());
-}
-*/
 std::mutex updateMaxSeqMutex;
 void Filters::updateMaxSeqL(int x) {
     {
@@ -3552,148 +3546,6 @@ bool Filters::betterSeed(shared_ptr<DNAunique> d1,
 }
 
 
-/*
-bool Filters::check(shared_ptr<DNA> d, bool doSeeding, int pairPre,
-	int &tagIdx) {
-    
-    //corrects for -1 (undefined pair_) to set to 0
-	int pair = max(0, pairPre);
-	unsigned int hindrance = 0;
-
-	if (check_length(d->length())) {
-		d->QualCtrl.minL = true;
-		return false;
-	}
-	//remove technical adapter
-	if (pair == -1 && removeAdapter)
-	    remove_adapter(d);
-
-	//BC already detected (e.g. MID)?
-	if (tagIdx == -2){
-		tagIdx = detectCutBC(d, pair == 0); //barcode 2nd part
-	}
-	if ((bDoBarcode2 || bDoBarcode) && tagIdx < 0) {
-		 d->QualCtrl.TagFail = true;
-		 d->failed();
-		 return false;
-	}
-	
-	//fwd primer only on pair_ 0
-	if (BcutPrimer){
-		if (pair != 1 && !cutPrimer(d, PrimerIdx[tagIdx], false,pair) && bRequireFwdPrim) {//0 or -1
-		    d->failed();
-		    return false;
-		}
-		else if (bShortAmplicons) {
-		    //pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
-			cutPrimer(d, PrimerIdx[tagIdx], true,pair);
-		}
-	}
-
-
-	if (check_length(d->length())){
-		d->QualCtrl.minL = true;
-		return false;
-	}
-	if (max_l!=0 && d->length()-hindrance > max_l){
-		d->QualCtrl.maxL = true;
-		return false;
-	}
-
-	//rev primer is the first that needs to be looked for
-	//makes it slower, as higher chance for low qual_ and this routine is costly.. however more important to get good lock on rev primer
-	if ((pair != 0 || bShortAmplicons) && bPrimerR) {
-		//removal of reverse primer
-		bool revCheck = pair == -1 || pair == 0;//1:false for RC, else always a reverse check
-		cutPrimerRev(d, PrimerIdxRev[tagIdx], revCheck);
-		if (d->getRevPrimCut()) {
-			//check length
-			if (check_lengthXtra(d, hindrance)) {
-				d->QualCtrl.minL = true; //sMinLength(pair_);
-				d->failed();
-				return false;
-			}
-		} else  {//stats, but only for 2nd pair_
-			if (pair == 1 && bRequireRevPrim) {//failed to find reverse primer
-				return false;
-			}
-		}
-	}
-
-
-	if (doSeeding){
-		//cut off low qual, hard limits
-		d->qualWinPos(EWwidth, EWthr);
-		return true;
-	}
-	
-	
-	//if seq needs to be cut, than here
-	if (TruncSeq>0){
-		d->cutSeqPseudo(TruncSeq);
-		if ( check_length(d->length()) ){
-			d->QualCtrl.minL = true; //sMinLength(pair_);
-			return false;
-		}
-	}
-	if (b_doQualFilter) {
-		//second cut off low qual
-		d->qualWinPos(EWwidth, EWthr);
-		//cut off accumulation error larger than maxAccumQP
-		d->qualAccumTrim(maxAccumQP);
-		//if (check_length(d->length(),hindrance) ){sMinLength();	return false;}
-		if (check_length(d->length())) {
-			d->QualCtrl.minLqualTrim = true; return false;//sMinQTrim(pair_);
-		}
-		int rea = 2;
-		if ((min_q > 0 || FQWthr > 0) && d->qualWinfloat(FQWwidth, FQWthr, rea) < min_q) {
-			d->QualCtrl.AvgQual = true;//sAvgQual(pair_);
-			return false;
-		}
-		if (rea == 1) {
-			d->QualCtrl.QualWin = true; //sQualWin(pair_);
-			return false;
-		}
-		//binomial filter here
-		if (b_BinFilBothPairs || pair != 1 ){
-			float ExpErr = d->binomialFilter((int)BinFilErr, BinFilP);
-			if (ExpErr > BinFilErr){
-				d->QualCtrl.BinomialErr = true;
-				//sBinomError(pair_, ExpErr);
-				d->failed(); return false;
-			}
-		}
-	}
-
-	if (MaxAmb!=-1 && d->numACGT() > MaxAmb){
-		d->QualCtrl.MaxAmb = true;//sMaxAmbig(pair_);
-		return false;
-	}
-	if (maxHomonucleotide!=0 && !d->HomoNTRuns(maxHomonucleotide)){
-		d->QualCtrl.HomoNT = true;// sHomoNT(pair_);
-		return false;
-	}
-
-	//adapter removed, quality filtering done. If no base_map is provided, that is all that is needed
-	if (!bDoMultiplexing){
-		if (TrimStartNTs>0){
-			if (d->length()-TrimStartNTs > max_l){//length check
-				d->QualCtrl.maxL = true; //sMaxLength(pair_);
-				return false;
-			}
-			//remove start NTs
-			d->cutSeq(0,TrimStartNTs);
-
-		}
-		d->setPassed(true);
-		return true;
-	}
-	d->setPassed(true);
-
-	//keep control over passed / not as close as possible to source
-	return true;
-}
-*/
 //DNA qual_ check, and some extra parameters
 //should be safe to call from different threads
 bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre, 
@@ -6224,8 +6076,8 @@ void GAstats::addStats(shared_ptr<GAstats> o) {
 void GAstats::printBCtabs(ostream& give) {
 	give <<  "SampleID";
 	give << "\t#Reads\t#GA/Read\tmean Read length\tmean GA length\n";
-	assert(GAperBC.size() == CNTperBC.size() == GALENperBC.size() == rdLENperBC.size());
-	assert(GAperBC.size() == SmplIDBC.size() );
+	assert(GAperBC.size() == CNTperBC.size() );assert(GAperBC.size() == GALENperBC.size() );
+	assert(GAperBC.size()  == rdLENperBC.size());assert(GAperBC.size() == SmplIDBC.size() );
 	for (unsigned int i = 0; i < GAperBC.size(); i++) {
 		give << SmplIDBC[i] << "\t" << CNTperBC[i] << "\t" << float(GAperBC[i]) / float(CNTperBC[i]) << "\t";
 		give << int(float(rdLENperBC[i]) / float(CNTperBC[i])+0.5f) << "\t" << int(float(GALENperBC[i]) / float(GAperBC[i]) + 0.5f) << "\n";

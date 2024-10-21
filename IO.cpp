@@ -129,7 +129,7 @@ bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 		}
 
 		//GoldenAxe requires some extra rounds of checking DNA
-		if (MD->getFilters(curThread)->isGoldAxe()) {
+		if (ret[0] != nullptr && MD->getFilters(curThread)->isGoldAxe()) {
 			vector<shared_ptr<DNA>> multDNA = MD->getFilters(curThread)->GoldenAxe(ret);
 			vector<shared_ptr<DNA>> ret2(3, nullptr);
 			for (size_t xi = 0; xi < multDNA.size(); xi++) {
