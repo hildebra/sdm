@@ -16,6 +16,9 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+
+#define _CRT_SECURE_NO_DEPRECATE
+
 #include <mutex>
 #include <thread>
 #include "InputStream.h"
@@ -28,7 +31,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <string>
 
 #ifdef _gzipread
-#include <zstr.h>
+#include "include/gzstream.h"
+//#include <include/zstr.h>
 #endif
 string spaceX(uint k){
 	string ret = "";
@@ -947,8 +951,11 @@ bool DNA::cutSeq(int start, int stop, bool pseudo){
 
 	 if (stop == -1) {
 		if (start >= (int) sequence_length_ || start < 0) { return false; }
-	} else if (start >= stop || stop > (int)qual_.size() || start >= (int)qual_.size()) {
+	} else if (start >= stop ||  start >= (int)qual_.size()) {
 		return false;
+	}
+	if (stop > (int)qual_.size()) {
+		stop = (int)qual_.size();
 	}
 	
 	//pseudo deactivates cutting of 3'
@@ -993,12 +1000,13 @@ int DNA::matchSeq(std::string PrSt,int Err,int searchSpace, int startPos,bool ex
 	vector<int> potentialMatches(0);
 	for (; pos< searchSpace; pos++){
 		if (pos > mthL) {	break;	}
-		c_err=0;Prp=0; Prp2=pos;
+		c_err = 0; Prp = 0; Prp2 = pos; c_points = 0;
 		do {
 		
 #ifdef _NEWMATCH
 			//new vector based matching
-			c_err += DNA_IUPAC[sequence_[Prp2] + 256 * PrSt[Prp]]; if (c_err > Err){break;}
+			c_err += DNA_IUPAC[sequence_[Prp2] + 256 * PrSt[Prp]]; 
+			if (c_err > Err){break;}
 #else
 			//old, direct match
 			if (!matchDNA(sequence_[Prp2],PrSt[Prp])){c_err++;if (c_err > Err){break;}}
@@ -1006,6 +1014,9 @@ int DNA::matchSeq(std::string PrSt,int Err,int searchSpace, int startPos,bool ex
 			Prp++; Prp2++;
 			if (sequence_[Prp2] != 'N') { c_points++; }
 		} while ( Prp < PrL);
+		/*if (c_points >= point_aim) {
+			int x = 0; //DEBUG
+		}*/
 		if (c_err<=Err && c_points >= point_aim){
 			endPos=pos;
 			potentialMatches.push_back(endPos);
@@ -1371,11 +1382,14 @@ bool DNA::sameHead(const string& oID) {
 
 void DNA::setPassed(bool b){
 	//once mid qual is active, there is no more good qual possible
-	if (mid_quality_) {
+	if (failed_) {
+		good_quality_ = false; mid_quality_ = false;
+	} else if (mid_quality_) {
 		good_quality_ = false;
 	}
 	else {
 		good_quality_ = b;
+		failed_ = false;
 	}
  /*   good_quality_ = b;
 	if (good_quality_ && mid_quality_) {

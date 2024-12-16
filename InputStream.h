@@ -24,8 +24,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define togRe//ad
 //input through getDNAlines
 #define IOsep
+#define _CRT_SECURE_NO_DEPRECATE
 
 #include "DNAconsts.h"
+//#include "include/iowrap.h"
 //#include "FastxReader.h"
 #include <functional> 
 #include <cctype>
@@ -38,6 +40,30 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <mutex>
 #include <condition_variable>
 #include <future>
+
+#ifdef _isa1gzip
+#include "include/GZipStr.h"
+#endif
+
+#ifdef _izlib
+#include "include/izlib.h"
+#else
+
+#ifdef _gzipread
+#include "include/gzstream.h"
+#include "include/zstr.h"
+#endif
+/*typedef struct {
+	FILE* fp;char* mode;int is_plain;
+//	struct isal_gzip_header* gzip_header;
+//	struct inflate_state* state;
+//	struct isal_zstream* zstream;
+	uint8_t* buf_in;size_t buf_in_size;uint8_t* buf_out;size_t buf_out_size;
+} gzFile_t;
+int gzeof(gzFile_t* fp) { return 0; }
+typedef gzFile_t* gzFile;
+*/
+#endif
 
 
 
@@ -89,6 +115,9 @@ bool any_lowered(const string& is);
 string applyFileIT(string x, int it, const string xtr = "");
 bool fileExists(const std::string& name, int i=-1,bool extiffail=true);
 //vector<int> orderOfVec(vector<int>&);
+
+
+
 
 struct filesStr {//used in separateByFile
 	vector<string> FastaF;
@@ -145,7 +174,7 @@ class ifbufstream {//: private std::streambuf, public std::ostream {
 public:
 	ifbufstream(const string& inF, size_t buf1=20000,bool isMC=false,bool test=false) :
 		file(inF),modeIO(ios::in),at(0),isGZ(false), atEnd(false), hasKickoff(false), 
-		doMC(isMC),	bufS(buf1), bufSW(buf1)
+		doMC(isMC),	bufS(buf1), bufSW(buf1), primary(nullptr) //,primaryG(nullptr)
 	{
 		if (bufS < 10) {
 			cerr << "Buffer size chosen too small: " << bufS << endl << "class ifbufstream\n";
@@ -155,17 +184,18 @@ public:
 		
 		if (isGZfile(file)) { //write a gzip out??
 			isGZ = true;
-#ifndef _gzipread
+#if !defined(_gzipread) && !defined(_isa1gzip) 
 			cerr << "ifbufstream::gzip input not supported in your sdm build\n" << file << endl;
 			exit(51);
 #endif
 		}
 		openFstream();
 
-		if (!primary){
+		if (!primary ){//} && !gzeof(primaryG)){
 			atEnd = true;
 			return;
 		}
+
 		if (test) {
 			return;
 		}
@@ -174,11 +204,34 @@ public:
 		primary.seekg(0, is.beg);*/
 		//first round read..
 		input_mtx.lock();
+		//cerr << "ReadX";
+		
+#ifdef _izlib
+		if (isGZ) {
+			int rd = gzread(primaryG, keeper, bufS);
+			if (!gzeof(primaryG)) { bufSW = (size_t)rd + 1; }
+			if (!gzeof(primaryG) || bufS > rd) {
+				bufS = (size_t)rd + 1; atEnd = true;
+				delete[] keeperW; keeperW = nullptr;
+			}else { kickOff(); }
+		}
+		else {
+			primary->read(keeper, bufS);
+			if (!(*primary) || bufS > primary->gcount()) {
+				bufS = (size_t)primary->gcount() + 1; atEnd = true;
+				delete[] keeperW; keeperW = nullptr;
+			}else { kickOff(); }
+		}
+#else 
 		primary->read(keeper, bufS);
 		if (!(*primary) || bufS > primary->gcount()) {
-			bufS = (size_t)primary->gcount()+1;atEnd = true;
-			delete[] keeperW;keeperW = nullptr;
-		} else {kickOff();}
+			bufS = (size_t)primary->gcount() + 1; atEnd = true;
+			delete[] keeperW; keeperW = nullptr;
+		} else { kickOff(); }
+#endif
+		
+		//cerr << keeper << endl;
+		//cerr << "Y";
 		input_mtx.unlock();
 	}
 	~ifbufstream() {
@@ -285,6 +338,8 @@ public:
 		ret = this->getline(in[1]);
 		ret = this->getline(in[2]);
 		ret = this->getline(in[3]);
+
+		//cerr << in[0] << endl << in[1] << endl << in[2] << endl << in[3] << endl;exit(2);
 		
 		return ret;
 	}
@@ -344,23 +399,53 @@ private:
 			//keeperW[XX] = char_traits<char>::eof();
 			return false;
 		}
-		primary->read(keeperW, bufS);	
-		if (!*(primary)) {
-			bufSW = (size_t)primary->gcount() + 1;
+#ifdef _izlib
+		if (isGZ) {
+			int rd = gzread(primaryG, keeperW, bufS);
+			if (!gzeof(primaryG)) { bufSW = (size_t)rd + 1; }
+		} else {
+			primary->read(keeperW, bufS);
+			if (!*(primary)) { bufSW = (size_t)primary->gcount() + 1; }
 		}
+#else 
+		primary->read(keeperW, bufS);
+		if (!*(primary)) {bufSW = (size_t)primary->gcount() + 1;}
+#endif
 		return true;
 	}
+
+
+	
 	void openFstream() {
 		if (isGZ) {
-#ifdef _gzipread
-			primary = DBG_NEW zstr::ifstream(file.c_str());
+#ifdef _isa1gzip
+			primary = new GzipIfstream(file.c_str(),  48* 1024*1024);
+#elif defined(_izlib)
+			primaryG = gzopen(file.c_str(), "r");
+#elif defined(_gzipread)
+			primary = new zstr::ifstream(file.c_str());
+			//primary = new igzstream(file.c_str());
 #else
 			cerr << "gzip not supported in your sdm build\n (ifbufstream) " << file; exit(50);
 #endif
 		}
 		else {
-			primary = DBG_NEW ifstream(file, modeIO);
+			primary = new ifstream(file, modeIO);
 		}
+		/*
+		if (isGZ) {
+#ifdef _isa1gzip
+			primary = std::make_unique<IsalGzipReader>(file);
+#elif _gzipread && ! _isa1gzip
+			primary = std::make_unique<GzipReader>(file);
+#else
+			cerr << "gzip not supported in your sdm build\n (ifbufstream) " << file; exit(50);
+#endif
+		}
+		else {
+			primary = new UncompressedReader(file);
+		}
+		*/
 	}
 	
 	bool kickOff() {
@@ -421,6 +506,8 @@ private:
 	size_t at;
 	bool  isGZ, atEnd, hasKickoff, doMC;
 	istream* primary;
+	//gzFile primaryG;
+	//Reader* primary;
 	future<bool> readKickoff;
 	size_t bufS, bufSW ;
 	mutex localMTX;// , input_mtx2;
@@ -489,6 +576,7 @@ private:
 	//write to cout? gzip input? do multicore?
 	bool coutW, isGZ, doMC;
 	ostream* primary;
+	
 	
     size_t bufS;
 
@@ -629,14 +717,16 @@ public:
 	DNA(string seq, string names) : sequence_(seq), sequence_length_(sequence_.length()),
                                     id_(names), new_id_(names),
                                     qual_(0), qual_traf_(""), sample_id_(-1), avg_qual_(-1.f),
-                                    quality_sum_(0), accumulated_error_(0.), good_quality_(false), mid_quality_(false),
+                                    quality_sum_(0), accumulated_error_(0.), 
+									failed_(false),good_quality_(false), mid_quality_(false),
                                     reversed_(false),
                                     read_position_(-1),
                                     FtsDetected(),
                                     id_fixed_(false), tempFloat(0.f),merge_offset_(-1){}
 	DNA(): sequence_(""), sequence_length_(0), id_(""), new_id_(""), qual_(0), qual_traf_(""),
            sample_id_(-1), avg_qual_(-1.f),
-           quality_sum_(0), accumulated_error_(0.), good_quality_(false), mid_quality_(false),
+           quality_sum_(0), accumulated_error_(0.), 
+			failed_(false),good_quality_(false), mid_quality_(false),
            reversed_(false),
            read_position_(-1),
            FtsDetected(),
@@ -670,7 +760,7 @@ public:
 	//something wrong with DNA object, just del all info
 	void delself() {
 		sequence_ = ""; sequence_length_ = 0; id_ = ""; new_id_ = ""; qual_.resize(0);
-		good_quality_ = false; mid_quality_ = false;
+		good_quality_ = false; mid_quality_ = false; failed_ = true;
 	}
 	//~DNA(){}
 	void appendSequence(const string &s) { sequence_ += s; sequence_length_ = sequence_.length(); }
@@ -809,7 +899,7 @@ public:
 	void setTempFloat(float i){tempFloat = i;}
 	float getTempFloat(){return tempFloat;}
 	//void adaptHead(shared_ptr<DNA>,const int,const int);
-	void failed(){ good_quality_=false;mid_quality_=false;}
+	void failed() { good_quality_ = false; mid_quality_ = false; failed_ = true; }
 	bool control(){ if (qual_.size() == 0){return false;}return true;}
 	
 	void setBCnumber(int i, int BCoff) {
@@ -832,7 +922,10 @@ public:
 	void resetTruncation() { sequence_length_ = sequence_.length(); }
 	void setPassed(bool b);
 	void setYellowQual(bool b) { 
-		mid_quality_ = b; 
+		mid_quality_ = b; failed_ = false;
+	}
+	bool isFailed() {
+		return failed_;
 	}
 	bool isGreenQual(void) {
 		if (mid_quality_) { return false; } 
@@ -921,6 +1014,7 @@ public:
 		read_position_ = oD->read_position_;
 		good_quality_ = oD->good_quality_;
 		mid_quality_ = oD-> mid_quality_;
+		failed_ = oD->failed_;
 		sample_id_ = oD->sample_id_;
 
 		FtsDetected.errInOverlap = oD->FtsDetected.errInOverlap;
@@ -946,7 +1040,7 @@ protected:
 	float avg_qual_;
 	unsigned int quality_sum_;
 	double accumulated_error_;
-	bool good_quality_, mid_quality_;
+	bool good_quality_, mid_quality_, failed_;
 	bool reversed_;
 
 
@@ -1167,11 +1261,6 @@ public:
             _fileLength(10), _max(60), _last(0),
             fasta_istreams(3, NULL), quality_istreams(3, NULL), fastq_istreams(3, NULL),
             fastaFilepathTemp(3, ""), qualityFilepathTemp(3, ""), 
-		//fna(3,NULL), qual_(3,NULL), fastq(3,NULL),
-		
-#ifdef _gzipread	
-		//gzfna(3,NULL), gzqual(3,NULL), gzfastq(3,NULL),
-#endif
             dnaTemp1(3, NULL), dnaTemp2(3, NULL),
             isFasta(fnRd), hasMIDs(false),
             keepPairHD(true),

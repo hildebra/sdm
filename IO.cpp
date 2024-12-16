@@ -205,7 +205,7 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	//bool isReversed(false);//was a reversion detected?
 
 	if (MIDuse && tdn[2] != nullptr) {
-		tagIdx = curFil->detectCutBC(tdn[2], presentBC, c_err, true); 
+		tagIdx = curFil->findTag(tdn[2], presentBC, c_err, true,0,true,false); 
 		tdn[0]->setBCnumber(tagIdx, BCoffs);
 	}
 	//routine checks, and reverses/swaps DNA objects
@@ -452,7 +452,7 @@ struct job2 {
 	//thread job;
 };
 
-bool read_paired(OptContainer* cmdArgs, OutputStreamer* MD, 
+bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD, 
 	shared_ptr<InputStreamer> IS, bool MIDuse, int Nthreads) {
 	
 	DNAmap oldMIDs;
@@ -605,7 +605,13 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 	if (cmdArgs->find("-GoldenAxe") == cmdArgs->end()) {
 		(*cmdArgs)["-GoldenAxe"] = "0";
 	}
-	
+	if (cmdArgs->find("-GoldenAxeMinAmpli") == cmdArgs->end()) {
+		(*cmdArgs)["-GoldenAxeMinAmpli"] = "0";
+	}
+	if (cmdArgs->find("-GoldenAxeMaxAmpli") == cmdArgs->end()) {
+		(*cmdArgs)["-GoldenAxeMaxAmpli"] = "0";
+	}
+
 	
 
 	if (cmdArgs->find("-i_MID_fastq") == cmdArgs->end()) {
@@ -1016,7 +1022,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		//**********************
 		//heavy reading, demultiplexing, dereplicating routine
 		//**********************
-		read_paired(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
+		read_sequences(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
 		//read_paired2(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
 
 
@@ -1211,10 +1217,20 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
     log.close();
 
 
-	string logFGA = files.logF.substr(0, files.logF.length() - 3) + "GoldAxe.txt";
-	log.open(logFGA.c_str(), ios_base::out);
-	mainFilter->GAstatistics->printBCtabs(log);
-	log.close();
+	if (mainFilter->isGoldAxe()) {
+		string logFGA = files.logF.substr(0, files.logF.length() - 3) + "GoldAxe.txt";
+		log.open(logFGA.c_str(), ios_base::out);
+		mainFilter->GAstatistics->printBCtabs(log);
+		log.close();
+		logFGA = files.logF.substr(0, files.logF.length() - 3) + "GoldAxeAmpliN.txt";
+		log.open(logFGA.c_str(), ios_base::out);
+		mainFilter->GAstatistics->printBCAmpliNdistribution(log);
+		log.close();
+		logFGA = files.logF.substr(0, files.logF.length() - 3) + "GoldAxeAmpliL.txt";
+		log.open(logFGA.c_str(), ios_base::out);
+		mainFilter->GAstatistics->printBCAmpliLdistribution(log);
+		log.close();
+	}
 
 #ifdef DEBUG
     cerr << "other logs end" << endl;
@@ -1320,9 +1336,13 @@ void general_help(){
     help_head();
     cout<<"sdm (simple demultiplexer) is a fast, memory efficient program to demultiplex fasta and fastq files or simply do quality filterings on these.\n";
 #ifdef _gzipread
-    cout<<"Compiled with gzip support\n";
+    cout<<"Compiled with zlib gzip support\n";
 #else
     cout << "No gzip support compiled\n";
+#endif
+#ifdef _isa1gzip
+	cout << "Compiled with ISA-1 gzip support\n";
+
 #endif
 #ifdef _THREADED
     cout<<"Multithreading not supported"
@@ -1348,7 +1368,8 @@ void printCmdsHelp(){
     cout << " -ignore_IO_errors [0/1]: 1=Errors in fastq reads are ignored, with sdm trying to sync reads pairs after corrupted single reads (default: 0)\n";
 	cout << " -5PR1cut [I]: remove I first nts from read 1\n"; cout << " -5PR2cut [I]: remove I first nts from read 2\n";
 	cout << " -GoldenAxe [0/1]: use GoldenAxe mode for PacBio concatenated reads (needs special sequencing library prep).\n";
-	
+	cout << " -GoldenAxeMinAmpli [-1]: minNumAmplicons on GoldenAxe reads to accept at all (Default: -1).\n";
+
 	//-binomialFilterBothPairs [1/0]
     //-count_chimeras [T/F]
     // ucAdditionalCounts_refclust -OTU_fallback_refclust -optimalRead2Cluster_ref

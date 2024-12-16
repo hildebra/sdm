@@ -28,7 +28,7 @@ typedef std::map<std::string, shared_ptr<DNA>> DNAmap;
 //void openOutFiles(string files, string fmt,string );
 //void prepareOutFiles(OptContainer& cmdArgs);
 //void read_fastq(OptContainer& cmdArgs, OutputStreamer* MD,string fileS);
-bool read_paired(OptContainer* cmdArgs, OutputStreamer* MD,
+bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 	shared_ptr<InputStreamer>, bool, int Nthreads);
 //different thread management..
 bool read_paired2(OptContainer* cmdArgs, OutputStreamer* MD,

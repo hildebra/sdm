@@ -247,3 +247,11 @@ _Pvt_Extensions
 
 # FAKE - F# Make
 .fake/
+
+#zlib experiments
+include/iowrap*
+include/izlib*
+Makefile.old
+
+#old files..
+deprecated/*

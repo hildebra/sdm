@@ -393,6 +393,7 @@ void OutputStreamer::analyzeDNA(shared_ptr<DNA> d, int FilterUse, int pair, int&
 	if (!d){
 		return ;
 	}
+	if (d->isFailed()) { return; }
 	Filters * curFil = this->getFilters(thr);
 	bool isP1 = max(0, pair) == 0;
 
@@ -2292,7 +2293,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	of.close(); omaps.close();  ofRest.close();
 	float avgSize = (float)passedSize / (float)(passed_hits);
 	string report = "";
-	string N_notPassed = intwithcommas(int(Tracker.size() - passed_hits));
+	string N_notPassed = intwithcommas(int(dereplicated_dnas.size() - passed_hits));
 	string N_total = intwithcommas(int(Tracker.size() ));
 	string N_passed = intwithcommas((int)passed_hits);
 	report += "Dereplication: " + N_passed +
@@ -2451,6 +2452,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
         barcodeLengths1_(0), barcodeLengths2_(0),
 		illuPEfwd(""), illuPErev(""), illuSEuni(""), illuSEidx(""), 
 		Bcheck4illuAdapts(false), doGoldAxe(false),
+		GoldAxeMinAmpli(-1), GoldAxeMaxAmpli(-1),
         cmdArgs(cmdArgs1), passed_interval_reads(0)
 		{
 	//csMTX[0].unlock(); 
@@ -2467,6 +2469,8 @@ Filters::Filters(OptContainer* cmdArgs1) :
 
 	mergeStats = make_shared<MEstats>();
 	
+
+
 	bool alt_bRequireRevPrimSet=false;
 
 	string optF ("");
@@ -2504,7 +2508,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	if ((*cmdArgs)["-logLvsQ"].c_str() != "") {
 		collectStatistics[0]->setbLvsQlogsPreFilt(true);
 	}
-	if ((*cmdArgs)["-GoldenAxe"] == "1") { this->setGoldAxe(true); }
+	if ((*cmdArgs)["-GoldenAxe"] == "1") { this->setGoldAxe(true, stoi((*cmdArgs)["-GoldenAxeMaxAmpli"]), stoi((*cmdArgs)["-GoldenAxeMinAmpli"])); }
 
 
 	//delimit output file size to X reads
@@ -2603,6 +2607,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 				if (MaxAmb!= alt_MaxAmb){addModConf = true;}
 			} else {
 				maxAmb = atoi(segs2.c_str());
+
 			}
 		} else if (strcmp(segs.c_str(),"QualWindowThreshhold") == 0){
 			if (addMod){ 
@@ -2845,12 +2850,14 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 		illuPEfwd(of->illuPEfwd), illuPErev(of->illuPErev), illuSEuni(of->illuSEuni), illuSEidx(of->illuSEidx),
 		Bcheck4illuAdapts(of->Bcheck4illuAdapts),
 		doGoldAxe(of->doGoldAxe),
+		GoldAxeMinAmpli(of->GoldAxeMinAmpli), GoldAxeMaxAmpli(of->GoldAxeMaxAmpli),
+	
 		SequencingRun(0),cmdArgs(of->cmdArgs), passed_interval_reads(0)
 {
 	cdbg("New Filter object from copy\n");
 	ReadsWritten = of->writtenReads();
 	OFileIncre = of->getFileIncrementor();
-    BCdFWDREV[0].fix(); BCdFWDREV[1].fix();
+    BCdFWDREV[0].reset(); BCdFWDREV[1].reset();
 	//collectStatistics.resize(2); statAddition.resize(2);
 	//csMTX[0] = new mutex(); csMTX[1] = new mutex();
 
@@ -2888,97 +2895,6 @@ BarcodePreStats();
 
 }
 
-/*
-//copy of filter, but leave stat vals empty
-Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads) :
-		PrimerL(0,""), PrimerR(0,""),
-		PrimerL_RC(0,""), PrimerR_RC(0,""),
-		PrimerIdx(of->PrimerIdx),
-		Barcode(0), revBarcode(0), Barcode2(0), revBarcode2(0),
-		HeadSmplID(0), hetPrimer(2, vector<string>(0)),
-		collectStatistics(2), statAddition(2), statistics_(threads),
-		FastaF(of->FastaF), QualF(of->QualF), FastqF(of->FastqF),
-		MIDfqF(of->MIDfqF), derepMinNum(of->derepMinNum),
-		lMD(NULL),
-		tAdapter(of->tAdapter), tAdapterLength(of->tAdapterLength),
-		removeAdapter(of->removeAdapter), bDoMultiplexing(of->bDoMultiplexing),
-		bDoBarcode(of->bDoBarcode), bDoBarcode2(of->bDoBarcode2), bDoBarcode2Rd1(of->bDoBarcode2Rd1),
-		bDoHeadSmplID(of->bDoHeadSmplID),
-		bBarcodeSameSize(of->bBarcodeSameSize),
-		bOneFileSample(of->bOneFileSample), curBCnumber(BCnumber), BCoffset(0),
-		bAdditionalOutput(of->bAdditionalOutput), b2ndRDBcPrimCk(of->b2ndRDBcPrimCk),
-		bRevRdCk(of->bRevRdCk), bChkRdPrs(of->bChkRdPrs),
-		min_l(of->min_l), alt_min_l(of->alt_min_l), min_l_p(of->min_l_p), alt_min_l_p(of->alt_min_l_p),
-		maxReadLength(0), norm2fiveNTs(of->norm2fiveNTs),
-		max_l(of->max_l), min_q(of->min_q), alt_min_q(of->alt_min_q),
-		BcutPrimer(of->BcutPrimer), alt_BcutPrimer(of->alt_BcutPrimer),
-		bPrimerR(of->bPrimerR),
-		bRequireRevPrim(of->bRequireRevPrim), alt_bRequireRevPrim(of->alt_bRequireRevPrim),
-		bRequireFwdPrim(of->bRequireFwdPrim), alt_bRequireFwdPrim(of->alt_bRequireFwdPrim),
-		BcutTag(of->BcutTag),
-		bCompletePairs(of->bCompletePairs), bShortAmplicons(of->bShortAmplicons),
-		minBCLength1_(of->minBCLength1_), minBCLength2_(of->minBCLength2_), maxBCLength1_(of->maxBCLength1_), maxBCLength2_(of->maxBCLength2_), minPrimerLength_(of->minPrimerLength_), maxHomonucleotide(of->maxHomonucleotide),
-		PrimerErrs(of->PrimerErrs), alt_PrimerErrs(of->alt_PrimerErrs), barcodeErrors_(of->barcodeErrors_),
-		MaxAmb(of->MaxAmb), alt_MaxAmb(of->alt_MaxAmb),
-		FQWwidth(of->FQWwidth), EWwidth(of->EWwidth),
-		RevPrimSeedL(of->RevPrimSeedL),
-		b_BinFilBothPairs(of->b_BinFilBothPairs),
-		BinFilErr(of->BinFilErr), BinFilP(of->BinFilP),
-		FQWthr(of->FQWthr), EWthr(of->EWthr),
-		alt_FQWthr(of->alt_FQWthr), alt_EWthr(of->alt_EWthr),
-		PEheaderVerWr(of->PEheaderVerWr), TrimStartNTs(of->TrimStartNTs),
-		TruncSeq(of->TruncSeq),
-		iniSpacer(of->iniSpacer), userReqFastqVer(of->userReqFastqVer),
-		userReqFastqOutVer(of->userReqFastqOutVer), maxAccumQP(of->maxAccumQP),
-		alt_maxAccumQP(of->alt_maxAccumQP),
-		//BChit, BCrevhit initialize to 0 - new set, new luck
-		pairedSeq(of->pairedSeq),
-		revConstellationN(0),
-		BCdFWDREV(of->BCdFWDREV),
-		restartSet(false),
-		b_optiClusterSeq(of->b_optiClusterSeq), b_subselectionReads(of->b_subselectionReads),
-		b_doQualFilter(of->b_doQualFilter),
-		b_doFilter(of->b_doFilter),
-		bDoDereplicate(of->bDoDereplicate),
-		bDoCombiSamples(of->bDoCombiSamples),
-		maxReadsPerOFile(of->maxReadsPerOFile),
-		ReadsWritten(of->ReadsWritten), OFileIncre(of->OFileIncre),
-		barcodeLengths1_(0), barcodeLengths2_(0), SequencingRun(0)
-		{
-	BCdFWDREV[0].fix(); BCdFWDREV[1].fix();
-	collectStatistics[0] = collectstats(); collectStatistics[1] = collectstats();
-	collectStatistics[0]->ini_repStat(); collectStatistics[1]->ini_repStat();
-
-	if (bAdditionalOutput) {
-		statAddition[0] = collectstats(); statAddition[1] = collectstats();
-		statAddition[0]->ini_repStat(); statAddition[1]->ini_repStat();
-
-	}
-	if (takeAll) {
-		this->allResize((uint)of->PrimerIdx.size());
-		PrimerIdxRev = of->PrimerIdxRev;
-		PrimerIdx = of->PrimerIdx;
-		Barcode = of->Barcode;
-		Barcode2 = of->Barcode2;
-		SampleID = of->SampleID;
-		SampleID_Combi = of->SampleID_Combi;
-		HeadSmplID = of->HeadSmplID;
-		PrimerL = of->PrimerL;
-		PrimerR = of->PrimerR;
-		PrimerL_RC = of->PrimerL_RC;
-		PrimerR_RC = of->PrimerR_RC;
-		hetPrimer = of->hetPrimer;
-		lMD = of->lMD;
-		barcodeLengths1_ = of->barcodeLengths1_;
-		barcodeLengths2_ = of->barcodeLengths2_;
-		SequencingRun = of->SequencingRun;
-		SequencingRun2id = of->SequencingRun2id;
-		BarcodePreStats();
-
-	}
-
-}
-*/
 
 Filters::~Filters() {
 	cdbg("Deleting filter .. ");
@@ -3239,7 +3155,6 @@ void Filters::reverseTS_all_BC2() {
         barcodes2_[Barcode2[i]] = i;
         barcodeLengths2_[i] = (int)Barcode2[i].length();
 	}
-
 }
 
 bool Filters::isReversedAmplicon( shared_ptr<DNA> tdn) {
@@ -3274,38 +3189,73 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 	if (!this->isGoldAxe() || this->isPaired() != 1) {
 		return retDNA;
 	}
+	if (tdn[0]->length() < 100) { return retDNA; }
 	int idx = tdn[0]->getBCnumber();
+	
+	///first check if amplicon wrongly oriented..
+	isReversedAmplicon(tdn[0]);
+
 	if (idx < 0) {
-		string presentBC(""); int c_err(0);
-		idx = this->detectCutBC(tdn[0], presentBC, c_err, true);
-		tdn[0]->setBCnumber(idx, getBCoffset() );
-	}
-	if (idx < 0) {
-		if (isReversedAmplicon(tdn[0])) {
-			string presentBC(""); int c_err(0);
-			idx = this->detectCutBC(tdn[0], presentBC, c_err, true);
+		//string presentBC(""); int c_err(0);
+		//idx = this->findTag(tdn[0], presentBC, c_err, true,0,true);
+		idx = detectCutBC(tdn[0],true);
+		if (idx < 0) {
+			if (isReversedAmplicon(tdn[0])) {
+				//string presentBC(""); int c_err(0);
+				//idx = this->findTag(tdn[0], presentBC, c_err, true,0,true);
+				idx = detectCutBC(tdn[0], true);
+			}
+		} 
+		/*if (idx >= 0) { //this should be done within "detectCutBC"
+			if (this->doubleBarcodes() ) {
+				int tagIdx2(-2);
+				tagIdx2 = this->findTag2(tdn[0], presentBC, c_err, false, -1);
+				this->dblBCeval(idx, tagIdx2, presentBC, tdn[0], nullptr);
+				if (idx != tagIdx2) {
+					cerr << "GA Double BC eval unsuccesful!\n"; exit(828);
+				}
+			}
 			tdn[0]->setBCnumber(idx, getBCoffset());
 		}
+		*/
+		if (idx >= 0) { tdn[0]->setBCnumber(idx, getBCoffset()); }
 	}
 	if (idx < 0) {
+		tdn[0]->failed();	//retDNA.push_back(tdn[0]);
+		//this->addGAstats(tdn[0], retDNA);
+		GAstatistics->addBaseGAStats(tdn[0], retDNA, 0);
+
 		return retDNA;
 	}
 	shared_ptr<DNA> dn = tdn[0];
 
 	int limitF = 0;
+	int limitF2 = -1;
 	int limitR = 0;
 	int SearchL = 6000;
 
 	vector<int> posF(0), posR(0);
-	vector<bool> isRC(0);
+	vector<bool> isRC(0), isProblem(0);
 	
 
 	//do fwd amplicon search
 	while (1) {
-		limitF = dn->matchSeq(PrimerL[PrimerIdx[idx]], PrimerErrs, SearchL + limitR, limitR);
+		if (limitF2 > limitR) { limitF = limitF2; 
+		} else {
+			limitF = dn->matchSeq(PrimerL[PrimerIdx[idx]], PrimerErrs, SearchL + limitR, limitR);
+		}
 		if (limitF < 0 ) { break; }
+		limitF2 = dn->matchSeq(PrimerL[PrimerIdx[idx]], PrimerErrs, SearchL + limitF+10, limitF+10);
 		//records reverse-searched primer positions
 		limitR = dn->matchSeq(PrimerR_RC[PrimerIdx[idx]], PrimerErrs, SearchL + limitF, limitF + 1);
+		
+		if (limitF2>0 && limitF2 < limitR) {//something went wrong.. couldn't detect correct reverse primer?
+			limitF2 = -1;
+			isProblem.push_back(true);
+		} else {
+			isProblem.push_back(false);
+		}
+		
 		if ( limitR < 0) { break; }
 		posF.push_back(limitF);	posR.push_back(limitR); isRC.push_back(false);
 	}
@@ -3321,17 +3271,44 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 */
 
 	//create new DNA objects from each subset..
+	int missedGAs(0);
 	for (size_t i = 0; i < posF.size(); i++) {
 		retDNA.push_back(
 			dn->getDNAsubseq(posF[i], posR[i] + PrimerR_RC[PrimerIdx[idx]].length(),
 				dn->getId() + "_" + itos(i))
 			);
+		BCintoHead(idx, retDNA.back(), "", -1, false, true);
 
+		if (i > 0) {
+			int disGAs = posF[i] - posR[i - 1] - (int)PrimerR[PrimerIdx[idx]].length();
+			if (disGAs > 12) {
+				//cerr << ("disGA:"+itos(disGA));
+				//std::cout << "disGA" << " ";
+				missedGAs++;
+			}
+		} else if (posF[i] > 100) {
+			missedGAs++;
+		}
+
+		if (isProblem[i]) {
+			dn->setYellowQual(true);
+		}
 	}
 	//int X = 0;
 
 	//collect some stats
-	this->addGAstats(dn,retDNA);
+	if (retDNA.size() == 0) {//failure to find any GA sequences..
+		tdn[0]->failed();	//retDNA.push_back(tdn[0]);
+	}
+	else if ((GoldAxeMinAmpli != -1 && retDNA.size() < GoldAxeMinAmpli)
+				||
+			(GoldAxeMaxAmpli != -1 && retDNA.size() > GoldAxeMaxAmpli ) ) {
+		tdn[0]->failed();
+		retDNA.resize(0);
+	}
+	//this->addGAstats(dn, retDNA);
+	GAstatistics->addBaseGAStats(dn, retDNA, missedGAs);
+	//GAstatistics->addMissedGAs(missedGAs);
 
 	return retDNA;
 
@@ -3480,6 +3457,9 @@ void Filters::setSeqLength(float minL, int maxL) {
 		min_l_p = minL;
 	}
 	max_l = maxL;
+	if (max_l < 0) {
+		max_l = 1e9; //100 mil should be good enough for infinite length
+	}
 }
 
 
@@ -3640,7 +3620,7 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre,
 		//second cut off low qual_
 		d->qualWinPos(EWwidth, EWthr);	// { qualWinTrim = true; }
 		//cut off accumulation error larger than maxAccumQP
-		if (maxAccumQP != -1.0) {
+		if (maxAccumQP > 0.0) {
 			int cP = d->qualAccumulate(maxAccumQP);
 			if (check_lengthXtra(d, 0, cP)) {
 				d->isYellowQual();  d->QualCtrl.minLqualTrim = true;//sMinQTrim(pair_);
@@ -3688,7 +3668,7 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre,
 		}
 	}
 	int ambNTs = d->numACGT();
-	if (MaxAmb!=-1 && ambNTs > MaxAmb){
+	if (MaxAmb >= 0 && ambNTs > MaxAmb){
 		d->QualCtrl.MaxAmb = true;
 		
 		if (alt_MaxAmb!=-1 && ambNTs>= alt_MaxAmb){
@@ -3874,49 +3854,9 @@ void Filters::dblBCeval(int& tagIdx, int& tagIdx2, string presentBC,
 }
 
 //cuts & identifies - version is just for mid sequences
-int Filters::detectCutBC(shared_ptr<DNA> d, string&presentBC, int& c_err, bool isPair1) {
-	if (bDoHeadSmplID) {
-		for (unsigned int i = 0; i<HeadSmplID.size(); i++) {
-			size_t pos = d->getOldId().find(HeadSmplID[i]);
-			if (pos != string::npos) {
-				SampleIntoHead(i, d, pos);
-				return i;
-			}
-		}
-		return -1;
-	}
-	/*BCdecide & locBCD(BCdFWD);
-	if ( !isPair1 ) {
-	locBCD = BCdREV;
-	}*/
-	int start(-1), stop(-1);
-	int idx(-1);
-	int scanRegion = 4; //dna region to scan for Tag sequence_
-	if (!d->getTA_cut() && isPair1) {//no technical adapter found / given by user: scan wider region for barcode
-		scanRegion = 14; //arbitary value
-	}
-	if (d->isMIDseq()) {
-		if (d->length() < minBCLength1_) { return -1; }
-		scanRegion =  d->length() - minBCLength1_ + 1;
-	}
+/*int Filters::detectCutBC(shared_ptr<DNA> d, string& presentBC, int& c_err, bool isPair1) {
+	int start = findTag(d, presentBC, c_err, isPair1,0);
 
-	scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1);
-	if (!BCdFWDREV[!isPair1].b_BCdirFix) {
-		if (start == -1) {//check reverse transcription
-						  //d->reverseTranscribe();
-			scanBC_rev(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1);
-			if (start != -1) {
-				BCdFWDREV[!isPair1].BCrevhit++;
-			}
-		}
-		else {
-			BCdFWDREV[!isPair1].BChit++;
-		}
-		//check if BC direction can be fixed
-		if (BCdFWDREV[!isPair1].BCrevhit + BCdFWDREV[!isPair1].BChit > DNA_MAX_IN_MEM) {
-			if (!eval_reversingBC(isPair1)) { return -1; }
-		}
-	}
 	if (start != -1) {
 		if (BcutTag && !d->isMIDseq()) {
 			//remove tag from DNA
@@ -3929,20 +3869,28 @@ int Filters::detectCutBC(shared_ptr<DNA> d, string&presentBC, int& c_err, bool i
 	}
 	return idx;
 }
+*/
 
 //2nd BC on same DNA sequence (from the 3' end)
+//deactivated, as now implemented in findTag()
+/*
 int Filters::findTag2(shared_ptr<DNA> d, string& presentBC, int& c_err,
 	bool isPair1, int revChecks) {
-	cerr << "findTag2\n"; exit(2316);
+	//cerr << "findTag2\n"; exit(2316);
 	int start(-1), stop(-1);
 	int idx(-1);
 	int scanRegion = 34; //dna region to scan for Tag sequence_
 
-	scanBC_back(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1,true);
+	scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1,false,true);
+
+	if (revChecks) {
+	}
+
 	return -1;
 }
+*/
 int Filters::findTag(shared_ptr<DNA> d, string&presentBC, int& c_err, 
-			bool isPair1, int revChecks) {
+			bool isPair1, int revChecks,bool cutBC,bool endCheck) {
     
     //cout << "FIND TAG DO HEAD " << bDoHeadSmplID << endl;
 	if (bDoHeadSmplID) {
@@ -3961,15 +3909,21 @@ int Filters::findTag(shared_ptr<DNA> d, string&presentBC, int& c_err,
 	}*/
 	int start(-1), stop(-1);
 	int idx(-1);
-	int scanRegion = 16; //dna region to scan for Tag sequence_
+	int scanRegion(4); //dna region to scan for Tag sequence_
+	if (!d->getTA_cut() && isPair1) {//no technical adapter found / given by user: scan wider region for barcode
+		scanRegion = 14; //arbitary value
+	}
+	if (d->isMIDseq()) {
+		if (d->length() < minBCLength1_) { return -1; }
+		scanRegion = d->length() - minBCLength1_ + 1;
+	}
 
-	scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1);
-	return -1;
+	scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1,false, endCheck);
 	
 	if (!BCdFWDREV[!isPair1].b_BCdirFix) {
 		if (start == -1) {//check reverse transcription
 						  //d->reverseTranscribe();
-			scanBC_rev(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1);
+			scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1,true, endCheck);
 			if (start != -1) {
 				BCdFWDREV[!isPair1].BCrevhit++;
 			}
@@ -3981,9 +3935,8 @@ int Filters::findTag(shared_ptr<DNA> d, string&presentBC, int& c_err,
 		if (BCdFWDREV[!isPair1].BCrevhit + BCdFWDREV[!isPair1].BChit > DNA_MAX_IN_MEM) {
 			if (!eval_reversingBC(isPair1)) { return -1; }
 		}
-	}
-	else if (idx < 0 && revChecks > 0) {
-		scanBC_rev(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1);
+	} else if (idx < 0 && revChecks > 0) {
+		scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1,true, endCheck);
 		if (idx >= 0) {
 			revChecks = 0;
 		}
@@ -3991,9 +3944,24 @@ int Filters::findTag(shared_ptr<DNA> d, string&presentBC, int& c_err,
 	if (start == -1) {
 		idx = -1;
 	}
+	if (idx != -1) {
+		if (cutBC&& BcutTag && !d->isMIDseq()) {
+			//remove tag from DNA
+			if (endCheck) {
+				d->cutSeq(start, -1);
+			} else {
+				d->cutSeq(0, stop);//start,stop
+			}
+			d->setBarcodeCut();
+			// needs to be locked when multithreaded
+			BCintoHead(idx, d, presentBC, c_err, isPair1);
+		}
+	}
+
 	return idx;
 }
 
+//somewhat redundant with findTag function..
 int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 	//seq too short for BC
 	if (d->length() < minBCLength1_ ) {
@@ -4011,8 +3979,6 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 	//ok, really start looking for BC in seq
 	int idx(-1);
 	if (bDoHeadSmplID){
-
-	    // must be locked for multithreading
         unsigned int i = 0;
         for (; i < HeadSmplID.size(); i++) {
             size_t pos = d->getOldId().find(HeadSmplID[i]);
@@ -4037,11 +4003,16 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 
         return 0;
 	}
+
+
+
 	
-	int start(-1);
-	int stop(-1);
-	string presentBC;
-	int c_err(0);
+	//int start(-1);int stop(-1);
+	string presentBC;int c_err(0);
+	bool useBC1 = isPair1; bool useBC2 = !useBC1;
+	idx = findTag(d, presentBC, c_err, useBC1, 0,true,false);
+
+	/*
 	int scanRegion=4; //dna region to scan for Tag sequence_
 	
 	if (!d->getTA_cut() && isPair1){//no technical adapter found / given by user: scan wider region for barcode
@@ -4059,7 +4030,7 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 	if ( !BCdFWDREV[!isPair1].b_BCdirFix ) {
 		if (start == -1){//check reverse transcription
 			//d->reverseTranscribe();
-			scanBC_rev(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1);
+			scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1,true);
             //cout << "scanBCrev: " << start << "," << stop << "," << idx << "," << c_err << "," << presentBC << endl;
 			if (start!=-1){
 				BCdFWDREV[!isPair1].BCrevhit++;
@@ -4082,19 +4053,25 @@ int Filters::detectCutBC(shared_ptr<DNA> d, bool isPair1) {
 
 		// needs to be locked when multithreaded
 		BCintoHead(idx, d, presentBC, c_err, isPair1);
-
 	}
+	*/
 
 	//check also for reverse BC on same read??? (PacBio)
 	if (bDoBarcode2Rd1) {
-		int startX(-1), stopX(-1);
 		string presentBCX(""); int c_errX(0);
-		int scanRegionX = 44;
-		int idxX = idx;
-		scanBC_back(d, startX, stopX, idxX, c_errX, scanRegionX, presentBCX, false,true);
+		//scan for reverse barcode..
+		int idxX = findTag(d, presentBCX, c_err, useBC2, 0, true, true);
+
+		/*
+		//int startX(-1), stopX(-1);
+		//int scanRegionX = 44;
+		//int idxX = idx;
+		//scanBC(d, startX, stopX, idxX, c_errX, scanRegionX, presentBCX,false,false,true);
+		scanBC_back(d, startX, stopX, idxX, c_errX, scanRegionX, presentBCX, false, true);
 		if (idxX >= 0 && BcutTag) {
 			d->cutSeq(startX);
 		}
+		*/
 
 
 		dblBCeval(idx, idxX, presentBC, d, nullptr);
@@ -4132,7 +4109,7 @@ void Filters::BCintoHead(int idx, shared_ptr<DNA> d,const string presentBC,
 	}
 	nID += iniSpacer +
 		on + spacee + string("orig_bc=") + (*locBC)[idx];
-	if (c_err > 0 || atEnd) {//atEnd: dbl barcode
+	if (presentBC != "" && (c_err > 0 || atEnd)) {//atEnd: dbl barcode
 		//convert c_err to s_c_err;
 		//string s_c_err; stringstream conve;
 		//conve << c_err;
@@ -4209,17 +4186,21 @@ void Filters::reverse_all_BC() {
 		revBarcode2 = Barcode2;
 		for (size_t i = 0; i < Barcode2.size(); i++) {
 			reverseTS(revBarcode2[i]);
+			//and also prep search vector..
+			revBarcodes2_[revBarcode2[i]] = i;
 		}
 	}
 	if (Barcode.size() != 0 && revBarcode.size() == 0) {
 		revBarcode = Barcode;
 		for (size_t i = 0; i < Barcode.size(); i++) {
 			reverseTS(revBarcode[i]);
+			revBarcodes1_[revBarcode[i]] = i;
 		}
 	}
 
 }
 
+/*
 void Filters::scanBC_rev(shared_ptr<DNA> d,int& start,int& stop,int& idx,int c_err, 
 					 int scanRegion,string & presentBC,
 					 bool fwdStrand) {
@@ -4283,7 +4264,8 @@ void Filters::scanBC_rev(shared_ptr<DNA> d,int& start,int& stop,int& idx,int c_e
 	}
 
 }
-
+*/
+/*
 void Filters::scanBC_back(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_err,
 	int scanRegion, string& presentBC,
 	bool useBC1, bool revBC) {
@@ -4361,17 +4343,10 @@ void Filters::scanBC_back(shared_ptr<DNA> d, int& start, int& stop, int& idx, in
 	}
 }
 
-void Filters::scanForBarcode(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_err, int scanRegion, string& barcode, bool fwdStrand) {
-//    BarcodeMap* barcodes;
-//    if (fwdStrand) {
-//        barcodes = &barcodesFwdStrand_;
-//    } else {
-//        barcodes = &barcodesRevStrand_;
-//    }
-}
+*/
 
 void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_err,
-	int scanRegion, string& presentBC, bool fwdStrand) {
+	int scanRegion, string& presentBC, bool fwdStrand, bool revBC, bool endScan ) {
 	if (d->length() < minBCLength1_) { return; }
     bool leaveFunction = false;
 
@@ -4390,100 +4365,109 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
         //BarcodeMap &localBarcodes(emptyBarcodes);
         //BarcodeMap& localBarcodes(emptyBarcodes);
         //BarcodeMap* localBarcodes = nullptr;
-        BarcodeMap* localBarcodes = &emptyBarcodes;
-        vector<int> *localBarcodeLengths;
+	if (revBC) {
+		reverse_all_BC();
+	}
 
 
-        // was locked with an omp pragma
-        unsigned int maxBCLength;
-        unsigned int minBCLength;
-        if (fwdStrand) {
-            localBarcodes = &barcodes1_;
-            localBarcodeLengths = &barcodeLengths1_;
-            maxBCLength = maxBCLength1_;
-            minBCLength = minBCLength1_;
-        } else {
-            localBarcodes = &barcodes2_;
-            localBarcodeLengths = &barcodeLengths2_;
-            maxBCLength = maxBCLength2_;
-            minBCLength = minBCLength2_;
-        }
-    {
+    BarcodeMap* localBarcodes = &emptyBarcodes;
+    vector<int> *localBarcodeLengths;
+
+
+    // was locked with an omp pragma
+    unsigned int maxBCLength;
+    unsigned int minBCLength;
+	if (fwdStrand) {
+		if (revBC) {
+			localBarcodes = &revBarcodes1_;
+		}else {
+			localBarcodes = &barcodes1_;
+		}
+        localBarcodeLengths = &barcodeLengths1_;
+        maxBCLength = maxBCLength1_;
+        minBCLength = minBCLength1_;
+    } else {
+		if (revBC) {
+			localBarcodes = &revBarcodes2_;
+		}else { localBarcodes = &barcodes2_; }
+        localBarcodeLengths = &barcodeLengths2_;
+        maxBCLength = maxBCLength2_;
+        minBCLength = minBCLength2_;
+    }
+	if (d->length() < maxBCLength) {
+		return ;
+	}
+
+	int seqLen = d->mem_length();
+    
 //    cout << "minBCLength: " << minBCLength << endl;
 //    cout << "maxBCLength: " << maxBCLength << endl;
 //    cout << "barcodeErrs: " << barcodeErrors_ << endl;
 //
-        //this for loop needs to be threadsafe
-
-
-
         
-        //bool found = false;
+    //bool found = false;
 
-        // was locked with pragma for multithreading
-        for (start = 0; start < scanRegion; start++) {
-            const string test = d->getSubSeq(start, maxBCLength);
-            //cout << "start: " << start << " maxBCLength: " << maxBCLength << " test: " << test << endl;
-            //cout << test << endl;
-            auto barcodeIterator = localBarcodes->find(test);
 
-            // found barcode
-            if (barcodeIterator != localBarcodes->end()) {
-                // set index if found
-                idx = (*barcodeIterator).second;
-                stop = start + (int) (*localBarcodeLengths)[idx];
-                presentBC = test; // (*locBC)[idx];
-                //found = true;
-                //break;
-                return;
-            }
-        }
+    for (int start2 = 0; start2 < scanRegion; start2++) {
+		start = endScan ? (seqLen - start2 - maxBCLength) : start2;
+		if (start < 0) {break;}
+		//cerr << start << " ";
+        const string test = d->getSubSeq(start, maxBCLength);
+        auto barcodeIterator = localBarcodes->find(test);
 
-        
-        
-        start = -1;
-        if (barcodeErrors_ != 0 || minBCLength != maxBCLength) {
-            vector<int> stars(0), indices(0);
-            bool zeroErr = false;
-            
-            //this version tries all BC's and if there are more than one possible match, will reject all matches
-            for (auto jx = localBarcodes->begin(); jx != localBarcodes->end(); jx++) {
-                start = d->matchSeq_tot((*jx).first, barcodeErrors_, scanRegion, c_err);
-                if (start != -1) {
-                    idx = (*jx).second;
-                    if (c_err == 0) {
-                        stop = start + (int) (*localBarcodeLengths)[idx];
-                        presentBC = d->getSubSeq(start, maxBCLength); // (*locBC)[idx];
-                        zeroErr = true;
-                        break;
-                    }
-                    stars.push_back(start);
-                    indices.push_back(idx);
-                }
-            }
-            if (!zeroErr && stars.size() > 0) {
-                if (stars.size() > 1) {//too many matches, thus true seq can't be found
-                    //sTagNotCorrected(pair_);
-                    d->QualCtrl.fail_correct_BC = true;
-                    idx = -1;
-                    start = -1;
-                    return;
-                    //leaveFunction = true;
-                }
-                if (!leaveFunction) {
-                    d->QualCtrl.suc_correct_BC = true;
-                    //sTagCorrected(pair_);// collectStatistics.suc_correct_BC++;
-                    
-                    start = stars[0];
-                    idx = indices[0];
-                    stop = start + (int) (*localBarcodeLengths)[idx];
-                    presentBC = d->getSubSeq(start, stop);
-                }
-            }
-        
-            
+        if (barcodeIterator != localBarcodes->end()) {// set index if found
+            idx = (*barcodeIterator).second;
+            stop = start + (int) (*localBarcodeLengths)[idx];
+            presentBC = test; // (*locBC)[idx];
+            return;
         }
     }
+
+        
+        
+    start = -1;
+    if (barcodeErrors_ != 0 || minBCLength != maxBCLength) {
+        vector<int> stars(0), indices(0);
+        bool zeroErr = false;
+            
+        //this version tries all BC's and if there are more than one possible match, will reject all matches
+        for (auto jx = localBarcodes->begin(); jx != localBarcodes->end(); jx++) {
+            start = d->matchSeq_tot((*jx).first, barcodeErrors_, scanRegion, c_err);
+            if (start != -1) {
+                idx = (*jx).second;
+                if (c_err == 0) {
+                    stop = start + (int) (*localBarcodeLengths)[idx];
+                    presentBC = d->getSubSeq(start, maxBCLength); // (*locBC)[idx];
+                    zeroErr = true;
+                    break;
+                }
+                stars.push_back(start);
+                indices.push_back(idx);
+            }
+        }
+        if (!zeroErr && stars.size() > 0) {
+            if (stars.size() > 1) {//too many matches, thus true seq can't be found
+                //sTagNotCorrected(pair_);
+                d->QualCtrl.fail_correct_BC = true;
+                idx = -1;
+                start = -1;
+                return;
+                //leaveFunction = true;
+            }
+            if (!leaveFunction) {
+                d->QualCtrl.suc_correct_BC = true;
+                //sTagCorrected(pair_);// collectStatistics.suc_correct_BC++;
+                    
+                start = stars[0];
+                idx = indices[0];
+                stop = start + (int) (*localBarcodeLengths)[idx];
+                presentBC = d->getSubSeq(start, stop);
+            }
+        }
+        
+            
+    }
+    
 	if (start == -1) {
 		idx = -1;
 	}
@@ -4532,7 +4516,11 @@ bool Filters::checkIfPrimerHits(shared_ptr<DNA> d, int primerID, int pair) {
 	}
 	int start(-1), stop(-1);
 	int tolerance(30), startSearch(0);
-	int QS = d->length(); int limit = max(QS >> 1, QS - 150); stop = QS;
+	int QS = d->length(); 
+	int limit = max(QS >> 1, QS - 150); stop = QS;
+	if (QS < 20) {
+		return false;
+	}
 	if (pair == 1) {
 		start = d->matchSeq(PrimerR[primerID], PrimerErrs, tolerance, startSearch);
 	}
@@ -5531,9 +5519,12 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 	float remSeqs = float (cst->total-cst->totalRejected);
 	
 	give << endl;
+
+	string ReadTag = "Reads";
+	if (isGoldAxe()) { ReadTag = "(Sub)Reads"; }
 	
 	if (!greenQualStats){
-		give << "Reads not High qual_: " << intwithcommas((int)cst->totalRejected);
+		give << ReadTag<<" not High qual_: " << intwithcommas((int)cst->totalRejected);
 	} else {
 		give << "Reads processed: " << intwithcommas((int)cst->total);
 		if (p2stat) {
@@ -5818,16 +5809,6 @@ void Filters::SmplSpecStats(ostream & give){
 
 }
 
-void ReportStats::calcSummaryStats(float remSeqs, unsigned int min_l, float min_q){
-	if (remSeqs == 0){ return; }
-	if (bMedianCalcs){
-		rstat_Smed = (int) calc_median(rstat_VSmed,0.5f);
-		rstat_Qmed = (int) calc_median(rstat_VQmed,0.5f);
-		USQS=0.f;
-	}
-	RSQS = ( ( (float(rstat_NTs)/remSeqs)/(float)min_l ) +
-			( (float(rstat_qualSum)/remSeqs) / min_q) ) / 2.f;
-}
 
 
 void Filters::addStats(Filters* fil, vector<int>& idx){
@@ -5847,397 +5828,6 @@ void Filters::addStats(Filters* fil, vector<int>& idx){
 }
 
 
-void Filters::addGAstats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA) {
-	GAstatistics->addBaseGAStats(dn, GA);
-}
-
-
-void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx){
-	if (BarcodeDetected.size() > (uint)10000){
-		cerr<<"Unrealistic number of barcodes (>10000) in addStats\n"; exit(79);}
-	int BCS = (int)BarcodeDetected.size();
-	for (unsigned int i=0;i<idx.size();i++){
-		if (idx[i] >= BCS){ return; }
-		//assert(idx[i] < BCS);
-		BarcodeDetected[idx[i]] += cs->BarcodeDetected[i];
-		BarcodeDetectedFail[idx[i]] += cs->BarcodeDetectedFail[i];
-	}
-	maxL += cs->maxL;	PrimerFail += cs->PrimerFail ;
-	AvgQual += cs->AvgQual; HomoNT += cs->HomoNT;
-	totalMid += cs->totalMid;
-	PrimerRevFail += cs->PrimerRevFail;
-	minL += cs->minL ; minLqualTrim+= cs->minLqualTrim; TagFail += cs->TagFail;
-	MaxAmb += cs->MaxAmb ; QualWin += cs->QualWin;
-	Trimmed += cs->Trimmed ; AccErrTrimmed+= cs->AccErrTrimmed; total += cs->total;
-	QWinTrimmed += cs->QWinTrimmed;
-	totalRejected += cs->totalRejected;
-	fail_correct_BC += cs->fail_correct_BC; suc_correct_BC += cs->suc_correct_BC ;
-	failedDNAread += cs->failedDNAread; adapterRem += cs->adapterRem ;
-	RevPrimFound += cs->RevPrimFound;
-	singleton += cs->singleton;
-	BinomialErr += cs->BinomialErr;
-	dblTagFail += cs->dblTagFail;
-	DerepAddBadSeq += cs->DerepAddBadSeq;
-	total2 += cs->total2; totalSuccess += cs->totalSuccess;
-	swappedRds += cs->swappedRds; reversedRds += cs->reversedRds;
-	PostFilt.addRepStats(cs->PostFilt);
-	PreFilt.addRepStats(cs->PreFilt);
-
-}
-
-void collectstats::reset(){
-	singleton=0;
-	size_t BCsiz = BarcodeDetected.size();
-	for (unsigned int i=0; i<BCsiz;i++){
-		BarcodeDetected[i]=0;
-		BarcodeDetectedFail[i] = 0;
-	}
-	maxL=0; PrimerFail=0;AvgQual=0; HomoNT=0;
-	PrimerRevFail=0;
-	minL=0; TagFail=0; MaxAmb=0; QualWin=0;
-	Trimmed=0; total=0; totalRejected=0;
-	fail_correct_BC=0; suc_correct_BC=0;failedDNAread=0;
-	adapterRem = 0; RevPrimFound = 0; DerepAddBadSeq = 0;
-	total2 = 0; totalSuccess = 0;
-
-	//reportStats
-	PostFilt.reset(); PreFilt.reset();
-}
-
-
-inline void ReportStats::addDNAStats(shared_ptr<DNA> d){
-	float avq = d->getAvgQual();
-	float ace = (float)d->getAccumError();
-	uint len = d->length();
-	int median(0);
-	if (bLvsQlogs) {
-		median = d->getMedianQual();
-	}
-	stats_mutex.lock();
-	//pretty fast
-	addMeanStats(len,(int) avq, ace);
-	//NT specific quality scores
-	
-//    d->ntSpecQualScores(QperNT, NTcounts); // Thread safe
-
-    // Test this function
-    //addNtSpecQualScores(d);
-
-	//more memory intensive
-	if (bLvsQlogs) {
-		addLvsQlogs(len, avq, median);
-	}
-	stats_mutex.unlock();
-	if (bMedianCalcs){
-		//quali
-        addMedian2Histo(uint(avq + 0.5f), rstat_VQmed); // Thread safe (?)
-        addMedian2Histo(len, rstat_VSmed); // Thread safe
-	}
-}
-
-
-/*void ReportStats::mergeStats(ReportStats& data) {
-    rstat_NTs += data.total_nts;
-    rstat_totReads += data.total_reads;
-    rstat_qualSum += data.qual_sum;
-    rstat_accumError +=  data.accum_error;
-
-    if (data.per_base_quality_sum.size() > QperNT.size())
-        QperNT.resize(data.per_base_quality_sum.size(), 0);
-    for (size_t i = 0; i < data.per_base_quality_sum.size(); i++) {
-        QperNT[i] += data.per_base_quality_sum[i];
-    }
-    if (data.nucleotide_counter.size() > NTcounts.size())
-        NTcounts.resize(data.nucleotide_counter.size(), 0);
-    for (size_t i = 0; i < data.nucleotide_counter.size(); i++) {
-        NTcounts[i] += data.nucleotide_counter[i];
-    }
-
-	//listOfLengths.merge(data.listOfLengths);
-
-}
-*/
-
-/*
-
- void ReportStats::addDNAStatsMT(shared_ptr<DNA> d, ReportStats *data){
-    data->total_nts += d->length();
-    data->qual_sum += uint(d->getAvgQual()+0.5f);
-    data->accum_error += d->getAccumError();
-    ++data->total_reads;
-
-    //NT specific quality scores
-    d->ntSpecQualScores(data->per_base_quality_sum, data->nucleotide_counter);
-
-
-    // Not yet with separate arrays
-    //more memory intensive
-    if (bMedianCalcs){
-        uint avq = (uint) (d->getAvgQual() + 0.5f);
-        addMedian2Histo(avq, rstat_VQmed);
-        addMedian2Histo(d->length(), rstat_VSmed);
-    }
-}
-*/
-
-
-
-void ReportStats::reset() {
-	rstat_totReads = 0; rstat_NTs = 0; rstat_qualSum=0;
-	rstat_Qmed = 0; rstat_Smed = 0; 
-	RSQS = 0.f; USQS = 0.f; rstat_accumError = 0.f;
-	QperNT.resize(1000,0); NTcounts.resize(1000,0);
-	std::fill(QperNT.begin(), QperNT.end(), 0);
-	std::fill(NTcounts.begin(), NTcounts.end(), 0);
-	rstat_VQmed.resize(0); rstat_VSmed.resize(0);
-	listOfLengths.resize(0); listOfQuals.resize(0); listOfQualMeds.resize(0);
-}
-unsigned int ReportStats::lowest(const vector<uint>& in){
-	for (int i=0;i<(int)in.size();i++){
-		if (in[i]>0){return i;}
-	}
-	return(0);
-}
-unsigned int ReportStats::highest(const vector<uint>& in){
-	if (in.size()==0){return 0;}
-	for (int i=(int)in.size()-1;i>=0;i--){
-		if (in[i]>0){return i;}
-	}
-	return 0;
-}
-
-void ReportStats::printLvsQ(ostream& give) {
-	std::list<int>::iterator it1 (listOfLengths.begin());
-	std::list<float>::iterator it2(listOfQuals.begin());
-	std::list<float>::iterator it3(listOfQualMeds.begin());
-	give << "Length\tAvgQual\tMedianQual\n";
-
-	for ( ;  it1 != listOfLengths.end() && it2 != listOfQuals.end() && it3 != listOfQualMeds.end(); ++it1, ++it2, ++it3) {
-		give << *it1 <<"\t"<< *it2<< "\t" <<*it3<<"\n";
-	}
-	
-}
-
-
-
-void GAstats::addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA) {
-	totalRds++; totalGAs += GA.size();
-	totalRdLen += dn->length();
-	double totL(0.f);
-	for (size_t i = 0; i < GA.size(); i++) {
-		totL += (double)GA[i]->length();
-	}
-	totalGALen += totL;
-
-	if (dn->getBCnumber() >= 0) {
-		int idx = dn->getBCnumber();
-		if ((idx+1) > GAperBC.size()) {
-			GAperBC.resize(idx+1, 0); CNTperBC.resize(idx+1, 0);
-			GALENperBC.resize(idx+1, 0); rdLENperBC.resize(idx+1, 0);
-		}
-		GAperBC[idx] += GA.size();
-		CNTperBC[idx]++;
-		GALENperBC[idx] += totL;
-		rdLENperBC[idx] += dn->length();
-	}
-}
-void GAstats::setBCs(vector<string> SI, vector<string> B1, vector<string> B2) {
-	assert(SI.size() >= GAperBC.size());
-	SmplIDBC = SI; BC1 = B1; BC2 = B2;
-	size_t idx = SI.size();
-	GAperBC.resize(idx, 0); CNTperBC.resize(idx, 0);
-	GALENperBC.resize(idx, 0); rdLENperBC.resize(idx, 0);
-
-}
-
-void GAstats::addStats(shared_ptr<GAstats> o) {
-	totalRds += o->totalRds;
-	totalGAs += o->totalGAs;
-	totalRdLen += o->totalRdLen;
-	totalGALen += o->totalGALen;
-	size_t idx = o->GAperBC.size();
-	if (idx > GAperBC.size()) {
-		GAperBC.resize(idx ,0); CNTperBC.resize(idx ,0);
-		GALENperBC.resize(idx,0 ); rdLENperBC.resize(idx ,0);
-		SmplIDBC.resize(idx, ""); BC1.resize(idx, ""); BC2.resize(idx, "");
-	}
-	for ( idx = 0; idx < GAperBC.size(); idx++) {
-		if (o->GAperBC.size() <= idx) {break;}
-		GAperBC[idx] += o->GAperBC[idx];
-		CNTperBC[idx] += o->CNTperBC[idx];
-		GALENperBC[idx] += o->GALENperBC[idx];
-		rdLENperBC[idx] += o->rdLENperBC[idx];
-
-	}
-
-}
-
-
-void GAstats::printBCtabs(ostream& give) {
-	give <<  "SampleID";
-	give << "\t#Reads\t#GA/Read\tmean Read length\tmean GA length\n";
-	assert(GAperBC.size() == CNTperBC.size() );assert(GAperBC.size() == GALENperBC.size() );
-	assert(GAperBC.size()  == rdLENperBC.size());assert(GAperBC.size() == SmplIDBC.size() );
-	for (unsigned int i = 0; i < GAperBC.size(); i++) {
-		give << SmplIDBC[i] << "\t" << CNTperBC[i] << "\t" << float(GAperBC[i]) / float(CNTperBC[i]) << "\t";
-		give << int(float(rdLENperBC[i]) / float(CNTperBC[i])+0.5f) << "\t" << int(float(GALENperBC[i]) / float(GAperBC[i]) + 0.5f) << "\n";
-	}
-
-}
-
-void GAstats::printSummary(ostream& give) {
-	give << "GoldenAxe Stats\n";
-	give << "  Total reads; amplicons/read: " << totalRds << "; "<< (float)totalGAs/(float)totalRds <<endl;
-	give << "  Length reads; amplicon     : " << totalRdLen / (double)totalRds << "; " << totalGALen / (double)totalGAs << endl;
-}
-
-
-void ReportStats::printGCstats(ostream& give) {
-	//NT_POS['A'] = 0; NT_POS['T'] = 1; NT_POS['G'] = 2; NT_POS['C'] = 3;	NT_POS['N'] = 4;
-	vector<string> NTs(6, "X"); NTs[0] = "A"; NTs[1] = "T";
-	NTs[2] = "G"; NTs[3] = "C"; NTs[4] = "N";
-	for ( uint i = 0; i < 4; i++ ) {
-		give << "\t" << NTcounts[i];
-	}
-	//give << endl;
-	for ( uint i = 0; i < 4; i++ ) {
-		give << "\t" << float(QperNT[i]) / float(NTcounts[i]);
-	}
-	give << endl;
-}
-void ReportStats::printStats2(ostream& give, float remSeqs,int pair){
-	if ( pair == 1 ) {
-		return;//deactivate for now
-	}
-	if ( pair == 0 ) {
-		if ( bMedianCalcs ) {
-			unsigned int minS = lowest(rstat_VSmed);
-			unsigned int maxS = highest(rstat_VSmed);
-			unsigned int minQ = lowest(rstat_VQmed);
-			unsigned int maxQ = highest(rstat_VQmed);
-			give << "Min/Avg/Max stats Pair 1";// -RSQS : "<<RSQS;
-			if ( remSeqs == 0 ) {
-				give << "\n     - sequence Length : " << "0/0/0"
-					<< "\n     - Quality :   " << "0/0/0";
-			} else {
-				give << "\n     - sequence Length : " << minS << "/" << float(rstat_NTs) / (float)rstat_totReads << "/" << maxS
-					<< "\n     - Quality :   " << minQ << "/" << float(rstat_qualSum) / (float)rstat_totReads << "/" << maxQ;
-			}
-		} else {
-			give << "Average Stats - RSQS : " << RSQS;
-			if ( remSeqs == 0 ) {
-				give << "\n     - sequence Length : " << "0/0/0"
-					<< "\n     - Quality :   " << "0/0/0";
-			} else {
-				give << "\n     - sequence Length : " << float(rstat_NTs) / (float)rstat_totReads
-					<< "\n     - Quality :   " << float(rstat_qualSum) / (float)rstat_totReads;
-			}
-		}
-	} else {
-		give << "Pair 2 stats";
-	}
-	
-		if (bMedianCalcs){
-			//give << "Median Stats Pair 1";// -USQS : " << USQS;
-			give << "\n     - Median sequence Length : " << rstat_Smed << ", Quality : " << rstat_Qmed;// << "\n";
-		}
-		give << "\n     - Accum. Error " << (rstat_accumError / (float)rstat_totReads) << "\n";
-}
-
-//add the stats from a different ReportStats object
-void ReportStats::addRepStats( ReportStats& RepoStat){
-	//report stats:
-	rstat_NTs += RepoStat.rstat_NTs; rstat_totReads += RepoStat.rstat_totReads;
-	rstat_qualSum += RepoStat.rstat_qualSum;
-	rstat_accumError += RepoStat.rstat_accumError;
-	for ( uint i = 0; i < 6; i++ ) {
-		QperNT[i] += RepoStat.QperNT[i];
-		NTcounts[i] += RepoStat.NTcounts[i];
-	}
-	if (bMedianCalcs){
-		//vectors for median calcs
-		if (rstat_VQmed.size() < RepoStat.rstat_VQmed.size()){
-			rstat_VQmed.resize(RepoStat.rstat_VQmed.size(),0);
-			assert(rstat_VQmed.size() < 10000);
-		}
-		for (unsigned int i=0; i<RepoStat.rstat_VQmed.size(); i++){
-			rstat_VQmed[i] += RepoStat.rstat_VQmed[i];
-		}
-		if (rstat_VSmed.size() < RepoStat.rstat_VSmed.size()){
-			rstat_VSmed.resize(RepoStat.rstat_VSmed.size(),0);
-			//times change.. wrong assert here
-			//assert(rstat_VSmed.size() < 10000);
-		}
-		for (unsigned int i=0; i<RepoStat.rstat_VSmed.size(); i++){
-			rstat_VSmed[i] += RepoStat.rstat_VSmed[i];
-		}
-	}
-	if (bLvsQlogs) {
-		//l1.splice(l1.end(), l2);
-
-		listOfLengths.splice(listOfLengths.end(),RepoStat.listOfLengths);
-		listOfQuals.splice(listOfQuals.end(), RepoStat.listOfQuals);
-		listOfQualMeds.splice(listOfQualMeds.end(), RepoStat.listOfQualMeds);
-	}
-}
-//calculate median value from data stored as histogram-vector
-// for median use perc = 0.5f
-float ReportStats::calc_median(vector<uint>& in, float perc){
-	unsigned int sum = 0;
-	for (unsigned int i=0; i<in.size(); i++){
-		sum += in[i];
-	}
-	unsigned int threshold = (unsigned int) (((float)sum) * perc);
-	sum = 0;
-	for (unsigned int i=0; i<in.size(); i++){
-		sum += in[i];
-		if (sum >= threshold){
-			return (float) i;
-		}
-	}
-
-	return 0.f;
-}
-void ReportStats::add_median2histo(vector<unsigned int>& in, vector<unsigned int>& histo)
-{
-	unsigned int max = *max_element(in.begin(),in.end());
-	if (max> histo.size()){
-		if (max > 10000){cerr<<"max bigger 10000.\n"; exit(77);}
-		histo.resize(max,0);
-	}
-	for (unsigned int i=0; i<histo.size(); i++){
-		histo[ in[i] ] ++;
-	}
-}
-vector<size_t> ReportStats::getVrange(int which) {
-	if (which == 1) {
-		return medVrange(rstat_VQmed);
-	} else {
-		return medVrange(rstat_VSmed);
-	}
-}
-vector<size_t> ReportStats::medVrange(const vector<uint> x) {
-	vector<size_t> ret(2, 0); ret[1] = 0; bool empty = true;
-	for (size_t i = 0; i < x.size(); i++) {
-		if (x[i]>0) {
-			if (empty) { ret[0] = i; empty = false; }
-			ret[1] = i;
-		}
-	}
-	ret[1]++;
-	return ret;
-}
-
-void ReportStats::addMedian2Histo(const uint in, vector<unsigned int>& histo)
-{ 
-    if (in >= histo.size()) {
-		stats_mutex.lock();
-		histo.resize(in + 3, 0);
-		stats_mutex.unlock(); 
-		assert(in < 1000000);
-    }
-    histo[in] ++;
-}
 
 
 ////////////  UCLINKS  ///////////////
@@ -6374,7 +5964,7 @@ void UClinks::readDerepInfo(const string dereM) {
 		}
 		break;
 	}
-	
+	cout << "Found " << SmplIDs.size() << " samples in derep.map\n";
 }
 
 //read in dereplicated info from derep.map and derep.hq.fq (in IS) -> they are in the same order
@@ -7019,7 +6609,7 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 			}
 			//bestDNA[curCLID[kk]]->totalSum();
 #ifdef matrix_sum
-			if ( addFromHDstring ) {
+			if ( addFromHDstring && smplID != "") {
 				//cerr << segs << "\t" << segs2 << endl;
 				add2OTUmat(smplID, (*itCL).second, splChim);
 			} 
@@ -7030,7 +6620,7 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 	return true;
 }
 void UClinks::writeOTUmatrix(string outf) {
-	cerr << "Writing OTU matrix to " << outf << endl;
+	cerr << "Writing OTU matrix with "<< SmplIDs.size() << " samples and " << seq2CI.size() << " OTUs to " << outf << endl;
 	this->setOTUnms();
 	ofstream MA;
 	MA.open(outf);
@@ -7087,7 +6677,7 @@ void UClinks::add2OTUmat(const string& smplID, int curCLID, matrixUnit spl) {
 		SmplIDs[smplID] = (int) OTUmat.size();
 		OTUmat.push_back(vector<matrixUnit>(clusCnt + 1, (matrixUnit)0));
 		smplNit = SmplIDs.find(smplID);
-		cerr << "New sample_id_ id_ in uc file detected, that is not present in map: " << smplID<< endl;
+		cerr << "New sample_id_ id_ in uc file detected, that is not present in map: \"" << smplID << "\"\n";// endl;
 		unregistered_samples = true;
 	}
 	//easy, now add in

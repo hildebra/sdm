@@ -46,19 +46,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //#define ZSTR
 
-//read gzip'd files using zlib.h
-#if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
-
-//#include "windows.h"
-//find memleaks in VS:
-//#define _DEBUG
-#include <stdlib.h>
-#include <crtdbg.h>
-
-#else
-//#define _notgzip
-#define _gzipread
-#endif
+//DEBUG mode: more output
+#define DEB//UG
 
 #ifdef _DEBUG
 #define DBG_NEW new ( _NORMAL_BLOCK , __FILE__ , __LINE__ )
@@ -68,8 +57,22 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define DBG_NEW new
 #endif
 
-//DEBUG mode: more output
-#define DE//BUG
+
+#define _isa//1gzip
+#define _iz//lib
+
+#define _CRT_SECURE_NO_DEPRECATE
+
+//read gzip'd files using zlib.h
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
+#include <stdlib.h>
+#include <crtdbg.h>
+#elif !defined(_isa1gzip) && !defined(_izlib)
+//#define _notgzip
+#define _gzipread
+#endif
+
+
 
 #include <string>
 #include <vector>
@@ -95,7 +98,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 //#include <future>
 #ifdef KHASH
-#include "khash.hh"
+#include "include/khash.hh"
 #endif
 
 //#include "include/robin_set.h"
@@ -104,10 +107,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //#include "include/ssw_cpp.h"
 
 
-#ifdef _gzipread
-#include "gzstream.h"
-#include "zstr.h"
-#endif
+
+
 
 
 #ifdef _THREADED
@@ -129,12 +130,19 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //2.17: fixed PB rev seq checks..
 //2.18: fastq autoversion updated (more robust)
 //3.00: PacBio GoldenAxe, LotuS3
+//3.02: ISA-L gzip read integration (reverted at the end)
+//3.03: integrated safer deactivation of certain filters via "-1", GA round 2, streamlined findTag and detectBC functions
+//3.04: GA v2
+//3.05: fix for GA to report sample names and seed ext only to add samples with valid smpl name from demulti.add.fna
+//3.06: -GoldenAxeMinAmpli / -GoldenAxeMaxAmpli added
 
-static const float sdm_version = 3.0f;
+static const float sdm_version = 3.06f;
 static const char* sdm_status = "beta";
 
 
 //2.08: add -logLvsQ flag & report
+
+
 
 
 using namespace std;

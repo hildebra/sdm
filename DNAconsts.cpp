@@ -103,9 +103,9 @@ void ini_DNAconstants() {
     NT_POS['c'] = 3;
     NT_POS['n'] = 4;
     
-    //for ( int i = 0; i < 256 * 256; i++ ) { DNA_IUPAC[i] = 1;  }
+    for ( int i = 0; i < 256 * 256; i++ ) { DNA_IUPAC[i] = 1;  }
     
-    memset(DNA_IUPAC, 1, 1 << 16);
+    //memset(DNA_IUPAC, 1, 1 << 16);
     
     // ?  Don't you want to iterate the whole DNA space (which comprises 15 elements)
     // For each char in the DNA space mapping with N is a hit.

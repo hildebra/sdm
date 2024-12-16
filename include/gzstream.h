@@ -33,8 +33,10 @@
 #include <iostream>
 #include <fstream>
 #include <zlib.h>
+#include "izlib.h"
 #include <string>
 #include <cstring>
+
 
 #ifdef GZSTREAM_NAMESPACE
 namespace GZSTREAM_NAMESPACE {
