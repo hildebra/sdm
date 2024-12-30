@@ -881,8 +881,11 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		/*if ( threads > 1) {
 			pool = DBG_NEW ThreadPool(threads);
 		}*/
-		cerr << "Run with " << threads << " cores.";
+		cerr << "Run with " << threads << " cores.\n";
     }
+	if (maxReads > 0) {
+		cerr << "Only printing " << maxReads << " first reads from file(s).\n";
+	}
 
 	//set up a read merger for each thread..
 	bool detailedMergeStats(false);
@@ -897,7 +900,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 	for (auto &uFX : files.uniqFxFls) {
 		uint i = uFX.second;
 		cdbg("Unique file " + uFX.first + "(" + itos(i) + ")\n");
-		if (maxReads > 0 && maxReads - totalReadsRead <= 0) { break; }
+		if (maxReads > 0 && maxReads - totalReadsRead <= 0) { cerr << "Skipping file "<< uFX.first << "due to firstXreads.."; break; }
 		if (files.idx[i].size() == 0) {	cerr << "fastXtar vector for " << uFX.first << " is empty" << endl;	exit(10);		}
 
 		//create subset of BCs for the currently processed fastq's (only relevant BCs)

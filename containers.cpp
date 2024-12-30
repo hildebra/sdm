@@ -1170,7 +1170,8 @@ void OutputStreamer::writeForWrite(shared_ptr<DNA> d1, int Pair1, int Cstream1,
 	if (maxRdsOut > 0 &&  ReadsWritten >= maxRdsOut) {
 		return;
 	}
-	ReadsWritten++;
+	 
+	
 	//incrementing output file number
 	if (maxReadsPerOFile > 0 && ReadsWritten + DNAinMem >= maxReadsPerOFile) {
 		//cerr << "ReadsWritten " << ReadsWritten << " DNAinMem " << DNAinMem << endl;
@@ -1207,6 +1208,7 @@ void OutputStreamer::writeForWrite(shared_ptr<DNA> d1, int Pair1, int Cstream1,
 			/*fqPairFile[Cstream1]->write(d1->writeFastQ(), 0);
 			fqPairFile[Cstream1]->write(d2->writeFastQ(), 1);*/
 			fqPairFile[Cstream1]->write2(d1->writeFastQ(),d2->writeFastQ());
+			ReadsWritten++; 
 			return;
 		}
 	}
@@ -1217,10 +1219,11 @@ void OutputStreamer::writeForWrite(shared_ptr<DNA> d1, int Pair1, int Cstream1,
 	if (BWriteFastQ) {//write in fastq format
 		if (fq1cool) {
 			*fqFile[Cstream1][Pair1 - 1] << d1->writeFastQ();
-			
+			ReadsWritten++;
 		}
 	} else {//Cstream1 in fasta (and maybe qual) format
 		if (Cstream1 < (int) sFile.size()) {
+			ReadsWritten++; 
 			*sFile[Cstream1][Pair1 - 1] << d1->writeSeq(b_oneLinerFasta);
 			if (BWriteQual) {
 				*qFile[Cstream1][Pair1 - 1] << d1->writeQual(b_oneLinerFasta);
@@ -1232,6 +1235,7 @@ void OutputStreamer::writeForWrite(shared_ptr<DNA> d1, int Pair1, int Cstream1,
 	if (BWriteFastQ) {//write in fastq format
 		if (fq2cool) {
 			*fqFile[Cstream2][Pair2 - 1] << d2->writeFastQ();
+			ReadsWritten++;
 		}
 	} else {//Cstream1 in fasta (and maybe qual) format
 		if (Cstream2 < (int) sFile.size()) {
@@ -1239,6 +1243,7 @@ void OutputStreamer::writeForWrite(shared_ptr<DNA> d1, int Pair1, int Cstream1,
 			if (BWriteQual) {
 				*qFile[Cstream2][Pair2 - 1] << d2->writeQual(b_oneLinerFasta);
 			}
+			ReadsWritten++;
 		}
 	}
 	if (doMutex) {
