@@ -1166,7 +1166,10 @@ void OutputStreamer::writeForWrite(shared_ptr<DNA> d1, int Pair1, int Cstream1,
 	if (Cstream1 >= 100 && Cstream2 >= 100) {
 		//both reads not written..
 		return;
-}
+	}
+	if (maxRdsOut > 0 &&  ReadsWritten >= maxRdsOut) {
+		return;
+	}
 	ReadsWritten++;
 	//incrementing output file number
 	if (maxReadsPerOFile > 0 && ReadsWritten + DNAinMem >= maxReadsPerOFile) {
@@ -2546,6 +2549,19 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	if (cmdArgs->find("-binomialFilterBothPairs") != cmdArgs->end() && (*cmdArgs)["-binomialFilterBothPairs"] == "1") {
 		b_BinFilBothPairs = true;
 	}
+
+	if ((*cmdArgs)["-illuminaClip"] == "1") {
+		Bcheck4illuAdapts = true;
+	}
+	if ((*cmdArgs)["-XfirstReads"] != "") {
+		firstXreads = atoi((*cmdArgs)["-XfirstReads"].c_str());
+	}
+
+
+
+
+
+
 	//***************************************
 	//read options
 	ifstream opt;
@@ -2573,11 +2589,6 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		ss << line;
 		getline(ss,segs,'\t');
 		getline(ss,segs2,'\t');
-
-		if ((*cmdArgs)["-XfirstReads"] != "") {
-			firstXreads = atoi((*cmdArgs)["-XfirstReads"].c_str());
-		}
-
 
 		if (strcmp(segs.c_str(),"minSeqLength") == 0){
 			if (addMod){ 
@@ -2739,9 +2750,6 @@ Filters::Filters(OptContainer* cmdArgs1) :
 			illuSEidx = segs2;
 		}		
 	}
-	if ((*cmdArgs)["-illuminaClip"] == "1") {
-		Bcheck4illuAdapts = true;
-	}
 	
 	//report some non-std options
 	if (bShortAmplicons){
@@ -2763,6 +2771,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	this->setFloatingQWin(QualWinWidth,QualWinThr);
 	this->setFloatingEWin(EndWinWidth,EndWinThr);
 	this->setMaxHomo(maxHomoNT);
+
 	//alternative options (mid qual filtering)
 	if (addModConf){
 		if (!alt_bRequireRevPrimSet){alt_bRequireRevPrim = bRequireRevPrim;}

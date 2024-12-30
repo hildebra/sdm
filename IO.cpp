@@ -1349,11 +1349,13 @@ void general_help(){
 #else
     cout << "The compiled version does not support multithreading\n";
 #endif
-    cout<<"Select further help topics by typing:\nsdm -help_options : print help on configuring options files\nsdm -help_commands : help on command arguments for sdm\nsdm -help_map : base_map files and the keywords for barcodes etc.\n------------------------------\n";
+	cout << "Select further help topics by typing:\nsdm -help_options : print help on configuring options files\n";
+	cout <<"sdm - help_flags : help on command line (flags) arguments for sdm\n";
+	cout << "sdm - help_map : base_map files and the keywords for barcodes etc.\n------------------------------\n";
     cout<<"Author: falk.hildebrand@gmail.com"<<endl;
 
 }
-void printCmdsHelp(){
+void printCmdsHelp(){//actually these are flags
     help_head();
     string def_sep = DEFAULT_BarcodeNameSep;
     cout << "Usage:\n./sdm\n  -i_path <path to several fastq / fasta files>\n------OR------\n -i <input sequence file, will autodetect fna/fastq>\n------OR------\n -i_fastq <fastQ file>\n------OR------\n -i_fna <your fasta input file> (required)\n -i_qual <corresponding quality file> (required, unless quality file is \"xx1.qual_\" and fasta is \"xx1.yy\")\n\n -base_map <mapping file in Qiime format> (optional)\n -o_fna <file to write output fasta> (optional)\n -o_qual <file to write corresponding quality values> (optional)\n -o_fastq <fastQ output file (overrides -o_qual & -o_fna)\n";
@@ -1369,7 +1371,7 @@ void printCmdsHelp(){
 	cout << " -5PR1cut [I]: remove I first nts from read 1\n"; cout << " -5PR2cut [I]: remove I first nts from read 2\n";
 	cout << " -GoldenAxe [0/1]: use GoldenAxe mode for PacBio concatenated reads (needs special sequencing library prep).\n";
 	cout << " -GoldenAxeMinAmpli [-1]: minNumAmplicons on GoldenAxe reads to accept at all (Default: -1).\n";
-
+	cout << " -XfirstReads [#]: only print the X first reads across all input file(s), useful for downsampling. Read pairs count as two reads.\n";
 	//-binomialFilterBothPairs [1/0]
     //-count_chimeras [T/F]
     // ucAdditionalCounts_refclust -OTU_fallback_refclust -optimalRead2Cluster_ref

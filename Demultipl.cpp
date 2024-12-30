@@ -31,7 +31,7 @@ int main(int argc, char* argv[])
 	if (argc<3){
 		//help_options,help_map,help_commands
 		if (argc==2){
-			if (string(argv[1])=="-help_commands"){
+			if (string(argv[1])=="-help_flags"){
 				printCmdsHelp();
 			} else if (string(argv[1])=="-help_options"){
 				printOptionHelp();
