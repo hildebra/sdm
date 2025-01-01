@@ -1259,6 +1259,7 @@ class InputStreamer{
 public:
 	InputStreamer(bool fnRd, qual_score fq, string ignore_IO_errors,string pairedRD_HD_out, int threads) :
             _fileLength(10), _max(60), _last(0),
+			_globalRdsRead(0), _globalMaxRdsRead(-1), _localRdsRead(0),
             fasta_istreams(3, NULL), quality_istreams(3, NULL), fastq_istreams(3, NULL),
             fastaFilepathTemp(3, ""), qualityFilepathTemp(3, ""), 
             dnaTemp1(3, NULL), dnaTemp2(3, NULL),
@@ -1309,6 +1310,8 @@ public:
 	void allStreamClose();
 	void allStreamReset();//go back to line 1
 	void setTIO(bool x) { doTIO = x; }
+	void setGlobalRdsRead(int x) { _globalRdsRead = x; }
+	void setMaxRdsRead(int x) { _globalMaxRdsRead = x; }
 
 	void openMIDseqs(string,string);
 	int pairNum() { return numPairs; }
@@ -1357,6 +1360,7 @@ private:
 	inline void _print(int cur, float prog);
 	
 	int _fileLength, _max, _last;
+	int _globalRdsRead, _globalMaxRdsRead, _localRdsRead; //to keep track of processed reads so far (and before = global)
 	
 	//abstraction to real file type
 

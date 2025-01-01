@@ -2450,7 +2450,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
         pairedSeq(-1),
         //revConstellationN(0),
         BCdFWDREV(2),
-        firstXreads(-1),
+		firstXreadsW(-1), firstXreadsR(-1),
         restartSet(false), b_optiClusterSeq(false),
         b_subselectionReads(false), b_doQualFilter(true),
         b_doFilter(true),
@@ -2558,8 +2558,11 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	if ((*cmdArgs)["-illuminaClip"] == "1") {
 		Bcheck4illuAdapts = true;
 	}
-	if ((*cmdArgs)["-XfirstReads"] != "") {
-		firstXreads = atoi((*cmdArgs)["-XfirstReads"].c_str());
+	if ((*cmdArgs)["-XfirstReadsWritten"] != "") {
+		firstXreadsW = atoi((*cmdArgs)["-XfirstReadsWritten"].c_str());
+	}
+	if ((*cmdArgs)["-XfirstReadsRead"] != "") {
+		firstXreadsR = atoi((*cmdArgs)["-XfirstReadsRead"].c_str());
 	}
 
 
@@ -2848,7 +2851,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
         pairedSeq(of->pairedSeq),
         //revConstellationN(0),
         BCdFWDREV(of->BCdFWDREV),
-		firstXreads(of->firstXreads),
+		firstXreadsW(of->firstXreadsW), firstXreadsR(of->firstXreadsR),
 		restartSet(false),
         b_optiClusterSeq(of->b_optiClusterSeq), b_subselectionReads(of->b_subselectionReads),
         b_doQualFilter(of->b_doQualFilter),

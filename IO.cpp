@@ -453,9 +453,10 @@ struct job2 {
 };
 
 bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD, 
-	shared_ptr<InputStreamer> IS, bool MIDuse, int Nthreads) {
+	shared_ptr<InputStreamer> IS, int Nthreads) {
 	
 	DNAmap oldMIDs;
+	bool MIDuse = IS->hasMIDseqs();
 	bool fqHeadVer(true);
 	cdbg( "Read paired routine\n");
 
@@ -505,6 +506,7 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 	while ( cont ) {
 		//bool sync = false;
 		//tests of different ways to read files..
+		
 
 		//cnt++;
 		//decide on MC or single core submission route
@@ -650,8 +652,11 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 		(*cmdArgs)["-ucAdditionalCounts_refclust1"] = "";
 	}
 	
-	if (cmdArgs->find("-XfirstReads") == cmdArgs->end()) {
-		(*cmdArgs)["-XfirstReads"] = "";
+	if (cmdArgs->find("-XfirstReadsWritten") == cmdArgs->end()) {
+		(*cmdArgs)["-XfirstReadsWritten"] = "";
+	}
+	if (cmdArgs->find("-XfirstReadsRead") == cmdArgs->end()) {
+		(*cmdArgs)["-XfirstReadsRead"] = "";
 	}
 	if (cmdArgs->find("-iniBlockSize") == cmdArgs->end()) {
 		(*cmdArgs)["-iniBlockSize"] = "100";
@@ -863,8 +868,9 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 	string shrtLog = "";
 
 	// main loop that goes over different files
-	int maxReads = mainFilter->getXreads(); // should program stop after having written a certain amount of reads?
-	int totalReadsRead(0);
+	int maxReadsWr = mainFilter->getXreadsWr(); // should program stop after having written a certain amount of reads?
+	int maxReadsRd = mainFilter->getXreadsRd();
+	int totalReadsRead(0), totalReadsWrite(0);
 	uint accumBPwrite(0), accumBPwriteMerg(0);
 	vector<string> lastSRblock (1,"");  //set up SequencingRun blocks to track
 
@@ -883,8 +889,11 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		}*/
 		cerr << "Run with " << threads << " cores.\n";
     }
-	if (maxReads > 0) {
-		cerr << "Only printing " << maxReads << " first reads from file(s).\n";
+	if (maxReadsWr > 0) {
+		cerr << "Only printing " << maxReadsWr << " first reads from file(s).\n";
+	}
+	if (maxReadsRd > 0) {
+		cerr << "Only reading " << maxReadsRd << " first reads from file(s).\n";
 	}
 
 	//set up a read merger for each thread..
@@ -900,7 +909,8 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 	for (auto &uFX : files.uniqFxFls) {
 		uint i = uFX.second;
 		cdbg("Unique file " + uFX.first + "(" + itos(i) + ")\n");
-		if (maxReads > 0 && maxReads - totalReadsRead <= 0) { cerr << "Skipping file "<< uFX.first << "due to firstXreads.."; break; }
+		if (maxReadsWr > 0 && maxReadsWr - totalReadsWrite <= 0) { cerr << "Skipping file " << uFX.first << "due to firstXreadsWrite .."; break; }
+		if (maxReadsRd > 0 && maxReadsRd - totalReadsRead <= 0) { cerr << "Skipping file " << uFX.first << "due to firstXreadsRead .."; break; }
 		if (files.idx[i].size() == 0) {	cerr << "fastXtar vector for " << uFX.first << " is empty" << endl;	exit(10);		}
 
 		//create subset of BCs for the currently processed fastq's (only relevant BCs)
@@ -919,6 +929,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 			(*cmdArgs)["-pairedRD_HD_out"], threads);
 		if ((*cmdArgs)["-threadIO"] == "1") { IS->setTIO(true); }
 		if ((*cmdArgs)["-threadIO"] == "0") { IS->setTIO(false); }
+		IS->setGlobalRdsRead(totalReadsRead); IS->setMaxRdsRead(maxReadsRd);
 
 
 		// there is an entry in tar for each barcode for this file. If files.idx[i].size() is 1 there is only one barcode
@@ -984,8 +995,8 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		OutStreamer->attachDereplicator(dereplicator);OutStreamer->activateReadMerger(threads);
 		OutStreamer->setBPwrittenInSR(accumBPwrite);OutStreamer->setBPwrittenInSRmerg(accumBPwriteMerg);	
 		OutStreamer->attachBenchmark(sdm_benchmark);filter->setMultiDNA(OutStreamer);
-		if (maxReads > 0) {
-			OutStreamer->setReadLimit(maxReads - totalReadsRead);
+		if (maxReadsWr > 0) {
+			OutStreamer->setReadLimit(maxReadsWr - totalReadsWrite);
 		}
 		writeStatus = ofstream::app;
 		//prepare for BC checking (rev/fwd)
@@ -1025,8 +1036,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		//**********************
 		//heavy reading, demultiplexing, dereplicating routine
 		//**********************
-		read_sequences(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
-		//read_paired2(cmdArgs, OutStreamer, IS, IS->hasMIDseqs(), threads);
+		read_sequences(cmdArgs, OutStreamer, IS, threads);
 
 
 
@@ -1059,9 +1069,10 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 			cerr << filter->shortStats(""); shortStats = true;
 		}
 
-		totalReadsRead += filter->totalAccepts();
+		//totalReadsRead += filter->getLocalAcceptRds();
 
 		shrtLog += filter->shortStats(mainFileShort);
+		totalReadsRead += filter->getLocalRdsRead();
 		//		delete IS;
 				//write log file
 		if (files.uniqueFastxFiles.size() > 1) {//only print sub log if neccessary
@@ -1076,6 +1087,8 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
         // Print out merged read count (move to stort stats)
 
 		//OutStreamer.reset();
+		totalReadsWrite += OutStreamer->getReadsWritten();
+		
 		delete OutStreamer;
 		delete filter;
     }//uFX
@@ -1353,8 +1366,8 @@ void general_help(){
     cout << "The compiled version does not support multithreading\n";
 #endif
 	cout << "Select further help topics by typing:\nsdm -help_options : print help on configuring options files\n";
-	cout <<"sdm - help_flags : help on command line (flags) arguments for sdm\n";
-	cout << "sdm - help_map : base_map files and the keywords for barcodes etc.\n------------------------------\n";
+	cout <<"sdm -help_flags : help on command line (flags) arguments for sdm\n";
+	cout << "sdm -help_map : base_map files and the keywords for barcodes etc.\n------------------------------\n";
     cout<<"Author: falk.hildebrand@gmail.com"<<endl;
 
 }
@@ -1374,7 +1387,9 @@ void printCmdsHelp(){//actually these are flags
 	cout << " -5PR1cut [I]: remove I first nts from read 1\n"; cout << " -5PR2cut [I]: remove I first nts from read 2\n";
 	cout << " -GoldenAxe [0/1]: use GoldenAxe mode for PacBio concatenated reads (needs special sequencing library prep).\n";
 	cout << " -GoldenAxeMinAmpli [-1]: minNumAmplicons on GoldenAxe reads to accept at all (Default: -1).\n";
-	cout << " -XfirstReads [#]: only print the X first reads across all input file(s), useful for downsampling. Read pairs count as two reads.\n";
+	cout << " -XfirstReadsWritten [#]: only print the X first reads across all input file(s), useful for downsampling. Read pairs count as two reads.\n";
+	cout << " -XfirstReadsRead [#]: only reads the X first reads across all input file(s), useful for downsampling. Read pairs count as two reads.\n";
+	
 	//-binomialFilterBothPairs [1/0]
     //-count_chimeras [T/F]
     // ucAdditionalCounts_refclust -OTU_fallback_refclust -optimalRead2Cluster_ref

@@ -2546,6 +2546,9 @@ string InputStreamer::current_infiles() {
 
 bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse,bool safe) {
 
+	
+
+
 	if (safe) {
 		protect.lock();
 	}
@@ -2553,9 +2556,15 @@ bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse,b
 	assert(tmpO->size() == blocks);
 	size_t k(0); bool b1(true), b2(true);
 	for (k = 0; k < blocks; k++) {
+		if (_globalMaxRdsRead > 0 && _globalRdsRead + _localRdsRead > _globalMaxRdsRead) {
+			if (safe) { protect.unlock(); }
+			return false;
+		}
 		b1 = this->getDNAlines(tmpO->tmp[k][0], 0);
+		_localRdsRead++;
 		if (numPairs > 1) {
 			b2 = this->getDNAlines(tmpO->tmp[k][1], 1);
+			_localRdsRead++;
 		}
 		if (MIDuse) {
 			this->getDNAlines(tmpO->tmp[k][2], 2);

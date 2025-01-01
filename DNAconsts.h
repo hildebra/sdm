@@ -135,8 +135,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.04: GA v2
 //3.05: fix for GA to report sample names and seed ext only to add samples with valid smpl name from demulti.add.fna
 //3.06: -GoldenAxeMinAmpli / -GoldenAxeMaxAmpli added
-//3.07: added -XfirstReads functionality
-static const float sdm_version = 3.07f;
+//3.07: added -XfirstReadsWritten functionality
+//3.08: added -XfirstReadsRead
+static const float sdm_version = 3.08f;
 static const char* sdm_status = "beta";
 
 

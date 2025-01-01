@@ -29,7 +29,7 @@ typedef std::map<std::string, shared_ptr<DNA>> DNAmap;
 //void prepareOutFiles(OptContainer& cmdArgs);
 //void read_fastq(OptContainer& cmdArgs, OutputStreamer* MD,string fileS);
 bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
-	shared_ptr<InputStreamer>, bool, int Nthreads);
+	shared_ptr<InputStreamer>,  int Nthreads);
 //different thread management..
 bool read_paired2(OptContainer* cmdArgs, OutputStreamer* MD,
 	shared_ptr<InputStreamer>, bool, int Nthreads);

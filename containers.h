@@ -320,7 +320,12 @@ public:
 			collectStatistics[pair]->addPostFilt(d); //->PostFilt.addDNAStats(d);
 		}
 	}
-
+	int getLocalRdsRead() {
+		if (pairedSeq > 1) {
+			return collectStatistics[0]->total + collectStatistics[1]->total;
+		}
+		return collectStatistics[0]->total;
+	}
 	void printStats(ostream&, string, string, bool);
 	void printGC(ostream&,int);
 	string shortStats(const string &);
@@ -388,8 +393,9 @@ public:
 
 	//combiner of samples base_map to collect the group number
 	unordered_map<string, int> combiMapCollectGrp;
-	int getXreads() {		return firstXreads;	}
-	int totalAccepts() { //just plain number of successes..
+	int getXreadsWr() { return firstXreadsW; }
+	int getXreadsRd() { return firstXreadsR; }
+	int getLocalAcceptRds() { //just plain number of successes..
 		if (pairedSeq > 1) {
 			return collectStatistics[0]->totalSuccess + collectStatistics[1]->totalSuccess;
 		}
@@ -547,7 +553,8 @@ protected:
 		void fix() { BChit = 0; BCrevhit = 0; b_BCdirFix = true; reversedBCs = false; }
 	};
 	vector<BCdecide> BCdFWDREV;
-	int firstXreads;//just prints the first X reads for experiment (read pairs being counted as 2)
+	int firstXreadsW;//just prints the first X reads for experiment (read pairs being counted as 2)
+	int firstXreadsR;//just reads the first X reads for experiment (read pairs being counted as 2)
 	bool restartSet;//start from beginning, i.e. wrong BC direction
 	bool b_optiClusterSeq;//SEED extension
 	bool b_subselectionReads;//filter out a specific set of reads
@@ -908,6 +915,7 @@ public:
 	uint getBPwrittenInSR(void) { return BPwrittenInSR; }
 	void setBPwrittenInSRmerg(uint x) { BPwrittenInSRmerg = x; }
 	uint getBPwrittenInSRmerg(void) { return BPwrittenInSRmerg; }
+	int getReadsWritten() { return ReadsWritten; }
 
 	void attachBenchmark(Benchmark* bench) { _benchmark = bench; }
 	void activateReadMerger(int sz) {
