@@ -137,7 +137,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.06: -GoldenAxeMinAmpli / -GoldenAxeMaxAmpli added
 //3.07: added -XfirstReadsWritten functionality
 //3.08: added -XfirstReadsRead
-static const float sdm_version = 3.08f;
+//3.09: fixed empty file crash
+static const float sdm_version = 3.09f;
 static const char* sdm_status = "beta";
 
 

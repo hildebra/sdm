@@ -132,9 +132,17 @@ bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 		if (ret[0] != nullptr && MD->getFilters(curThread)->isGoldAxe()) {
 			vector<shared_ptr<DNA>> multDNA = MD->getFilters(curThread)->GoldenAxe(ret);
 			vector<shared_ptr<DNA>> ret2(3, nullptr);
+			int iniBCsGA(-2);
+			if (multDNA.size()) {
+				iniBCsGA = multDNA[0]->getBCnumber();
+			}
 			for (size_t xi = 0; xi < multDNA.size(); xi++) {
 				ret2[0] = multDNA[xi];
 				isOK=read_paired_DNAready(ret2, MIDuse, MD, curThread);
+				if (ret2[0]->getBCnumber() != iniBCsGA) {//DEBUG
+					int BCnewWrong = ret2[0]->getBCnumber();
+					cerr << "Problem in GA read \n" << tmpLines->tmp[k][0][0]<<"\n"<< tmpLines->tmp[k][0][1] << "\n:Different BCs detected\n";
+				}
 			}
 		} else {
 			isOK = read_paired_DNAready(ret, MIDuse, MD, curThread);
@@ -171,12 +179,13 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	} //|| tdn->length()==0
 	//DNA objects as they should be??
 	if (MIDuse && tdn[2] == nullptr) {
-		cerr << "Missing MID read pair.\n";
-		exit(4);
+		//cerr << "Missing MID read pair.\n";		exit(4);
+		throw std::runtime_error("Missing MID read pair.");
+
 	}
 	if (tdn[1] == nullptr && tdn[0] != nullptr && MD->isPEseq() == 2) {
-		cerr << "Second provided file has not the same number of entries as first file.\n";
-		exit(5);
+		//cerr << "Second provided file has not the same number of entries as first file.\n";exit(5);
+		throw std::runtime_error("Second provided file has not the same number of entries as first file.");
 	}
 	//MD->checkFastqHeadVersion(tdn[0]);
 	//testreadpair.lock();
@@ -291,9 +300,9 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 		//check a second time that barcode was correctly identified, just to be double sure...
 		if ( tagIdx != tagIdx2 || tdn[0]->getBCnumber() != tdn[1]->getBCnumber()) {
-			cerr << "Unequal BC numbers:" << tagIdx << " : " << tagIdx2 << "; in object: " << tdn[0]->getBCnumber() << " : " << tdn[1]->getBCnumber() << endl;
-			cerr << "In read:" << tdn[0]->getId() << endl;
-			exit(835);
+			//cerr << "Unequal BC numbers:" << tagIdx << " : " << tagIdx2 << "; in object: " << tdn[0]->getBCnumber() << " : " << tdn[1]->getBCnumber() << endl;
+			//cerr << "In read:" << tdn[0]->getId() << endl; exit(835);
+			throw std::runtime_error("Unequal BC numbers:" + itos(tagIdx) + " : " + itos(tagIdx2) + "; in object: " + itos(tdn[0]->getBCnumber()) + " : " + itos(tdn[1]->getBCnumber()) + "\nIn read:" + tdn[0]->getId());			
 		}
 	}
 	
@@ -352,8 +361,9 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	//needed to eval qual of seed
 	if (read2notNull) {//check that this is really correct read pair
 		if (!tdn[0]->sameHeadPosFree(tdn[1])) {
-			cerr << "Error: invalid paired read pair headers:\n  read1 head: " << tdn[0]->getShortId() << "\n  read2 head: " << tdn[1]->getShortId()<<endl;
-			exit(152);
+			//cerr << "Error: invalid paired read pair headers:\n  read1 head: " << tdn[0]->getShortId() << "\n  read2 head: " << tdn[1]->getShortId()<<endl;exit(152);
+			throw std::runtime_error("Error: invalid paired read pair headers:\n  read1 head: " + tdn[0]->getShortId() + "\n  read2 head: " + tdn[1]->getShortId());
+
 		}
 	}
 	if (MD->mergeReads() && read2notNull) {
@@ -526,8 +536,11 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 			
 			//step 1b: set fq version (if not done already)
 			fastqVer = IS->fastQscore();
-			if (fqHeadVer) { //some things just need to be done
-				if (tmpStrHolders[thrCnt]->tmp[0][0].size() < 0) {cerr << "Error: empty fastq object. Please check that your input fastq contains sequences?"; exit(623);}
+			if (fqHeadVer && tmpStrHolders[thrCnt]->tmp.size()>0) { //some things just need to be done
+				if (tmpStrHolders[thrCnt]->tmp[0][0].size() < 0) {
+//					cerr << "Error: empty fastq object. Please check that your input fastq contains sequences?"; exit(623);
+					throw std::runtime_error("Error: empty fastq object. Please check that your input fastq contains sequences?");
+				}
 				shared_ptr<DNA> tmp = str2DNA(tmpStrHolders[thrCnt]->tmp[0][0], keepPairedHD, fastqVer, 0);
 				MD->checkFastqHeadVersion(tmp);			fqHeadVer = false;
 			}
@@ -545,7 +558,10 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 		} else {//single thread
 			cont = IS->getDNAlines(tmpStrHolders[thrCnt], tmpBlockSize, MIDuse); fastqVer = IS->fastQscore();
 			if (fqHeadVer ) { //some things just need to be done
-				if (tmpStrHolders[thrCnt]->tmp[0][0].size() < 0) { cerr << "Error: empty fastq object. Please check that your input fastq contains sequences?"; exit(623); }
+				if (tmpStrHolders[thrCnt]->tmp[0][0].size() < 0) { 
+					//cerr << "Error: empty fastq object. Please check that your input fastq contains sequences?"; exit(623); 
+					throw std::runtime_error("Error: empty fastq object. Please check that your input fastq contains sequences?");
+				}
 				shared_ptr<DNA> tmp = str2DNA(tmpStrHolders[thrCnt]->tmp[0][0], keepPairedHD, fastqVer, 0);
 				MD->checkFastqHeadVersion(tmp);			fqHeadVer = false;
 			}
@@ -584,8 +600,8 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 
 bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 	if (argc%2!=1){
-		cerr<<"It seems command line arguments were not passed in pairs. Aborting.\n";
-		exit(666);
+//		cerr<<"It seems command line arguments were not passed in pairs. Aborting.\n";exit(666);
+		throw std::runtime_error("It seems command line arguments were not passed in pairs. Aborting.");
 	}
 	for (int i=1; i<argc; i+=2){ //parsing of cmdline args
 		string theNxtSt = string(argv[i+1]);
@@ -692,8 +708,8 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 		}
 		if (cmdArgs->find("-i_fastq")  == cmdArgs->end()){ // fasta + quality format
 			if (cmdArgs->find("-i_fna")  == cmdArgs->end()){
-				cerr<<"You did not supply a fasta file. \nPlease give the path to your fasta file as command line argument:\n  -i_fna <yourFastaFile>\n";
-				exit(2);
+				//cerr<<"Fasta not supplied. \nPlease give the path to your fasta file as command line argument:\n  -i_fna <yourFastaFile>\n";exit(2);
+				throw std::runtime_error("Fasta not supplied. \nPlease give the path to your fasta file as command line argument:\n  -i_fna <yourFastaFile>");
 			}
 			if (cmdArgs->find("-i_qual")  == cmdArgs->end()){
 				string newQ = (*cmdArgs)["-i_fna"];
@@ -731,8 +747,8 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 		}
 	} else {
 		if (cmdArgs->find("-o_fna")  == cmdArgs->end() && cmdArgs->find("-o_fastq")  == cmdArgs->end()){
-			cerr<<"Please give an output file (\"-o_fna\" || \"-o_fastq\") if you use sdm \"-i_path\" option.\n  Aborting..\n";
-			exit(2);
+			//cerr<<"Please give an output file (\"-o_fna\" || \"-o_fastq\") if you use sdm \"-i_path\" option.\n  Aborting..\n";exit(2);
+			throw std::runtime_error("Please give an output file (\"-o_fna\" || \"-o_fastq\") if you use sdm \"-i_path\" option.\n  Aborting..");
 		}
 	}
 
@@ -796,7 +812,8 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 	if (cmdArgs->find("-sample_sep")  == cmdArgs->end()){
 		(*cmdArgs)["-sample_sep"] = DEFAULT_BarcodeNameSep;
 	} else 	if ((*cmdArgs)["-sample_sep"]==""){
-		cerr<<"Invalid sample separator (empty).\nAborting..\n";exit(82);
+		//cerr<<"Invalid sample separator (empty).\nAborting..\n";exit(82);
+		throw std::runtime_error("Invalid sample separator (empty).\nAborting..");
 	}
 
 
@@ -818,8 +835,8 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 	if (cmdArgs->find("-ignore_IO_errors") == cmdArgs->end()) {
 		(*cmdArgs)["-ignore_IO_errors"] = DEFAULT_ignore_IO_errors;
 	} else if ((*cmdArgs)["-ignore_IO_errors"] != "0" && (*cmdArgs)["-ignore_IO_errors"] != "1") {
-		cerr << "Argument \"ignore_IO_errors\" can only be \"1\" or \"0\". Instead it has value: " << (*cmdArgs)["-ignore_IO_errors"] << endl;
-		exit(323);
+		//cerr << "Argument \"ignore_IO_errors\" can only be \"1\" or \"0\". Instead it has value: " << (*cmdArgs)["-ignore_IO_errors"] << endl;exit(323);
+		throw std::runtime_error("Argument \"ignore_IO_errors\" can only be \"1\" or \"0\". Instead it has value: " + (*cmdArgs)["-ignore_IO_errors"]);
 	}
 	if (cmdArgs->find("-o_dereplicate") == cmdArgs->end()) {
 		(*cmdArgs)["-o_dereplicate"] = "";
@@ -911,7 +928,10 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		cdbg("Unique file " + uFX.first + "(" + itos(i) + ")\n");
 		if (maxReadsWr > 0 && maxReadsWr - totalReadsWrite <= 0) { cerr << "Skipping file " << uFX.first << "due to firstXreadsWrite .."; break; }
 		if (maxReadsRd > 0 && maxReadsRd - totalReadsRead <= 0) { cerr << "Skipping file " << uFX.first << "due to firstXreadsRead .."; break; }
-		if (files.idx[i].size() == 0) {	cerr << "fastXtar vector for " << uFX.first << " is empty" << endl;	exit(10);		}
+		if (files.idx[i].size() == 0) {	
+			throw std::runtime_error("fastXtar vector for " + uFX.first + " is empty");
+			//cerr << "fastXtar vector for " << uFX.first << " is empty" << endl;	exit(10);		
+		}
 
 		//create subset of BCs for the currently processed fastq's (only relevant BCs)
 		cdbg("new filter in round " + itos(i) + "\n");
@@ -1366,9 +1386,14 @@ void general_help(){
     cout << "The compiled version does not support multithreading\n";
 #endif
 	cout << "Select further help topics by typing:\nsdm -help_options : print help on configuring options files\n";
-	cout <<"sdm -help_flags : help on command line (flags) arguments for sdm\n";
-	cout << "sdm -help_map : base_map files and the keywords for barcodes etc.\n------------------------------\n";
-    cout<<"Author: falk.hildebrand@gmail.com"<<endl;
+	cout << "sdm -help_flags : help on command line (flags) arguments for sdm\n";
+	cout << "sdm -help_map : base_map files and the keywords for barcodes etc.";
+	cout << "sdm -v : version information";
+	cout << "\n------------------------------\n"; 
+	cout << "For more information, please visit the sdm github page: https://github.com/hildebra/sdm\n";
+	cout << "If you find bugs, please report them there.\n";
+	cout << "If you have questions, please contact me at: ";
+	cout<<" falk.hildebrand@gmail.com"<<endl;
 
 }
 void printCmdsHelp(){//actually these are flags
@@ -1442,5 +1467,8 @@ void printMapHelp(){
 }
 void printVersion(){
     cout << "sdm " << sdm_version << " " << sdm_status << endl;
+	cout << "compiled on: " << __DATE__ << " at " << __TIME__ << endl;
+	cout << "compiled with C++ v: " << __cplusplus << endl;
+
 }
 
