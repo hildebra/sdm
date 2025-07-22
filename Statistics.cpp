@@ -23,7 +23,9 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx) {
     PrimerRevFail += cs->PrimerRevFail;
     minL += cs->minL; minLqualTrim += cs->minLqualTrim; TagFail += cs->TagFail;
     MaxAmb += cs->MaxAmb; QualWin += cs->QualWin;
-    Trimmed += cs->Trimmed; AccErrTrimmed += cs->AccErrTrimmed; total += cs->total;
+    Trimmed += cs->Trimmed;
+    AccErrTrimmed += cs->AccErrTrimmed;
+    total.fetch_add(cs->total.load(), std::memory_order_relaxed);
     QWinTrimmed += cs->QWinTrimmed;
     totalRejected += cs->totalRejected;
     fail_correct_BC += cs->fail_correct_BC; suc_correct_BC += cs->suc_correct_BC;
