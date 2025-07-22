@@ -7,6 +7,7 @@
 
 #include "DNAconsts.h"
 #include "InputStream.h"
+#include <atomic>
 
 class Statistics {
 public:
@@ -226,10 +227,13 @@ public:
     unsigned int maxL, PrimerFail, AvgQual, HomoNT;
     unsigned int PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)
     unsigned int minL, minLqualTrim, TagFail, MaxAmb, QualWin;
-    unsigned int Trimmed, AccErrTrimmed, QWinTrimmed, total, totalMid, totalRejected;
+    unsigned int Trimmed, AccErrTrimmed, QWinTrimmed, totalMid;
+    std::atomic<unsigned int> total;
+    std::atomic<unsigned int> totalRejected;
     unsigned int fail_correct_BC, suc_correct_BC, failedDNAread;
     unsigned int adapterRem, RevPrimFound;
-    uint total2, totalSuccess;
+    std::atomic<unsigned int> total2;
+    unsigned int totalSuccess;
     uint DerepAddBadSeq;
     //binomial error model
     unsigned int BinomialErr;
