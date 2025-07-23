@@ -138,7 +138,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.07: added -XfirstReadsWritten functionality
 //3.08: added -XfirstReadsRead
 //3.09: fixed empty file crash
-static const float sdm_version = 3.09f;
+//3.10: counter stats changed to atomic (issue #10)
+static const float sdm_version = 3.10f;
 static const char* sdm_status = "beta";
 
 
