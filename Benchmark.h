@@ -51,7 +51,7 @@ public:
         last_time = now_time;
         //convert decimal places
         if (decimals > 0) {
-            const double multiplier = std::pow(10.0, decimals);
+            const float multiplier = (float)std::pow(10.0, decimals);
             secs = std::ceil(secs * multiplier) / multiplier;
         }
         return secs;

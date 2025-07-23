@@ -20,7 +20,10 @@ public:
                    failedDNAread(0), adapterRem(0), RevPrimFound(0),
                    total2(0), totalSuccess(0),
                    DerepAddBadSeq(0), BinomialErr(0), dblTagFail(0),
-                   singleton(0), BarcodeDetected(0), BarcodeDetectedFail(0) {}
+                   singleton(0), BarcodeDetected(0), BarcodeDetectedFail(0),
+                   rstat_totReads(0), rstat_NTs(0), rstat_qualSum(0), rstat_Qmed(0), rstat_Smed(0),
+                   RSQS(0.f), USQS(0.f), rstat_accumError(0.f),
+                   rstat_VQmed(0), rstat_VSmed(0){}
 
     unsigned int maxL, PrimerFail, AvgQual, HomoNT;
     unsigned int PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)

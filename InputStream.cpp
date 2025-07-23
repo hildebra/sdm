@@ -488,7 +488,7 @@ DNA::DNA(vector<string> fas):DNA() {
 	string tqual;
 	this->setHeader(fas[0].substr(1));
 	this->setSequence( fas[1]);
-	uint lsize = fas[1].length();
+	uint lsize = (uint) fas[1].length();
 	vector<qual_score> Iqual(lsize, 11);
 	if (fas[2].length() > 0) {
 		tqual = fas[2];

@@ -224,7 +224,7 @@ public:
 		}
 #else 
 		primary->read(keeper, bufS);
-		if (!(*primary) || bufS > primary->gcount()) {
+		if (!(*primary) || bufS > (size_t)primary->gcount()) {
 			bufS = (size_t)primary->gcount() + 1; atEnd = true;
 			delete[] keeperW; keeperW = nullptr;
 		} else { kickOff(); }
@@ -254,7 +254,7 @@ public:
 		delete[] keeperW; keeperW = nullptr;
 		iniBufStrm();
 		primary->read(keeper, bufS);
-		if (!(*primary) || bufS > primary->gcount()) {
+		if (!(*primary) || bufS > (size_t)primary->gcount()) {
 			bufS = (size_t)primary->gcount() + 1; atEnd = true;
 			delete[] keeperW; keeperW = nullptr;
 		}else { kickOff(); }
@@ -529,9 +529,12 @@ std::ptrdiff_t len_common_prefix_base(char const a[], char const b[]);
 //static mutex output_mtx;
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
+	ofbufstream() :file("T"), keeper(0), keeperW(0), modeIO(ios::app), used(0), usedW(0),
+		coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(0), hasKickoff(false) {
+	}
 	ofbufstream(size_t bufferS):file("T"), keeper(0), keeperW(0), modeIO(ios::app), used(0), usedW(0),
-		coutW(true), isGZ(false), doMC(false), bufS(0),hasKickoff(false){
-		int x = 0;
+		coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(bufferS),hasKickoff(false){
+	
 	}
 	ofbufstream(const string IF, int mif, bool isMC = false, size_t bufferS = 20000);
 	~ofbufstream();

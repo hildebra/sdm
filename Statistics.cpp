@@ -452,12 +452,12 @@ void GAstats::printBCAmpliNdistribution(ostream& give) {
         if (GALDISperBC[i].size() > maxL) { maxL = GALDISperBC[i].size(); }
     }
     give << "SampleID";
-    for (uint i = 0; i < maxL; i++) { give << "\t#Amplis_" << i; }
+    for (int i = 0; i < maxL; i++) { give << "\t#Amplis_" << i; }
     give << endl;
 
     for (unsigned int idx = 0; idx < GALDISperBC.size(); idx++) {
         give << SmplIDBC[idx];
-        for (uint i = 0; i < maxL; i++) {
+        for (int i = 0; i < maxL; i++) {
             if (i < GALDISperBC[idx].size()) {
                 give << "\t" << GALDISperBC[idx][i];
             }
@@ -475,7 +475,7 @@ void GAstats::printBCAmpliLdistribution(ostream& give) {
     assert(GAperBC.size() == GALAMPLperBC.size()); assert(GAperBC.size() == GALDISperBC.size());
     int maxL(0);
     for (unsigned int i = 0; i < GALAMPLperBC.size(); i++) {
-        if (GALAMPLperBC[i].size() > maxL) { maxL = GALAMPLperBC[i].size(); }
+        if (GALAMPLperBC[i].size() > maxL) { maxL = (int)GALAMPLperBC[i].size(); }
     }
     give << "SampleID";
     for (uint i = 0; i < maxL; i++) { give << "\t#Amplis_" << i; }
@@ -483,7 +483,7 @@ void GAstats::printBCAmpliLdistribution(ostream& give) {
 
     for (unsigned int idx = 0; idx < GALAMPLperBC.size(); idx++) {
         give << SmplIDBC[idx];
-        for (uint i = 0; i < maxL; i++) {
+        for (int i = 0; i < maxL; i++) {
             if (i < GALAMPLperBC[idx].size() && GALAMPLperBC[idx][i]>0) {
                 give << "\t" << (GALAMPLperBC[idx][i]/(double)GALDISperBC[idx][i]/(double)i);
             }

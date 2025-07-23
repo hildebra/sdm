@@ -3475,7 +3475,7 @@ void Filters::setSeqLength(float minL, int maxL) {
 	}
 	max_l = maxL;
 	if (max_l < 0) {
-		max_l = 1e9; //100 mil should be good enough for infinite length
+		max_l = (uint)1e9; //100 mil should be good enough for infinite length
 	}
 }
 
@@ -4201,7 +4201,7 @@ void Filters::reverse_all_BC() {
 
 	if (Barcode2.size() != 0 && revBarcode2.size() == 0) {
 		revBarcode2 = Barcode2;
-		for (size_t i = 0; i < Barcode2.size(); i++) {
+		for (int i = 0; i < (int)Barcode2.size(); i++) {
 			reverseTS(revBarcode2[i]);
 			//and also prep search vector..
 			revBarcodes2_[revBarcode2[i]] = i;
@@ -4519,7 +4519,7 @@ bool Filters::checkIfRevPrimerHits(shared_ptr<DNA> d, int primerID, int pair,boo
 
 }
 bool Filters::passedReads(int n) {
-	if (collectStatistics[0]->total - passed_interval_reads  > n) {
+	if (collectStatistics[0]->total - passed_interval_reads  >(uint) n) {
 		passed_interval_reads = collectStatistics[0]->total;
 		return true;
 	}
@@ -5103,10 +5103,10 @@ void Filters::failedStats2(shared_ptr<DNA> d,int pair){
 }
 
 void Filters::addMergeStats(OutputStreamer* out) {
-	mergeStats->BPwritten = out->getBPwrittenInSR();
-	mergeStats->BPmergeWritte = out->getBPwrittenInSRmerg();
-	mergeStats->total_read_preMerge_ = out->total_read_preMerge_;
-	mergeStats->merged_counter_ = out->merged_counter_;
+	mergeStats->BPwritten = (uint)out->getBPwrittenInSR();
+	mergeStats->BPmergeWritte =(uint) out->getBPwrittenInSRmerg();
+	mergeStats->total_read_preMerge_ = (int)out->total_read_preMerge_;
+	mergeStats->merged_counter_ = (int)out->merged_counter_;
 
 
 
