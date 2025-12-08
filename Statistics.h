@@ -11,7 +11,7 @@
 
 class Statistics {
 public:
-    Statistics() : maxL(0), PrimerFail(0), AvgQual(0), HomoNT(0),
+    Statistics() : maxL(0), PrimerFail(0), AvgQual(0), HomoNT(0), HomoNTtrimmed(0), 
                    PrimerRevFail(0), minL(0), minLqualTrim(0),
                    TagFail(0), MaxAmb(0), QualWin(0),
                    Trimmed(0), AccErrTrimmed(0), QWinTrimmed(0),
@@ -25,7 +25,7 @@ public:
                    RSQS(0.f), USQS(0.f), rstat_accumError(0.f),
                    rstat_VQmed(0), rstat_VSmed(0){}
 
-    unsigned int maxL, PrimerFail, AvgQual, HomoNT;
+    unsigned int maxL, PrimerFail, AvgQual, HomoNT, HomoNTtrimmed;
     unsigned int PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)
     unsigned int minL, minLqualTrim, TagFail, MaxAmb, QualWin;
     unsigned int Trimmed, AccErrTrimmed, QWinTrimmed, total, totalRejected;
@@ -195,7 +195,7 @@ private:
 
 class collectstats {
 public:
-    collectstats() : maxL(0), PrimerFail(0), AvgQual(0), HomoNT(0),
+    collectstats() : maxL(0), PrimerFail(0), AvgQual(0), HomoNT(0), HomoNTtrimmed(0), 
         PrimerRevFail(0), minL(0), minLqualTrim(0),
         TagFail(0), MaxAmb(0), QualWin(0),
         Trimmed(0), AccErrTrimmed(0), QWinTrimmed(0),
@@ -227,7 +227,7 @@ public:
     void addPostFilt(shared_ptr<DNA> d) { PostFilt.addDNAStats(d); }
     void addPreFilt(shared_ptr<DNA> d) { PreFilt.addDNAStats(d); }
 
-    unsigned int maxL, PrimerFail, AvgQual, HomoNT;
+    unsigned int maxL, PrimerFail, AvgQual, HomoNT, HomoNTtrimmed;
     unsigned int PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)
     unsigned int minL, minLqualTrim, TagFail, MaxAmb, QualWin;
     unsigned int Trimmed, AccErrTrimmed, QWinTrimmed, totalMid;

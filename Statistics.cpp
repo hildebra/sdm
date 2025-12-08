@@ -18,7 +18,7 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx) {
         BarcodeDetectedFail[idx[i]] += cs->BarcodeDetectedFail[i];
     }
     maxL += cs->maxL;	PrimerFail += cs->PrimerFail;
-    AvgQual += cs->AvgQual; HomoNT += cs->HomoNT;
+    AvgQual += cs->AvgQual; HomoNT += cs->HomoNT; HomoNTtrimmed += cs->HomoNTtrimmed; 
     totalMid += cs->totalMid;
     PrimerRevFail += cs->PrimerRevFail;
     minL += cs->minL; minLqualTrim += cs->minLqualTrim; TagFail += cs->TagFail;
@@ -49,7 +49,7 @@ void collectstats::reset() {
         BarcodeDetected[i] = 0;
         BarcodeDetectedFail[i] = 0;
     }
-    maxL = 0; PrimerFail = 0; AvgQual = 0; HomoNT = 0;
+    maxL = 0; PrimerFail = 0; AvgQual = 0; HomoNT = 0; HomoNTtrimmed = 0;
     PrimerRevFail = 0;
     minL = 0; TagFail = 0; MaxAmb = 0; QualWin = 0;
     Trimmed = 0; total = 0; totalRejected = 0;
@@ -546,6 +546,7 @@ void Statistics::merge(Statistics &statistics, vector<int> &idx) {
     PrimerFail += statistics.PrimerFail;
     AvgQual += statistics.AvgQual;
     HomoNT += statistics.HomoNT;
+    HomoNTtrimmed += statistics.HomoNTtrimmed;
     PrimerRevFail += statistics.PrimerRevFail;
     minL += statistics.minL;
     minLqualTrim += statistics.minLqualTrim;
@@ -582,6 +583,7 @@ void Statistics::reset() {
     PrimerFail = 0;
     AvgQual = 0;
     HomoNT = 0;
+    HomoNTtrimmed = 0;
     PrimerRevFail = 0;
     minL = 0;
     TagFail = 0;

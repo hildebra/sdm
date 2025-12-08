@@ -865,6 +865,7 @@ public:
 	bool cutSeq(int start, int stop=-1, bool = false);
 	bool cutSeqPseudo(int start) { return cutSeq(start, -1, true); }
 	bool HomoNTRuns(int);
+	int HomoNTTrim(int);
 	int matchSeq(string, int Err, int searchSpace, int startPos,bool exhaustive=false);
 	void reverse_compliment(bool reset=true);
 	int matchSeqRev(const string&, int Err, int searchSpace, int start=0,bool=false);
@@ -962,7 +963,7 @@ public:
 
 	struct QualStats {
 		bool maxL; bool PrimerFwdFail; bool AvgQual; //sAvgQual
-			bool HomoNT; bool PrimerRevFail; bool minL; 
+			bool HomoNT; bool HomoNTtrimmed; bool PrimerRevFail; bool minL; 
 			bool minLqualTrim; //<-sMinQTrim trimmed due to quality
 			bool TagFail; bool MaxAmb; bool QualWin;//sQualWin 
 			bool AccErrTrimmed; bool QWinTrimmed;  // either of these makes bool Trimmed; 
@@ -972,7 +973,7 @@ public:
 			bool RevPrimFound; 
 			bool BinomialErr; bool dblTagFail;
 		QualStats() :
-			maxL(false), PrimerFwdFail(false), AvgQual(false), HomoNT(false),
+			maxL(false), PrimerFwdFail(false), AvgQual(false), HomoNT(false), HomoNTtrimmed(false), 
 			PrimerRevFail(false), minL(false), minLqualTrim(false),
 			TagFail(false), MaxAmb(false), QualWin(false),
 			AccErrTrimmed(false), QWinTrimmed(false),

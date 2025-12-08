@@ -205,6 +205,7 @@ public:
 	void removePrimer(bool x) { BcutPrimer = x; }
 	void removeTag(bool x) { BcutTag = x; }
 	void setMaxHomo(int x) { maxHomonucleotide = x; }
+	void setTrimHomo(int x) {trimHomonucleotide = x; }
 	void checkDoubleBarcode();
 	void checDoubleSampleID();
 	void checkDoubleSampleIDHead();
@@ -522,7 +523,7 @@ protected:
 	bool bCompletePairs;//if paired seq, only accept complete pairs
 	bool bShortAmplicons;//checks for reverse primer on 1st read
 	//minBCLength1_ is Barcode length
-	unsigned int minBCLength1_, minBCLength2_, maxBCLength1_, maxBCLength2_, minPrimerLength_, maxHomonucleotide;
+	unsigned int minBCLength1_, minBCLength2_, maxBCLength1_, maxBCLength2_, minPrimerLength_, maxHomonucleotide, trimHomonucleotide;
 	uint cut5PR1, cut5PR2;
 	int PrimerErrs,alt_PrimerErrs,barcodeErrors_,MaxAmb, alt_MaxAmb;//allowed max errs per Primer, Tag; max Ambigous Chars(not ACGT)
 	int FQWwidth, EWwidth; //Floating window width for avg quality

@@ -996,6 +996,9 @@ void Filters::addDNAtoCStats(shared_ptr<DNA> d,int Pair) {
 		if (d->QualCtrl.HomoNT) {
 			collectStatistics[easyPair]->HomoNT++;
 		}
+		if (d->QualCtrl.HomoNTtrimmed) {
+			collectStatistics[easyPair]->HomoNTtrimmed++;
+		}
 		if (d->QualCtrl.MaxAmb) {
 			collectStatistics[easyPair]->MaxAmb++;
 		}
@@ -2435,7 +2438,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
         bRequireRevPrim(false), alt_bRequireRevPrim(false),
         bRequireFwdPrim(false), alt_bRequireFwdPrim(false), BcutTag(true),
         bCompletePairs(false), bShortAmplicons(false),
-        minBCLength1_(0), minBCLength2_(0), maxBCLength1_(0), maxBCLength2_(0), minPrimerLength_(0), maxHomonucleotide(0),
+        minBCLength1_(0), minBCLength2_(0), maxBCLength1_(0), maxBCLength2_(0), minPrimerLength_(0), maxHomonucleotide(0), trimHomonucleotide(0),
 		cut5PR1(0), cut5PR2(0),
         PrimerErrs(0), alt_PrimerErrs(0), barcodeErrors_(0),
         MaxAmb(-1), alt_MaxAmb(-1),
@@ -2497,7 +2500,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	float QualWinThr = 0;
 	int EndWinWidth = 15;
 	float EndWinThr = 20;
-	int maxHomoNT(12);
+	int maxHomoNT(12); int trimHomoNT(12);
 	bool keepTag(false),keepPrimer(false);
 	bool addModConf = false;
 
@@ -2682,6 +2685,8 @@ Filters::Filters(OptContainer* cmdArgs1) :
 			}
 		} else if (strcmp(segs.c_str(),"maxHomonucleotide") == 0){
 			maxHomoNT = atoi(segs2.c_str());
+		}else if (strcmp(segs.c_str(),"trimHomonucleotide") == 0){
+			trimHomoNT = atoi(segs2.c_str());
 		} else if (strcmp(segs.c_str(),"maxAccumulatedError") == 0){
 			if (addMod){
 				alt_maxAccumQP = double(atof(segs2.c_str()));
@@ -2779,6 +2784,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	this->setFloatingQWin(QualWinWidth,QualWinThr);
 	this->setFloatingEWin(EndWinWidth,EndWinThr);
 	this->setMaxHomo(maxHomoNT);
+	this->setTrimHomo(trimHomoNT);
 
 	//alternative options (mid qual filtering)
 	if (addModConf){
@@ -2832,7 +2838,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
         BcutTag(of->BcutTag),
 
         bCompletePairs(of->bCompletePairs), bShortAmplicons(of->bShortAmplicons),
-        minBCLength1_(of->minBCLength1_), minBCLength2_(of->minBCLength2_), maxBCLength1_(of->maxBCLength1_), maxBCLength2_(of->maxBCLength2_), minPrimerLength_(of->minPrimerLength_), maxHomonucleotide(of->maxHomonucleotide),
+        minBCLength1_(of->minBCLength1_), minBCLength2_(of->minBCLength2_), maxBCLength1_(of->maxBCLength1_), maxBCLength2_(of->maxBCLength2_), minPrimerLength_(of->minPrimerLength_), maxHomonucleotide(of->maxHomonucleotide), trimHomonucleotide(of->trimHomonucleotide),
 		cut5PR1(of->cut5PR1), cut5PR2(of->cut5PR2),
 		PrimerErrs(of->PrimerErrs), alt_PrimerErrs(of->alt_PrimerErrs), barcodeErrors_(of->barcodeErrors_),
         MaxAmb(of->MaxAmb), alt_MaxAmb(of->alt_MaxAmb),
@@ -3550,7 +3556,16 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre,
 	int tagIdx2(-2);
 	unsigned int hindrance = 0;
 	int pair = max(0, pairPre);//corrects for -1 (undefined pair_) to set to 0
-	
+
+	// We trim for poly-G / homonucleotide tail here, before filtering for length, and before trimming adapter sequences etc. 
+	if (trimHomonucleotide != 0){
+		unsigned int homoNTnewlength = d->HomoNTTrim(trimHomonucleotide);
+		if (homoNTnewlength > 0) {
+			d->cutSeqPseudo(homoNTnewlength);
+			d->QualCtrl.HomoNTtrimmed = true;
+		}
+	}
+
 	//remove technical adapter
 	if (pairPre == -1 && removeAdapter) {
 		remove_adapter(d);
@@ -3629,6 +3644,7 @@ bool Filters::checkYellowAndGreen(shared_ptr<DNA> d, int pairPre,
 	if (TruncSeq>0){
 		d->cutSeqPseudo(TruncSeq);
 	}
+
 	if (check_lengthXtra(d)) {
 		d->failed(); return false;
 	}
@@ -5622,6 +5638,9 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 		give << "  > (" << dval << ") acc. errors, trimmed seqs : " << spaceX(8 - digitsFlt(dval)) << intwithcommas((int)cst->AccErrTrimmed);
 		if (p2stat) { give << "; " << intwithcommas((int)cst2->AccErrTrimmed); } give << endl;
 	}
+
+	give << "  > (" << trimHomonucleotide << ") homo-nt trimmed  : " << spaceX(17 - digitsInt(maxHomonucleotide)) << intwithcommas((int)cst->HomoNTtrimmed);
+	if (p2stat) { give << "; " << intwithcommas((int)cst2->HomoNTtrimmed); } give << endl;
 
 	give << "Rejected due to:\n";
 	float val = (float)min_l;

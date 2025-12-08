@@ -139,7 +139,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.08: added -XfirstReadsRead
 //3.09: fixed empty file crash
 //3.10: counter stats changed to atomic (issue #10)
-static const char* sdm_version = "3.10";
+//3.11: added an option trimHomonucleotide with a default of 12 (first trims homo-nt runs from 3' side of reads)
+static const char* sdm_version = "3.11";
 static const char* sdm_status = "beta";
 
 
