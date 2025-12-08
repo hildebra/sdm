@@ -1176,6 +1176,7 @@ bool DNA::HomoNTRuns(int max){
 
 int DNA::HomoNTTrim(int max) {
 	// Return the sequence length if trimming takes place, else return 0.
+	if ((int)max >= length()) { return 0; }
 	unsigned int i = length() - 1;
 	char lastC = sequence_[i];
 	int rowC = 0;
@@ -1191,7 +1192,7 @@ int DNA::HomoNTTrim(int max) {
 		return i + 1;
 	} 
 	rowC = 0;
-	lastC = sequence_[i - 1];
+	//lastC = sequence_[i - 1];
 	i = 0;
 	return 0;
 }
