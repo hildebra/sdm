@@ -22,6 +22,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "containers.h"
 
+class OutputStreamer;
+
 typedef std::map<std::string, shared_ptr<DNA>> DNAmap;
 
 
@@ -31,9 +33,7 @@ typedef std::map<std::string, shared_ptr<DNA>> DNAmap;
 bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 	shared_ptr<InputStreamer>,  int Nthreads);
 //different thread management..
-bool read_paired2(OptContainer* cmdArgs, OutputStreamer* MD,
-	shared_ptr<InputStreamer>, bool, int Nthreads);
-bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn, bool MIDuse,
+bool process_DNA(vector< shared_ptr<DNA>>& tdn, bool MIDuse,
 	OutputStreamer* MD, int curThread);
 //bool read_paired_STRready(vector<vector< string >> tdn, bool MIDuse,
 //	OutputStreamer* MD, int curThread, bool keepPairHd, qual_score FastqVer);

@@ -44,9 +44,7 @@ public:
     // ReportStats
     bool bMedianCalcs;
 
-    const vector<unsigned int> &get_rstat_Vmed(int x) {
-        if (x == 1) { return rstat_VQmed; } else { return rstat_VSmed; }
-    }
+    const vector<unsigned int>& get_rstat_Vmed(int x);
 
     //median
     unsigned int rstat_totReads, rstat_NTs, rstat_qualSum, rstat_Qmed, rstat_Smed;
@@ -87,18 +85,9 @@ class MEstats {
 public:
     MEstats() :total_read_preMerge_(0), merged_counter_(0) {}
     ~MEstats() {}
-    void addStats(shared_ptr<MEstats> o) {
-        total_read_preMerge_ += o->total_read_preMerge_; merged_counter_ += o->merged_counter_;
-        BPwritten += o->BPwritten; BPmergeWritte += o->BPmergeWritte;
-    }
+    void addStats(shared_ptr<MEstats> o);
 
-    void print(ostream& give) {
-        if (!merged_counter_) { return; }
-        give << "merged reads: " << merged_counter_ << "/"
-            << total_read_preMerge_ << " (" << (double)merged_counter_ / total_read_preMerge_
-            << ")" << std::endl;
-
-    }
+    void print(ostream& give);
     //variables
     int total_read_preMerge_, merged_counter_;
     uint BPwritten, BPmergeWritte;
@@ -120,41 +109,23 @@ public:
     {
     }
 
-    ~ReportStats() {}
+    ~ReportStats() {
+        cdbg("~ReportStats: N DNAs: " + to_string(rstat_totReads) + " ");
+    }
     void reset();
     void addDNAStats(shared_ptr<DNA> d);
     //void mergeStats(data_MT &data);
-    void setbLvsQlogs(bool b) {
-        bLvsQlogs = b;
-    }
-    bool getbLvsQlogs() { return bLvsQlogs; }
+    void setbLvsQlogs(bool b);
+    bool getbLvsQlogs();
     //void addDNAStatsMT(shared_ptr<DNA> d, data_MT *data);
     void calcSummaryStats(float remSeqs, unsigned int min_l, float min_q);
     float calc_median(vector<uint>& in, float perc);
     void add_median2histo(vector<unsigned int>& in, vector<unsigned int>& histo);
     void addMedian2Histo(unsigned int in, vector<unsigned int>& histo);
-    void addMeanStats(unsigned int NT, unsigned int Qsum, float AccErr) {
-        rstat_NTs += NT; rstat_totReads++;
-        rstat_qualSum += Qsum; rstat_accumError += AccErr;
-    }
-    void addLvsQlogs(uint L, float avg, int med) {
-        if (!bLvsQlogs) { return; }
-        listOfLengths.push_back(L);
-        listOfQuals.push_back(avg);
-        listOfQualMeds.push_back((float)med);
-
-    }
+    void addMeanStats(unsigned int NT, unsigned int Qsum, float AccErr);
+    void addLvsQlogs(uint L, float avg, int med);
     // TEST IF PRODUCES SAME RESULTS
-    void addNtSpecQualScores(shared_ptr<DNA> dna) {
-        size_t sql = dna->getSequence().length();
-        const vector<qual_score> quals = dna->getQual();
-        const string seq = dna->getSequence();
-        for (uint i = 0; i < sql; i++) {
-            short p = NT_POS[(int)seq[i]];
-            QperNT[p] += (long)quals[i];
-            NTcounts[p]++;
-        }
-    }
+    void addNtSpecQualScores(shared_ptr<DNA> dna);
 
     unsigned int lowest(const vector<uint>& in);
     unsigned int highest(const vector<uint>& in);
@@ -164,10 +135,7 @@ public:
     void addRepStats(ReportStats&);
     bool bMedianCalcs;
     bool bLvsQlogs;
-    const vector<unsigned int>& get_rstat_Vmed(int x) {
-        if (x == 1) { return rstat_VQmed; }
-        else { return rstat_VSmed; }
-    }
+    const vector<unsigned int>& get_rstat_Vmed(int x);
     //const vector<unsigned int> &get_rstat_VSmed(){return rstat_VSmed;}
     vector<size_t> getVrange(int which);
 
@@ -180,7 +148,7 @@ protected:
     float RSQS, USQS;
     double rstat_accumError;
     vector<long> QperNT, NTcounts;
-    float GCcontent() { return float(NTcounts[2] + NTcounts[3]) / float(NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3]); }
+    float GCcontent();
 
     //bin based median calculation's
     vector<unsigned int> rstat_VQmed, rstat_VSmed;
@@ -224,8 +192,8 @@ public:
         //delete PreFilt; PreFilt = nullptr;
     }
 
-    void addPostFilt(shared_ptr<DNA> d) { PostFilt.addDNAStats(d); }
-    void addPreFilt(shared_ptr<DNA> d) { PreFilt.addDNAStats(d); }
+    void addPostFilt(shared_ptr<DNA> d);
+    void addPreFilt(shared_ptr<DNA> d);
 
     unsigned int maxL, PrimerFail, AvgQual, HomoNT, HomoNTtrimmed;
     unsigned int PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)
@@ -251,12 +219,9 @@ public:
     void addStats(shared_ptr<collectstats>, vector<int>& idx);
     void reset();
     //void ini_repStat(bool midQ) {}
-    void ini_repStat(void) {
-        //PostFilt = make_shared<ReportStats>(PostFilt.bMedianCalcs);
-        //PreFilt = make_shared<ReportStats>(PreFilt.bMedianCalcs);
-    }
-    void setbLvsQlogsPreFilt(bool b) { PreFilt.setbLvsQlogs(b); }
-    bool getbLvsQlogsPreFilt() { return PreFilt.getbLvsQlogs(); }
+    void ini_repStat(void);
+    void setbLvsQlogsPreFilt(bool b);
+    bool getbLvsQlogsPreFilt();
 
     ReportStats PostFilt;//green
     ReportStats PreFilt; //before filtering
@@ -273,16 +238,10 @@ public:
     {
     }
     ~GAstats() {}
-    void reset() {
-        totalRds = 0; totalGAs = 0; inccorrectPrimers = 0; missGAs = 0;
-        totalRdLen = 0.f; totalGALen = 0.f;
-        GAperBC.resize(0); CNTperBC.resize(0); inCorPrimPerBC.resize(0);
-        GALENperBC.resize(0); rdLENperBC.resize(0); GAfailsPerBC.resize(0);
-        GALDISperBC.resize(0); GALAMPLperBC.resize(0); missGAsPerBC.resize(0);
-    }
+    void reset();
     void setBCs(vector<string> SI, vector<string> B1, vector<string> B2);
     void addStats(shared_ptr<GAstats> o);
-    void addMissedGAs(int X) { missGAs += X; }
+    void addMissedGAs(int X);
 
     void printSummary(ostream& give);//summary of GA stats
     void printBCtabs(ostream& give); //stats per BC

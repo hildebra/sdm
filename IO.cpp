@@ -19,164 +19,108 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <queue>
 #include <mutex>
 #include <thread>
+#include "ThreadPool.h"
 #include "IO.h"
+#include "OutputStreamer.h"
+#include "Filters.h"
 #include "Benchmark.h"
 #include <future>
-//#include "IOMultithreaded.h"
+#include <utility>
 
-
-/*void read_single(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, 
-	shared_ptr<InputStreamer> IS, int Nthreads){
-	cdbg("Read single routine\n");
-
-	Filters* curFil = MD->getFilters();
-    curFil->singReadBC2();
-    int chkDerep(0);
-    bool checkReversedRead = curFil->checkRevRd();
-    bool cont(true); //bool sync(false);
-    
-    while (cont){
-        vector<shared_ptr<DNA>> tdn = IS->getDNAMC();
-        
-        if (tdn[0] == nullptr) {
-#ifdef DEBUG
-            cerr << "NULL read returned" << endl;
-#endif
-			cont = false;
-            break;
-        }
-
-
-        //collect some info on general run parameters
-        curFil->preFilterSeqStat(tdn[0], 0); // statistics preFilter
-        curFil->sTotalPlus(0);//mutex update total counts
-
-    
-        //thread starts here
-        int tagIdx(-2);
-        if (true && checkReversedRead ) {
-            string presentBC(""); int c_err(0);
-            int chkRev(1);
-            tagIdx = curFil->findTag(tdn[0], presentBC, c_err, true, chkRev);
-/*			if (tagIdx < 0) { //check if on reversed_ read
-				dnaTemp1->reverse_compliment();
-				tagIdx = curFil->findTag(dnaTemp1, presentBC, c_err, true);
-			}
-            
-            if (chkRev==0) {//no? undo revTranscr
-				tdn[0]->reverse_compliment();
-            }
-        }
-        tagIdx = -2;
-		int curThread = -1;
-        MD->analyzeDNA(tdn[0], -1, -1, tagIdx,curThread);
-    
-    
-        //thread ends here
-        //here BC has to be correctly set within DNA object
-        MD->dereplicateDNA(tdn[0], nullptr);//run in extra thread?
-		MD->write2Demulti(tdn[0], 0, curFil->getBCoffset());
-    
-        
-        //first save read in mem, then write if enough reads accumulate in mem
-        //extra thread for multithreading??
-
-        // This is a quality collecting step
-        if (!MD->saveForWrite(tdn[0],1, curThread)) {
-            cont = false;
-            break;
-		}
-		if (tdn[0]->isGreenQual()) {
-			chkDerep++;
-		}
-
-		//if (tdn!=NULL && ch1 != tdn->isGreenQual()){cerr<<"isGreenQual is != ch1! Aborting..\n";exit(12);}
-	}
-	MD->closeOutStreams();
-}
-*/
-//converts str to DNA
 
 void multi_read_paired_STRget(shared_ptr<InputStreamer> IS, OutputStreamer* MD, int curThread, 
 	int tmpBlockSize, bool MIDuse, bool keepPairHd, qual_score FastqVer) {
 
 
-	multi_tmp_lines* tmpLines = new multi_tmp_lines(tmpBlockSize);
+    std::unique_ptr<multi_tmp_lines> tmpLines = std::make_unique<multi_tmp_lines>(tmpBlockSize);
 	bool cont(true);
 	while (cont) {
-		cont = IS->getDNAlines(tmpLines, tmpBlockSize, MIDuse, true);
-		multi_read_paired_STRready(tmpLines, MIDuse, MD, curThread, keepPairHd, FastqVer);
+        {
+			Instr::ScopedTimer st(Instr::GETDNALINES);
+			cont = IS->getDNAlines(tmpLines.get(), tmpBlockSize, MIDuse, true);
+		}
+		multi_read_paired_STRready(tmpLines.get(), MIDuse, MD, curThread, keepPairHd, FastqVer);
 	}
 
-	delete tmpLines;
+	// unique_ptr will clean up tmpLines
 
 }
+
+
 bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 	bool MIDuse, OutputStreamer* MD, int curThread,
 	bool keepPairHd, qual_score FastqVer) {
-	
+
 	//for loop over tmplines, each entry is a read pair
+	Instr::ScopedTimer st_multi(Instr::MULTI_READ_READY);
+	// measure async lag if submit_ts set
+	if (tmpLines->submit_ts != 0) {
+		long long lag = Instr::now_us() - tmpLines->submit_ts;
+		Instr::add_us(Instr::ASYNC_LAG, lag);
+		tmpLines->submit_ts = 0;
+	}
 	bool isOK(true);
+	vector<shared_ptr<DNA>> ret(3, nullptr);
 
 	for (size_t k = 0; k < tmpLines->size(); k++) {
-
-		vector<shared_ptr<DNA>> ret(3, nullptr);
+		ret[0].reset();
+		ret[1].reset();
 		//cdbg("rpS");
-		ret[0] = str2DNA(tmpLines->tmp[k][0], keepPairHd, FastqVer, 0);
-		ret[1] = str2DNA(tmpLines->tmp[k][1], keepPairHd, FastqVer, 1);
+            {
+				Instr::ScopedTimer st(Instr::STR2DNA);
+				ret[0] = str2DNA(std::move(tmpLines->tmp[k][0]), keepPairHd, FastqVer, 0);
+			}
+            {
+				Instr::ScopedTimer st(Instr::STR2DNA);
+				ret[1] = str2DNA(std::move(tmpLines->tmp[k][1]), keepPairHd, FastqVer, 1);
+			}
 		if (MIDuse) {
-			ret[2] = str2DNA(tmpLines->tmp[k][2], keepPairHd, FastqVer, 2);
+			ret[2].reset();
+                {
+					Instr::ScopedTimer st(Instr::STR2DNA);
+					ret[2] = str2DNA(std::move(tmpLines->tmp[k][2]), keepPairHd, FastqVer, 2);
+				}
+		}
+		if (ret[0] == nullptr) {
+			continue;
+			//let's just make sure that there are not trailing objects..
 		}
 
 		//GoldenAxe requires some extra rounds of checking DNA
-		if (ret[0] != nullptr && MD->getFilters(curThread)->isGoldAxe()) {
+		if (MD->getFilters(curThread)->isGoldAxe()) {
 			vector<shared_ptr<DNA>> multDNA = MD->getFilters(curThread)->GoldenAxe(ret);
-			vector<shared_ptr<DNA>> ret2(3, nullptr);
 			int iniBCsGA(-2);
 			if (multDNA.size()) {
 				iniBCsGA = multDNA[0]->getBCnumber();
 			}
 			for (size_t xi = 0; xi < multDNA.size(); xi++) {
+				vector<shared_ptr<DNA>> ret2(3, nullptr);
+				//ret2[0].reset();ret2[1].reset();ret2[2].reset();
 				ret2[0] = multDNA[xi];
-				isOK=read_paired_DNAready(ret2, MIDuse, MD, curThread);
+				isOK=process_DNA(ret2, MIDuse, MD, curThread);
 				if (ret2[0]->getBCnumber() != iniBCsGA) {//DEBUG
 					int BCnewWrong = ret2[0]->getBCnumber();
 					cerr << "Problem in GA read \n" << tmpLines->tmp[k][0][0]<<"\n"<< tmpLines->tmp[k][0][1] << "\n:Different BCs detected\n";
 				}
 			}
 		} else {
-			isOK = read_paired_DNAready(ret, MIDuse, MD, curThread);
+			isOK = process_DNA(ret, MIDuse, MD, curThread);
 		}
-		if (!isOK) {
-			break;
-		}
+		//if (!isOK) {break;}
 	}
 	//delete tmpLines;
 	//no longer needed..
 	return isOK;
 }
-/*
-bool read_paired_STRready(vector< vector< string>> tmpLines,
-	bool MIDuse, OutputStreamer* MD, int curThread,
-	bool keepPairHd, qual_score FastqVer) {
-	vector<shared_ptr<DNA>> ret(3, nullptr);
-	//cdbg("rpS");
-	ret[0] = str2DNA(tmpLines[0], keepPairHd, FastqVer, 0);
-	ret[1] = str2DNA(tmpLines[1], keepPairHd, FastqVer, 1);
-	if (MIDuse) {
-		ret[2] = str2DNA(tmpLines[2], keepPairHd, FastqVer, 2);
-	}
 
-	return read_paired_DNAready(ret, MIDuse, MD, curThread);
-}
-*/
 //is called from a while loop, that reads the DNA pairs
-bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
+bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 	bool MIDuse, OutputStreamer* MD, int curThread) {
 
 	if (tdn[0] == nullptr) {
 	    return false;
 	} //|| tdn->length()==0
+    Instr::ScopedTimer st_proc(Instr::PROCESS_DNA);
 	//DNA objects as they should be??
 	if (MIDuse && tdn[2] == nullptr) {
 		//cerr << "Missing MID read pair.\n";		exit(4);
@@ -190,11 +134,14 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	//MD->checkFastqHeadVersion(tdn[0]);
 	//testreadpair.lock();
 
-	//cdbg("read_paired_DNAready"+ tdn[0]->getId()+"\n");
+	//cdbg("process_DNA"+ tdn[0]->getId()+"\n");
 
 	Filters* curFil = MD->getFilters(curThread);
 	//register read at all with stat counter:
-	curFil->sTotalPlus(0); curFil->sTotalPlus(1);
+   curFil->sTotalPlus(0);
+	if (tdn[1] != nullptr || curFil->isPaired() == 2) {
+		curFil->sTotalPlus(1);
+	}
 	//collect some info on general run parameters
 	curFil->preFilterSeqStat(tdn[0], 0);
 	curFil->preFilterSeqStat(tdn[1], 1);
@@ -394,10 +341,15 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 	//writing of pairs needs to be mutex locked 
 	int Cstr1(100), Cstr2(100);
 	//cdbg("sFW\n");
-	bool owr1 = MD->saveForWrite(tdn[0], idx1, curThread, Cstr1,false);
-	bool owr2 = MD->saveForWrite(tdn[1], idx2, curThread, Cstr2,false);
-	//mutex version to ensure read pairs together..
-	MD->writeForWrite(tdn[0],idx1,Cstr1,tdn[1],idx2,Cstr2);
+    bool owr1;
+	bool owr2;
+	{
+		Instr::ScopedTimer st_out(Instr::OUTPUT_WRITE);
+		owr1 = MD->saveForWrite(tdn[0], idx1, curThread, Cstr1,false);
+		owr2 = MD->saveForWrite(tdn[1], idx2, curThread, Cstr2,false);
+		//mutex version to ensure read pairs together..
+		MD->writeForWrite(tdn[0],idx1,Cstr1,tdn[1],idx2,Cstr2);
+	}
 
 	if (!owr1 || (!owr2 && read2notNull)) {
 		return false;
@@ -408,54 +360,6 @@ bool read_paired_DNAready(vector< shared_ptr<DNA>> tdn,
 
 
 
-bool read_paired2(OptContainer* cmdArgs, OutputStreamer* MD,
-	shared_ptr<InputStreamer> IS, bool MIDuse, int Nthreads) {
-
-	DNAmap oldMIDs;
-	bool fqHeadVer(true);
-	cdbg("Paired reads routine v2\n");
-
-	//multithreading setup
-	//int Nthrds = atoi((*cmdArgs)["-threads"].c_str()) -1 ;
-	vector<std::thread> slots;
-
-	int DNAinMem(0);
-	bool cont(true), cont2(true), cont3(true);
-	bool keepPairedHD = IS->keepPairedHD();
-	int tmpBlockSize = atoi((*cmdArgs)["-iniBlockSize"].c_str());
-
-	
-	//find out the fastqVer, fix across fastq's
-	qual_score fastqVer;
-	multi_tmp_lines* tmpO = new multi_tmp_lines(tmpBlockSize);
-	cont = IS->getDNAlines(tmpO, tmpBlockSize, MIDuse,true);
-	fastqVer = IS->fastQscore();
-	shared_ptr<DNA> tmp = str2DNA(tmpO->tmp[0][0], keepPairedHD, fastqVer, 0);
-	MD->checkFastqHeadVersion(tmp);			fqHeadVer = false;
-	delete tmpO;
-	IS->allStreamReset();
-
-
-
-	for (int i = 0; i < Nthreads; ++i) {
-		// Each thread adds two numbers
-		slots.emplace_back(multi_read_paired_STRget, 
-			IS, MD, i, tmpBlockSize, MIDuse,  keepPairedHD, fastqVer);
-	}
-
-
-	for (auto& thread : slots) {
-		thread.join();
-	}
-
-	//close shop
-	//MD->revConstellationCnts(revConstellation);
-	MD->closeOutStreams();
-
-	return true;
-}
-
-
 struct job2 {
 	bool inUse = false;
 	future<bool> job;
@@ -464,6 +368,9 @@ struct job2 {
 
 bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD, 
 	shared_ptr<InputStreamer> IS, int Nthreads) {
+	if (Nthreads < 1) {
+		Nthreads = 1;
+	}
 	
 	DNAmap oldMIDs;
 	bool MIDuse = IS->hasMIDseqs();
@@ -497,10 +404,57 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 	//vector<vector<string>> tmpLines(3, tmpLines2);
 
 
-	//ini blocks of empty strings for later reuse..
+ //ini blocks of empty strings for later reuse..
 	int tmpBlockSize = atoi((*cmdArgs)["-iniBlockSize"].c_str());
-	vector<multi_tmp_lines*> tmpStrHolders(Nthreads, nullptr);
+	if (tmpBlockSize < 1) {
+		tmpBlockSize = 1;
+	}
+
+   qual_score fastqVer = 33;
+
+	// Probe one block first and adapt batch size for short reads to reduce task scheduling overhead.
+	// This keeps behavior unchanged for longer reads while increasing reads/task when records are tiny.
+	int taskBatchMultiplier = 1;
 	string empty(""); empty.reserve(151);
+	{
+		cdbg("task batch size probe");
+		multi_tmp_lines probe(tmpBlockSize);
+		bool probeCont = IS->getDNAlines(&probe, tmpBlockSize, MIDuse, true);
+		if (probeCont && probe.size() > 0 && probe.tmp[0].size() > 0 && probe.tmp[0][0].size() > 1) {
+			const size_t probeReadLen = probe.tmp[0][0][1].size();
+			if (probeReadLen > 0) {
+				if (probeReadLen <= 60) {
+					taskBatchMultiplier = 32;
+				}
+				else if (probeReadLen <= 110) {
+					taskBatchMultiplier = 16;
+				}
+				else if (probeReadLen <= 160) {
+					taskBatchMultiplier = 8;
+				}
+				else if (probeReadLen <= 350) {
+					taskBatchMultiplier = 4;
+				}
+			}
+
+			empty.reserve(probeReadLen + 1);
+
+			fastqVer = IS->fastQscore();
+			if (fqHeadVer && probe.tmp[0][0].size() > 0) {
+				shared_ptr<DNA> tmp = str2DNA(probe.tmp[0][0], keepPairedHD, fastqVer, 0);
+				MD->checkFastqHeadVersion(tmp);
+				fqHeadVer = false;
+			}
+		}
+		IS->allStreamReset();
+		cdbg( " is " + to_string(taskBatchMultiplier) + ". ");
+
+	}
+	if (taskBatchMultiplier > 1 && tmpBlockSize <= (INT_MAX / taskBatchMultiplier)) {
+		tmpBlockSize *= taskBatchMultiplier;
+	}
+	cdbg("read_seq check3 ");
+	vector<multi_tmp_lines*> tmpStrHolders(Nthreads, nullptr);	
 	vector<string>tmpLines2(4, empty);
 	vector<vector<string>> tmpLines(3, tmpLines2);
 	for (size_t ii = 0; ii < Nthreads; ii++) {
@@ -509,18 +463,13 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 		tmpStrHolders[ii] = tmpO;
 	}
 
-	//object holding converted DNA.. not longer used
+    //object holding converted DNA.. not longer used
 	//vector<shared_ptr<DNA>> tdn(3, nullptr);
-	qual_score fastqVer;
-
+	cdbg("read_seq check4 ");
+	//doMC = false;//DEBUG
 	while ( cont ) {
-		//bool sync = false;
-		//tests of different ways to read files..
-		
-
-		//cnt++;
 		//decide on MC or single core submission route
-		if (true && doMC) { // multithreading
+		if (doMC) { // multithreading
 
 			//step 0: threadpool checks
 			bool notSubm(true);
@@ -531,45 +480,50 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 			}
 			//now thread X is empty.. and eventual reads in it as well
 
-			//step 1: read 4 lines from .fq
-			cont = IS->getDNAlines(tmpStrHolders[thrCnt], tmpBlockSize, MIDuse);
-			
-			//step 1b: set fq version (if not done already)
-			fastqVer = IS->fastQscore();
-			if (fqHeadVer && tmpStrHolders[thrCnt]->tmp.size()>0) { //some things just need to be done
-				if (tmpStrHolders[thrCnt]->tmp[0][0].size() < 0) {
-//					cerr << "Error: empty fastq object. Please check that your input fastq contains sequences?"; exit(623);
-					throw std::runtime_error("Error: empty fastq object. Please check that your input fastq contains sequences?");
-				}
-				shared_ptr<DNA> tmp = str2DNA(tmpStrHolders[thrCnt]->tmp[0][0], keepPairedHD, fastqVer, 0);
-				MD->checkFastqHeadVersion(tmp);			fqHeadVer = false;
+            //step 1: read block from input into tmp buffer
+			{
+				Instr::ScopedTimer st(Instr::GETDNALINES);
+				cont = IS->getDNAlines(tmpStrHolders[thrCnt], tmpBlockSize, MIDuse);
 			}
 
-			//step 2: convert string, process, discard
-			if (slots[thrCnt].inUse == false) {
-				slots[thrCnt].job = async(std::launch::async, multi_read_paired_STRready,
-					tmpStrHolders[thrCnt], MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
-				slots[thrCnt].inUse = true;
-				notSubm = false;
+			// If we read any records into the tmp buffer, submit them for processing.
+			// If cont==false but buffer contains data (partial final block), still process it.
+			if (tmpStrHolders[thrCnt]->size() > 0) {
+                if (slots[thrCnt].inUse == false) {
+					// record submit timestamp and measure async creation cost
+					long long submit_ts = Instr::now_us();
+					tmpStrHolders[thrCnt]->submit_ts = submit_ts;
+					{
+						Instr::ScopedTimer st_async(Instr::ASYNC_SUBMIT);
+						slots[thrCnt].job = ThreadPool::instance().submit(multi_read_paired_STRready,
+							tmpStrHolders[thrCnt], MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
+						}
+					slots[thrCnt].inUse = true;
+					notSubm = false;
+				}
 			}
+
+			// If no data was read and cont is false, EOF reached without data -> stop.
+			if (!cont && tmpStrHolders[thrCnt]->size() == 0) { break; }
 			thrCnt++;
 			if (thrCnt >= Nthreads) { thrCnt = 0; }
-			if (!cont) { break; }
+           if (!cont) { break; }
 		} else {//single thread
-			cont = IS->getDNAlines(tmpStrHolders[thrCnt], tmpBlockSize, MIDuse); fastqVer = IS->fastQscore();
-			if (fqHeadVer ) { //some things just need to be done
-				if (tmpStrHolders[thrCnt]->tmp[0][0].size() < 0) { 
-					//cerr << "Error: empty fastq object. Please check that your input fastq contains sequences?"; exit(623); 
-					throw std::runtime_error("Error: empty fastq object. Please check that your input fastq contains sequences?");
-				}
-				shared_ptr<DNA> tmp = str2DNA(tmpStrHolders[thrCnt]->tmp[0][0], keepPairedHD, fastqVer, 0);
-				MD->checkFastqHeadVersion(tmp);			fqHeadVer = false;
+           cont = IS->getDNAlines(tmpStrHolders[thrCnt], tmpBlockSize, MIDuse);
+			// If we read any records into the tmp buffer, process them even if cont==false (partial final block).
+			if (tmpStrHolders[thrCnt]->size() > 0) {
+				//fastqVer = IS->fastQscore();
+				bool cont2 = multi_read_paired_STRready(tmpStrHolders[thrCnt], MIDuse, MD, 0, keepPairedHD, fastqVer);
 			}
-			bool cont2 = multi_read_paired_STRready(tmpStrHolders[thrCnt], MIDuse, MD, 0, keepPairedHD, fastqVer);
+			if (!cont && tmpStrHolders[thrCnt]->size() == 0) { break; }
 				//if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
 			//}
 		}
 	}
+	cdbg("read_seq check5 ");
+
+	//last jobs 
+
 
 	//get all slots
 	for (int x = thrCnt; x < slots.size(); x++) {//better load balancing
@@ -593,6 +547,10 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 	for (size_t ii = 0; ii < Nthreads; ii++) {
 		delete tmpStrHolders[ii];
 	}
+	cdbg("read_seq check6 ");
+
+	// Print instrumentation results
+	Instr::printResults(std::cerr);
 
 	return true;
 }
@@ -675,7 +633,7 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 		(*cmdArgs)["-XfirstReadsRead"] = "";
 	}
 	if (cmdArgs->find("-iniBlockSize") == cmdArgs->end()) {
-		(*cmdArgs)["-iniBlockSize"] = "100";
+		(*cmdArgs)["-iniBlockSize"] = "120";
 	}
 	//filter sequence file for a specific subset of sequences
 	//these arguments can only occur together
@@ -1341,7 +1299,7 @@ void rewriteNumbers(OptContainer* cmdArgs){
     ofna.open((*cmdArgs)["-o_fna"].c_str(),ios::out);
     while (getline(fna,line,'\n')){
 
-        if (line[0]=='$'){ //$ marks comment
+        if (line.empty() || line[0]=='$'){ //$ marks comment
             continue;
         }
         if(line[0] == '>'){ //fasta description

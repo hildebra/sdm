@@ -19,6 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 #include "IO.h"
+#include "Filters.h"
 #include "Benchmark.h"
 #include "ReadMerger.h"
 

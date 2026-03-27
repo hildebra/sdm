@@ -4,6 +4,109 @@
 
 #include "Statistics.h"
 
+const vector<unsigned int>& Statistics::get_rstat_Vmed(int x) {
+    if (x == 1) { return rstat_VQmed; }
+    return rstat_VSmed;
+}
+
+void MEstats::addStats(shared_ptr<MEstats> o) {
+    total_read_preMerge_ += o->total_read_preMerge_;
+    merged_counter_ += o->merged_counter_;
+    BPwritten += o->BPwritten;
+    BPmergeWritte += o->BPmergeWritte;
+}
+
+void MEstats::print(ostream& give) {
+    if (!merged_counter_) { return; }
+    give << "merged reads: " << merged_counter_ << "/"
+        << total_read_preMerge_ << " (" << (double)merged_counter_ / total_read_preMerge_
+        << ")" << std::endl;
+}
+
+void ReportStats::setbLvsQlogs(bool b) {
+    bLvsQlogs = b;
+}
+
+bool ReportStats::getbLvsQlogs() {
+    return bLvsQlogs;
+}
+
+void ReportStats::addMeanStats(unsigned int NT, unsigned int Qsum, float AccErr) {
+    rstat_NTs += NT;
+    rstat_qualSum += Qsum;
+    rstat_accumError += AccErr;
+}
+
+void ReportStats::addLvsQlogs(uint L, float avg, int med) {
+    if (!bLvsQlogs) { return; }
+    listOfLengths.push_back(L);
+    listOfQuals.push_back(avg);
+    listOfQualMeds.push_back((float)med);
+}
+
+void ReportStats::addNtSpecQualScores(shared_ptr<DNA> dna) {
+    size_t sql = dna->getSequence().length();
+    const vector<qual_score> quals = dna->getQual();
+    const string seq = dna->getSequence();
+    for (uint i = 0; i < sql; i++) {
+        short p = NT_POS[(unsigned char)seq[i]];
+        QperNT[p] += (long)quals[i];
+        NTcounts[p]++;
+    }
+}
+
+const vector<unsigned int>& ReportStats::get_rstat_Vmed(int x) {
+    if (x == 1) { return rstat_VQmed; }
+    return rstat_VSmed;
+}
+
+float ReportStats::GCcontent() {
+    return float(NTcounts[2] + NTcounts[3]) / float(NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3]);
+}
+
+void collectstats::addPostFilt(shared_ptr<DNA> d) {
+    PostFilt.addDNAStats(d);
+}
+
+void collectstats::addPreFilt(shared_ptr<DNA> d) {
+    PreFilt.addDNAStats(d);
+}
+
+void collectstats::ini_repStat(void) {
+    //PostFilt = make_shared<ReportStats>(PostFilt.bMedianCalcs);
+    //PreFilt = make_shared<ReportStats>(PreFilt.bMedianCalcs);
+}
+
+void collectstats::setbLvsQlogsPreFilt(bool b) {
+    PreFilt.setbLvsQlogs(b);
+}
+
+bool collectstats::getbLvsQlogsPreFilt() {
+    return PreFilt.getbLvsQlogs();
+}
+
+void GAstats::reset() {
+    totalRds = 0;
+    totalGAs = 0;
+    inccorrectPrimers = 0;
+    missGAs = 0;
+    totalRdLen = 0.f;
+    totalGALen = 0.f;
+    GAperBC.resize(0);
+    CNTperBC.resize(0);
+    inCorPrimPerBC.resize(0);
+    GALENperBC.resize(0);
+    rdLENperBC.resize(0);
+    GAfailsPerBC.resize(0);
+    GALDISperBC.resize(0);
+    GALAMPLperBC.resize(0);
+    missGAsPerBC.resize(0);
+}
+
+void GAstats::addMissedGAs(int X) {
+    missGAs += X;
+}
+
 
 
 void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx) {
@@ -12,7 +115,7 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx) {
     }
     int BCS = (int)BarcodeDetected.size();
     for (unsigned int i = 0; i < idx.size(); i++) {
-        if (idx[i] >= BCS) { return; }
+        if (idx[i] >= BCS) { continue; }
         //assert(idx[i] < BCS);
         BarcodeDetected[idx[i]] += cs->BarcodeDetected[i];
         BarcodeDetectedFail[idx[i]] += cs->BarcodeDetectedFail[i];
@@ -25,9 +128,9 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx) {
     MaxAmb += cs->MaxAmb; QualWin += cs->QualWin;
     Trimmed += cs->Trimmed;
     AccErrTrimmed += cs->AccErrTrimmed;
-    total.fetch_add(cs->total.load(), std::memory_order_relaxed);
+    total.fetch_add(cs->total.load(std::memory_order_relaxed), std::memory_order_relaxed);
     QWinTrimmed += cs->QWinTrimmed;
-    totalRejected += cs->totalRejected;
+    totalRejected.fetch_add(cs->totalRejected.load(std::memory_order_relaxed), std::memory_order_relaxed);
     fail_correct_BC += cs->fail_correct_BC; suc_correct_BC += cs->suc_correct_BC;
     failedDNAread += cs->failedDNAread; adapterRem += cs->adapterRem;
     RevPrimFound += cs->RevPrimFound;
@@ -35,7 +138,8 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx) {
     BinomialErr += cs->BinomialErr;
     dblTagFail += cs->dblTagFail;
     DerepAddBadSeq += cs->DerepAddBadSeq;
-    total2 += cs->total2; totalSuccess += cs->totalSuccess;
+    total2.fetch_add(cs->total2.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    totalSuccess += cs->totalSuccess;
     swappedRds += cs->swappedRds; reversedRds += cs->reversedRds;
     PostFilt.addRepStats(cs->PostFilt);
     PreFilt.addRepStats(cs->PreFilt);
@@ -64,6 +168,7 @@ void collectstats::reset() {
 
 
 void ReportStats::addDNAStats(shared_ptr<DNA> d) {
+    rstat_totReads++;
     float avq = d->getAvgQual();
     float ace = (float)d->getAccumError();
     uint len = d->length();
@@ -71,7 +176,7 @@ void ReportStats::addDNAStats(shared_ptr<DNA> d) {
     if (bLvsQlogs) {
         median = d->getMedianQual();
     }
-    stats_mutex.lock();
+    //stats_mutex.lock();
     //pretty fast
     addMeanStats(len, (int)avq, ace);
     //NT specific quality scores
@@ -85,7 +190,7 @@ void ReportStats::addDNAStats(shared_ptr<DNA> d) {
     if (bLvsQlogs) {
         addLvsQlogs(len, avq, median);
     }
-    stats_mutex.unlock();
+    //stats_mutex.unlock();
     if (bMedianCalcs) {
         //quali
         addMedian2Histo(uint(avq + 0.5f), rstat_VQmed); // Thread safe (?)
@@ -293,13 +398,15 @@ float ReportStats::calc_median(vector<uint>& in, float perc) {
 }
 void ReportStats::add_median2histo(vector<unsigned int>& in, vector<unsigned int>& histo)
 {
-    unsigned int max = *max_element(in.begin(), in.end());
-    if (max > histo.size()) {
-        if (max > 10000) { cerr << "max bigger 10000.\n"; exit(77); }
-        histo.resize(max, 0);
+    if (in.empty()) return;
+    unsigned int maxv = *max_element(in.begin(), in.end());
+    if (maxv + 1 > histo.size()) {
+        if (maxv > 10000) { cerr << "max bigger 10000.\n"; exit(77); }
+        histo.resize(maxv + 1, 0);
     }
-    for (unsigned int i = 0; i < histo.size(); i++) {
-        histo[in[i]]++;
+    for (size_t i = 0; i < in.size(); ++i) {
+        unsigned int v = in[i];
+        histo[v]++;
     }
 }
 void ReportStats::calcSummaryStats(float remSeqs, unsigned int min_l, float min_q) {
@@ -335,10 +442,9 @@ vector<size_t> ReportStats::medVrange(const vector<uint> x) {
 
 void ReportStats::addMedian2Histo(const uint in, vector<unsigned int>& histo)
 {
+    std::lock_guard<std::mutex> lock(stats_mutex);
     if (in >= histo.size()) {
-        stats_mutex.lock();
         histo.resize(in + 3, 0);
-        stats_mutex.unlock();
         assert(in < 1000000);
     }
     histo[in]++;
@@ -347,7 +453,7 @@ void ReportStats::addMedian2Histo(const uint in, vector<unsigned int>& histo)
 
 
 void GAstats::addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int missedGAs) {
-    totalRds++; totalGAs += GA.size();
+  totalRds++; totalGAs += (uint)GA.size();
     totalRdLen += dn->length();
     missGAs += missedGAs;
     double totL(0.f); int incP(0);
@@ -372,10 +478,10 @@ void GAstats::addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int
         if (dn->isFailed()) {
             GAfailsPerBC[idx]++;
         } else {
-            int GAL = GA.size();
+            int GAL = (int)GA.size();
             GAperBC[idx] += GAL;
             CNTperBC[idx]++;
-            GALENperBC[idx] += totL;
+            GALENperBC[idx] += (int)totL;
             inCorPrimPerBC[idx] += incP;
             rdLENperBC[idx] += dn->length();
             if (GALDISperBC[idx].size() < (GAL+1)) {
@@ -449,7 +555,7 @@ void GAstats::printBCAmpliNdistribution(ostream& give) {
     assert(GAperBC.size() == GALAMPLperBC.size()); assert(GAperBC.size() == GALDISperBC.size());
     int maxL(0);
     for (unsigned int i = 0; i < GALDISperBC.size(); i++) {
-        if (GALDISperBC[i].size() > maxL) { maxL = GALDISperBC[i].size(); }
+     if ((int)GALDISperBC[i].size() > maxL) { maxL = (int)GALDISperBC[i].size(); }
     }
     give << "SampleID";
     for (int i = 0; i < maxL; i++) { give << "\t#Amplis_" << i; }
@@ -478,14 +584,17 @@ void GAstats::printBCAmpliLdistribution(ostream& give) {
         if (GALAMPLperBC[i].size() > maxL) { maxL = (int)GALAMPLperBC[i].size(); }
     }
     give << "SampleID";
-    for (uint i = 0; i < maxL; i++) { give << "\t#Amplis_" << i; }
+  for (int i = 0; i < maxL; i++) { give << "\t#Amplis_" << i; }
     give << endl;
 
     for (unsigned int idx = 0; idx < GALAMPLperBC.size(); idx++) {
         give << SmplIDBC[idx];
         for (int i = 0; i < maxL; i++) {
-            if (i < GALAMPLperBC[idx].size() && GALAMPLperBC[idx][i]>0) {
-                give << "\t" << (GALAMPLperBC[idx][i]/(double)GALDISperBC[idx][i]/(double)i);
+            if (i == 0) {
+                give << "\t0"; // avoid division by zero
+            }
+            else if (i < (int)GALAMPLperBC[idx].size() && i < (int)GALDISperBC[idx].size() && GALDISperBC[idx][i] > 0) {
+                give << "\t" << (GALAMPLperBC[idx][i] / (double)GALDISperBC[idx][i] / (double)i);
             }
             else {
                 give << "\t0";

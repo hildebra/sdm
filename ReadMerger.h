@@ -3,7 +3,9 @@
 //
 
 #pragma once
+#ifndef _CRT_SECURE_NO_DEPRECATE
 #define _CRT_SECURE_NO_DEPRECATE
+#endif
 
 #include <cstdio>
 #include <vector>
@@ -129,7 +131,7 @@ public:
 
 	//functions
 	ReadMerger(bool collStats=false):b_takeStats(collStats){}
-	~ReadMerger() { cdbg("Destroyed Read Merger\n"); }
+	~ReadMerger() { cdbg("Destroyed Read Merger.. "); }
 
 	//empty dummy for now
 	void addRMstats(ReadMerger*) {}

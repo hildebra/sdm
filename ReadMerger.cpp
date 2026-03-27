@@ -304,11 +304,11 @@ bool ReadMerger::findSeed(std::string& sequence1, std::string& sequence2, MergeR
 			break;
 		}
 		if (offset >= end) break;
-		seedmap_.insert({ SeedStr(sequence2.c_str() + offset, seed_size_), offset });
-		seedmap_.insert({ SeedStr(sequence2.c_str() + sequence2.length() - offset, seed_size_), sequence2.length() - offset });
-		if (check_reverse_complement_) {
-			seedmap_.insert({ SeedStr(reverse_complement_tmp_.c_str() + offset, seed_size_), offset * -1 });
-			seedmap_.insert({ SeedStr(reverse_complement_tmp_.c_str() + reverse_complement_tmp_.size() - offset, seed_size_), (sequence2.length() - offset) * -1 });
+       seedmap_.insert({ SeedStr(sequence2.c_str() + offset, seed_size_), (int)offset });
+		seedmap_.insert({ SeedStr(sequence2.c_str() + sequence2.length() - offset, seed_size_), (int)(sequence2.length() - offset) });
+        if (check_reverse_complement_) {
+			seedmap_.insert({ SeedStr(reverse_complement_tmp_.c_str() + offset, seed_size_), (int)offset * -1 });
+			seedmap_.insert({ SeedStr(reverse_complement_tmp_.c_str() + reverse_complement_tmp_.size() - offset, seed_size_), (int)(sequence2.length() - offset) * -1 });
 			//                auto rev_seed1 = std::string_view(reverse_complement_tmp_.c_str() + offset, seed_size_);
 			//                auto rev_seed2 = std::string_view(reverse_complement_tmp_.c_str() + reverse_complement_tmp_.size() - offset, seed_size_);
 			//                seedmap_[rev_seed1] = offset * -1;
@@ -449,10 +449,9 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	const size_t new_length = !overlap_only * max(read1->merge_offset_ + seq1_length, read2->merge_offset_ + seq2_length) + overlap_only * overlap;
 
 	//        std::cout << "newlength> " << new_length << std::endl;
-	//string new_seq = string(new_length + 1,'N');//
-	char* new_seq = { DBG_NEW char[new_length + 1] };
-	//char new_seq[new_length + 1];
-	new_seq[new_length] = '\0';
+    // use std::string instead of manual new[] buffer
+	std::string new_seq;
+	new_seq.assign(new_length, 'N');
 	std::vector<qual_score> new_qual(new_length);
 
 	int pos1 = 0;
@@ -464,15 +463,15 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	if (!overlap_only) {
 		//can I copy over r1 or r2 into first part?
 		//this is for the head
-		if (read1->merge_offset_) {
-			memcpy(new_seq, Seq2.c_str(), read1->merge_offset_);
+        if (read1->merge_offset_) {
+			new_seq.replace(0, read1->merge_offset_, Seq2.c_str(), read1->merge_offset_);
 			for (int i = 0; i < read1->merge_offset_; i++) {
 				new_qual[i] = Qual2[i];
 			}
 			//            overlap_start = read1->merge_offset_;
 		}
-		else if (read2->merge_offset_) {
-			memcpy(new_seq, Seq1.c_str(), read2->merge_offset_);
+        else if (read2->merge_offset_) {
+			new_seq.replace(0, read2->merge_offset_, Seq1.c_str(), read2->merge_offset_);
 			for (int i = 0; i < read2->merge_offset_; i++) {
 				new_qual[i] = Qual1[i];
 			}
@@ -573,12 +572,11 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	//        std::cout << "tail: " << std::endl;
 	//        std::cout << "new: " << std::string(new_seq) << std::endl;
 
-	//        std::string merged_sequence(new_seq);
+    //        std::string merged_sequence(new_seq);
 	//        std::string test = "IAMATESTSTRING";
 
 	shared_ptr<DNA> merged_read = make_shared<DNA>();
-	merged_read->setSequence(std::string(new_seq));
-	delete[] new_seq;
+	merged_read->setSequence(new_seq);
 	merged_read->setQual(move(new_qual));
 	merged_read->setNewID(read1->getId());// +"_merged");
 	merged_read->getEssentialsFts(read1);

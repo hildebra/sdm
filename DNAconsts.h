@@ -61,7 +61,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define _isa//1gzip
 #define _iz//lib
 
+#ifndef _CRT_SECURE_NO_DEPRECATE
 #define _CRT_SECURE_NO_DEPRECATE
+#endif
 
 //read gzip'd files using zlib.h
 #if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
@@ -140,7 +142,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.09: fixed empty file crash
 //3.10: counter stats changed to atomic (issue #10)
 //3.11: added an option trimHomonucleotide with a default of 12 (first trims homo-nt runs from 3' side of reads)
-static const char* sdm_version = "3.11";
+//3.12: 22.3.26: used copilot to remove a lot of raw pointers
+//3.20: 23.3.26: completely changed InputStreamer with AI help
+//3.21: 24.3.26: consistency checks in filter, threadsafe behaviour of IO, performance optimizations (with AI)
+//3.23: 25.3.26: removed bug that led to too few seqs processed
+//3.24: 26.3.26: performance optimizations to reduce object churn, threadpool implemented
+static const char* sdm_version = "3.24";
 static const char* sdm_status = "beta";
 
 
