@@ -147,7 +147,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.21: 24.3.26: consistency checks in filter, threadsafe behaviour of IO, performance optimizations (with AI)
 //3.23: 25.3.26: removed bug that led to too few seqs processed
 //3.24: 26.3.26: performance optimizations to reduce object churn, threadpool implemented
-static const char* sdm_version = "3.24";
+//3.26: 29.3.26: reworked "betterDNA" functions, to put more emphasis on selcting merged reads. Also improved performance and stability of ReadMerger functions
+static const char* sdm_version = "3.25";
 static const char* sdm_status = "beta";
 
 

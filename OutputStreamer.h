@@ -11,6 +11,7 @@
 #include <mutex>
 #include <future>
 #include <memory>
+#include <vector>
 #include <atomic>
 
 
@@ -42,9 +43,9 @@ typedef gzFile_t* gzFile;
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
     ofbufstream() :file("T"), keeper(0), keeperW(0), modeIO(ios::app), used(0), usedW(0),
-        coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(0), hasKickoff(false) {}
-    ofbufstream(size_t bufferS) :file("T"), keeper(0), keeperW(0), modeIO(ios::app), used(0), usedW(0),
-        coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(bufferS), hasKickoff(false) {
+		coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(0) {}
+	ofbufstream(size_t bufferS) :file("T"), keeper(0), keeperW(0), modeIO(ios::app), used(0), usedW(0),
+		coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(bufferS) {
 
     }
     ofbufstream(const string IF, int mif, bool isMC = false, size_t bufferS = 20000);
@@ -61,6 +62,7 @@ private:
     mutex append_mtx_;
     mutex output_mtx;
     bool internalWrite(bool closeThis);
+    bool internalWriteBuffer(std::vector<char>&& buf, bool closeThis);
     void write(std::string s, std::string file);
     void writeStream(bool doKickoff = true);
 
@@ -82,8 +84,9 @@ private:
 	// Use a persistent thread-pool for task submission
 	bool use_thread_pool = false;
     // end
-    future<bool> writeKickoff;
-    bool hasKickoff = false;
+    // track outstanding async write tasks
+	std::vector<std::future<bool>> writeKickoffs;
+	std::mutex writeKickoffs_mtx;
 
 };
 
@@ -141,7 +144,7 @@ public:
 	void setQualWrite(bool x) { BWriteQual = x; }
 	//void addNoHeadDNA(shared_ptr<DNA> d) { DNAsNoHead.push_back(d); }
 	//-1,-1,-2
- void analyzeDNA(const shared_ptr<DNA>& d, int FilterUse, int pair, int& idx, int thr);
+	void analyzeDNA(const shared_ptr<DNA>& d, int FilterUse, int pair, int& idx, int thr);
 	vector<bool> analyzeDNA(shared_ptr<DNA> p1, shared_ptr<DNA> p2, shared_ptr<DNA> mid, bool changePHead, int = -1);
 	void findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, int thrPos);
 
@@ -150,11 +153,11 @@ public:
 	//Function specifically if several output files are required
 	void writeSelectiveStream(shared_ptr<DNA> d, int Pair, int FS);//1=pair1;2=pair2;3=singl1,4=singl2  ;; FS: different multi FileStreams to be used
 
- void writeForWrite(const shared_ptr<DNA>& d1, int Pair1, int Cstream1,
+	 void writeForWrite(const shared_ptr<DNA>& d1, int Pair1, int Cstream1,
 		const shared_ptr<DNA>& d2, int Pair2, int Cstream2);
 	//pretty final bool, aborts all, so careful with this
 	//collects stats on read, writes then. Keep read pairs together by using "writeForWrite"in second mutext step
-  bool saveForWrite(const shared_ptr<DNA>& d, int Pair, int thr, int& Cstr, bool = true);//Pair:1=pair1;2=pair2;3=singleton
+	bool saveForWrite(const shared_ptr<DNA>& d, int Pair, int thr, int& Cstr, bool = true);//Pair:1=pair1;2=pair2;3=singleton
 	bool saveForWrite_merge(shared_ptr<DNAunique> d,
 		string newHeader = "", int curThread = 0, bool elseWriteD1 = false);
 	//bool saveForWriteMT(shared_ptr<DNA> dna, int thread, int pair = 1);
@@ -227,6 +230,7 @@ public:
 	bool Demulti2Fls() { return bDoDemultiplexIntoFiles; }
 	bool doDeriplicate() { return	b_doDereplicate; }
 	bool doWriteNonBCrds() { return fqNoBCFile.size() == 2; }
+	bool doDerepMrgSrch() { return dereplicator->doSearchWithMerge(); }
 
 
 private:

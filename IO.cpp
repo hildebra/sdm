@@ -138,7 +138,7 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 
 	Filters* curFil = MD->getFilters(curThread);
 	//register read at all with stat counter:
-   curFil->sTotalPlus(0);
+	 curFil->sTotalPlus(0);
 	if (tdn[1] != nullptr || curFil->isPaired() == 2) {
 		curFil->sTotalPlus(1);
 	}
@@ -313,7 +313,7 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 
 		}
 	}
-	if (MD->mergeReads() && read2notNull) {
+	if ( ( MD->mergeReads() || MD->doDerepMrgSrch()) && read2notNull) {
 		MD->findSeedForMerge(tdn[0], tdn[1], curThread);
 	}
 
@@ -324,11 +324,11 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 	if (MD->Demulti2Fls()) {
 		MD->write2Demulti(tdn[0], tdn[1], curFil->getBCoffset(), curThread);
 	}
-	if (MD->doDeriplicate()) {
-		MD->dereplicateDNA(tdn[0], tdn[1]);
-	}
 	if (MD->doWriteNonBCrds()) {
 		MD->writeNonBCReads(tdn[0], tdn[1]);
+	}
+	if (MD->doDeriplicate()) {
+		MD->dereplicateDNA(tdn[0], tdn[1]);
 	}
 
     // Test
@@ -475,7 +475,9 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 			bool notSubm(true);
 			if (slots[thrCnt].inUse == true){
 				//&& slots[thrCnt].job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-				bool cont2 = slots[thrCnt].job.get();
+               if (slots[thrCnt].job.valid()) {
+					bool cont2 = slots[thrCnt].job.get();
+				}
 				slots[thrCnt].inUse = false;
 			}
 			//now thread X is empty.. and eventual reads in it as well
@@ -525,17 +527,16 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 	//last jobs 
 
 
-	//get all slots
-	for (int x = thrCnt; x < slots.size(); x++) {//better load balancing
-		if (slots[x].inUse == true) {//&& slots[x].job.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
-			cont = slots[x].job.get();
-			slots[x].inUse = false;
-		}
-	}
-	for (int x = 0; x < slots.size(); x++){
-		if (slots[x].inUse == true){//&& slots[x].job.wait_for(std::chrono::milliseconds(1)) == std::future_status::ready) {
-			cont = slots[x].job.get();
-			slots[x].inUse = false;
+ // get all slots (single wrap-around pass starting at thrCnt)
+	if (!slots.empty()) {
+		for (size_t i = 0; i < slots.size(); ++i) {
+			size_t x = (static_cast<size_t>(thrCnt) + i) % slots.size();
+			if (slots[x].inUse == true) {
+				if (slots[x].job.valid()) {
+					cont = slots[x].job.get();
+				}
+				slots[x].inUse = false;
+			}
 		}
 	}
 

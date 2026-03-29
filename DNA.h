@@ -31,8 +31,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <cctype>
 #include <locale>
 #include <climits>
+#include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <string_view>
 #include <shared_mutex>
 #include <thread>
@@ -50,6 +52,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 class DNA : public std::enable_shared_from_this<DNA> {
     friend class DNAunique;
 public:
+    struct WhoIsBetterMergeStats {
+        uint64_t merged_compares = 0;
+        uint64_t non_merged_compares = 0;
+        uint64_t accumulated_merge_length = 0;
+    };
+
     DNA(string seq, string names) : sequence_(seq), sequence_length_(sequence_.length()),
         id_(names), new_id_(names),
         qual_(0), qual_traf_(""), sample_id_(-1), avg_qual_(-1.f),
@@ -82,21 +90,11 @@ public:
         //cout << "destruct" << endl;
     }
 
-    bool operator==(DNA i) {
-        if (i.getSeqPseudo() == this->getSeqPseudo()) {
-            return true;
-        }
-        else {
-            return false;
-        }
+    bool operator==(const DNA& i) const {
+        return i.getSeqPseudoView() == this->getSeqPseudoView();
     }
-    bool operator==(shared_ptr<DNA> i) {
-        if (i->getSeqPseudo() == this->getSeqPseudo()) {
-            return true;
-        }
-        else {
-            return false;
-        }
+    bool operator==(const shared_ptr<DNA>& i) const {
+        return i != nullptr && i->getSeqPseudoView() == this->getSeqPseudoView();
     }
     //something wrong with DNA object, just del all info
     void delself() {
@@ -111,7 +109,7 @@ public:
         sequence_ = s;
         sequence_length_ = sequence_.length();
     }    void setSequence(string&& s) {
-        sequence_ = s;
+        sequence_ = std::move(s);
         sequence_length_ = sequence_.length();
     }
 
@@ -132,6 +130,10 @@ public:
 
     string getSeqPseudo() {
         return sequence_.substr(0, sequence_length_);
+    }
+    std::string_view getSeqPseudoView() const {
+        const size_t len = std::min(sequence_length_, sequence_.size());
+        return std::string_view(sequence_.data(), len);
     }
 
     void setQual(vector<qual_score> Q) { qual_ = move(Q); avg_qual_ = -1.f; }
@@ -165,6 +167,9 @@ public:
     }
 
     int numACGT();
+    // Fused single-pass: computes ambiguity count and checks homonucleotide runs
+    // Returns ambiguity count via ambNTs_out, and false if a homo-NT run >= maxHomoNT is found
+    bool scanSequenceChecks(int maxHomoNT, int& ambNTs_out);
     void stripLeadEndN();
     int numNonCanonicalDNA(bool);
     float getAvgQual();
@@ -305,8 +310,8 @@ public:
 
     //control & check what happened to any primers (if)
     bool has2PrimersDetected() { return (FtsDetected.reverse && FtsDetected.forward); }
-    bool getRevPrimCut() { return FtsDetected.reverse; }
-    bool getFwdPrimCut() { return FtsDetected.forward; }
+    bool getRevPrimDetect() { return FtsDetected.reverse; }
+    bool getFwdPrimDetect() { return FtsDetected.forward; }
     void setRevPrimCut() { FtsDetected.reverse = true; }
     void setFwdPrimCut() { FtsDetected.forward = true; }
     void setDereplicated() { FtsDetected.dereplicated = true; }
@@ -453,14 +458,13 @@ protected:
     float tempFloat;
 };
 
-typedef std::unordered_map<int, long> read_occ;
+typedef std::vector<long> read_occ;
 
 struct DNAHasher
 {
     size_t operator()(shared_ptr<DNA> k) const
     {
-        // Compute individual hash values for two data members and combine them using XOR and bit shifting
-        return ((hash<string>()(k->getSeqPseudo())) >> 1);
+        return ((hash<std::string_view>()(k->getSeqPseudoView())) >> 1);
     }
 };
 
@@ -477,13 +481,11 @@ public:
     DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), pair_(0) {//best_seed_length_((uint)sequence_.size())
         incrementSampleCounter(BC);
     }
-    ~DNAunique() {
-        /*if (quality_sum_per_base_) {
-            std::cout << "delete quality_per_sum_base" << std::endl;
-        }*/
-        //        std::cout << (quality_sum_per_base_ == nullptr) << std::endl;
-        delete[] quality_sum_per_base_;
-    }
+    ~DNAunique() = default;
+
+    void recordWhoIsBetterCompare(int dMergeLength, int rMergeLength);
+    const WhoIsBetterMergeStats& getWhoIsBetterMergeStats() const { return who_is_better_merge_stats_; }
+    void resetWhoIsBetterMergeStats() { who_is_better_merge_stats_ = WhoIsBetterMergeStats(); }
 
     //string sequence_;    string id_;
     void Count2Head(bool);
@@ -492,12 +494,7 @@ public:
     void incrementSampleCounter(int sample_id);
     void writeMap(ofstream& os, const string&, vector<int>&, const vector<int>&);
     //inline int getCount() { return count_; }
-    int totalSum() {
-        int ret(0);
-        for (auto xx : occurence) { ret += xx.second; }
-        if (ret == 0) { ret = 1; }
-        return ret;
-    }
+    int totalSum();
     //uint getBestSeedLength() { return best_seed_length_; }
     //void setBestSeedLength(uint i) { best_seed_length_ = i; }//DNAuniMTX.lock(); DNAuniMTX.unlock();}
     void incrementSampleCounterBy(int sample_id, long count);
@@ -507,65 +504,24 @@ public:
     //vector<pair_<int, int>> getDerepMapSort2(size_t wh);
     //void getDerepMapSort(vector<int>&, vector<int>&);
 
-    void prepSumQuals() {
-        if (!quality_sum_per_base_) {
-            quality_sum_per_base_ = DBG_NEW uint64_t[length()];
-            for (uint i = 0; i < length(); i++) {
-                quality_sum_per_base_[i] = qual_[i];
-            }
-        }
-    }
-    void sumQualities(shared_ptr<DNAunique> dna) {
-        if (dna == nullptr) return;
-        prepSumQuals();
+    using qual_accum_t = uint32_t;
 
-        if (dna->quality_sum_per_base_) {
-            for (uint i = 0; i < length(); i++) {
-                quality_sum_per_base_[i] += dna->quality_sum_per_base_[i];
-            }
-        }
-        else {
-            for (uint i = 0; i < length(); i++) {
-                quality_sum_per_base_[i] += dna->qual_[i];
-            }
-        }
-    }
-    void sumQualities(shared_ptr<DNA> dna) {
-        if (dna == nullptr) return;
-        prepSumQuals();
-        const vector<qual_score> quals = dna->getQual();
-        for (uint i = 0; i < length(); i++) {
-            quality_sum_per_base_[i] += quals[i];
-        }
-    }
+    void addToQualSum(qual_accum_t& target, qual_accum_t value);
+
+    void prepSumQuals();
+    void sumQualities(const shared_ptr<DNAunique>& dna);
+    void sumQualities(const shared_ptr<DNA>& dna);
 
     void prepareDerepQualities(int ofastQver);
     void writeDerepFastQ(ofstream&, bool = true);
 
-    void saveMem() {
-        qual_traf_ = "";
-        new_id_ = id_.substr(0, getSpaceHeadPos(id_));
-        id_ = "";
-    }
+    void saveMem();
 
+    void attachPair(shared_ptr<DNAunique> dna_unique);
+    shared_ptr<DNAunique> getPair(void);
 
-    void attachPair(shared_ptr<DNAunique> dna_unique) {
-        if (dna_unique == nullptr) { return; }
-        pair_ = dna_unique;
-        pair_->saveMem();
-    }
-    shared_ptr<DNAunique> getPair(void) {
-        return pair_;
-    }
-
-    void attachMerge(shared_ptr<DNAunique> dnamerge) {
-        if (dnamerge == nullptr) { return; }
-        merge_ = dnamerge;
-        merge_->saveMem();
-    }
-    shared_ptr<DNAunique> getMerge(void) {
-        return merge_;
-    }
+    void attachMerge(shared_ptr<DNAunique> dnamerge);
+    shared_ptr<DNAunique> getMerge(void);
 
 
     //estimates if one sample occurence covers the unique counts required for sample specific derep min counts
@@ -574,9 +530,9 @@ public:
 
     void takeOver(shared_ptr<DNAunique> dna_unique_old);
     void takeOverDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaMerge);
-    uint64_t* transferPerBaseQualitySum();
+    std::vector<qual_accum_t> transferPerBaseQualitySum();
 
-    uint64_t* quality_sum_per_base_ = nullptr;
+    std::vector<qual_accum_t> quality_sum_per_base_;
 
     //void lock() { DNAuniMTX.lock(); }
     //void unlock() { DNAuniMTX.unlock(); }
@@ -595,9 +551,46 @@ private:
 
     // to calculate mean
     std::string qualities_avg_;
+    WhoIsBetterMergeStats who_is_better_merge_stats_;
 
     //threadsafe
 };
+
+
+
+
+class DNAuniqSet {
+public:
+    DNAuniqSet() :bestDNU(nullptr), bestSet(false), bestHasMerge(false), totalCnts(0),
+        cntsAdded2best(false) {}
+    ~DNAuniqSet() {}
+
+    void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
+        shared_ptr<DNA> dnaM, int MrgPos1, int sample_id);
+    shared_ptr<DNAunique>& operator[] (int x) {
+        return DNUs[x];
+    }
+    map<int, shared_ptr<DNAunique>>::iterator find(const int x);
+    const map<int, shared_ptr<DNAunique>>::iterator end();
+    const map<int, shared_ptr<DNAunique>>::iterator begin();
+    size_t size() { return DNUs.size(); }
+    void setBest(bool addCnts);
+    shared_ptr<DNAunique> best(bool addCnts);
+
+    mutex lockMTX;
+private:
+    map<int, shared_ptr<DNAunique>> DNUs;
+    shared_ptr<DNAunique> bestDNU;
+    bool bestSet; bool bestHasMerge;
+    int totalCnts;
+    int cntsAdded2best;
+};
+
+// Hash map from sequence string to DNAuniqSet (store by value)
+//typedef std::unordered_map<string, unique_ptr<DNAuniqSet>> HashDNA;
+typedef robin_hood::unordered_node_map<string, unique_ptr< DNAuniqSet> > HashDNA;
+
+
 
 //multi threading Input Streamer
 struct job3 {
@@ -614,6 +607,14 @@ struct jobC {
     bool inUse = false;
 };
 
+
+
+
+
+
 shared_ptr<DNA> str2DNA(vector<string>& in, bool keepPairHD, int fastQver, int readpos);
 // Move-aware overload to accept temporary buffers without copying
 shared_ptr<DNA> str2DNA(vector<string>&& in, bool keepPairHD, int fastQver, int readpos);
+
+
+

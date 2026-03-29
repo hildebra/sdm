@@ -102,20 +102,19 @@ private:
 //    }
 
 	static char complement(char c) {
-		static int base_map['t' + 1];
-		base_map['A'] = 'T';
-		base_map['C'] = 'G';
-		base_map['G'] = 'C';
-		base_map['T'] = 'A';
-		base_map['N'] = 'N';
-
-		base_map['a'] = 't';
-		base_map['c'] = 'g';
-		base_map['g'] = 'c';
-		base_map['t'] = 'a';
-		base_map['n'] = 'n';
-
-		return base_map[c];
+       switch (c) {
+		case 'A': return 'T';
+		case 'C': return 'G';
+		case 'G': return 'C';
+		case 'T': return 'A';
+		case 'N': return 'N';
+		case 'a': return 't';
+		case 'c': return 'g';
+		case 'g': return 'c';
+		case 't': return 'a';
+		case 'n': return 'n';
+		default: return 'N';
+		}
 	}
 
 	mergeStats mS;

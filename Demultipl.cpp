@@ -1,5 +1,5 @@
 /* sdm: simple demultiplexer
-Copyright (C) 2013  Falk Hildebrand
+Copyright (C) 2026  Falk Hildebrand
 email: Falk.Hildebrand@gmail.com
 
 This program is free software: you can redistribute it and/or modify

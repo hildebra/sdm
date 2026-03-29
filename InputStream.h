@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #pragma once
 #include "DNA.h"
 #include "Common.h"
+#include <chrono>
 
 #ifdef _isa1gzip
 #include "include/GZipStr.h"
@@ -435,7 +436,37 @@ private:
     bool readChunk() {
         if (doMC) {
             std::unique_lock<std::mutex> rlk(reader_mutex);
-            reader_cv.wait(rlk, [this]() { return worker_has_data.load() || stop_reader.load(); });
+            // Lazy-start reader in case MC mode was enabled after construction/reset.
+            if (!reader_started && !stop_reader.load() && !atEnd) {
+                start_reader();
+                reader_cv.notify_one();
+            }
+
+            // Avoid indefinite waits: if prefetch does not arrive in time, fallback to sync read.
+            bool got_data = reader_cv.wait_for(
+                rlk,
+                std::chrono::milliseconds(50),
+                [this]() { return worker_has_data.load() || stop_reader.load(); }
+            );
+
+            if (!got_data) {
+                bool ok = false;
+                {
+                    std::lock_guard<std::mutex> lg(localMTX);
+                    ok = internalReadChunk();
+                    if (!ok || bufSW == 0) {
+                        return false;
+                    }
+                    keeper.swap(keeperW);
+                    size_t newBufS = bufSW;
+                    at = 0;
+                    bufS = newBufS; // Update bufS after at is reset
+                    worker_has_data.store(false);
+                }
+                reader_cv.notify_one();
+                return true;
+            }
+
             if (!worker_has_data.load()) return false;
             {
                 std::lock_guard<std::mutex> lg(localMTX);
@@ -589,8 +620,9 @@ private:
 	bool read_fasta_entry(ifbufstream*fasta_is, ifbufstream*quality_is, shared_ptr<DNA> in, shared_ptr<DNA>, int&);
 	//static bool getFastaQualLine(istream&fna,  string&);
 	void maxminQualWarns_fq();
-	int auto_fq_version();
-	int auto_fq_version(qual_score minQScore, qual_score maxQScore=0);
+    qual_score auto_fq_version();
+    qual_score auto_fq_version(qual_score minQScore, qual_score maxQScore=0);
+    qual_score auto_fq_version(const vector<string>& ret);
 	void resetStats() {
 		for (size_t i = 0; i < lnCnt.size(); i++) { lnCnt[i] = 0; }
 		for (size_t i = 0; i < pairs_read.size(); i++) { pairs_read[i] = 0; }
@@ -675,7 +707,14 @@ private:
 //true: d is better, false: ref is better
 bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM, 
 	shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM,
-	float& ever_best, bool forSeed);
+    float& ever_best, bool forSeed, DNAunique* merge_stats_owner = nullptr, 
+    int dSiz = 2, int rSiz=2);
+
+bool whoIsBetter(shared_ptr<DNAunique> d1, shared_ptr<DNAunique> r1, float& ever_best, bool forSeed);
+
+double logRatio(double v1, double v2);
+double loglogRatio(double v1, double v2);
+
 
 
 

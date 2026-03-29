@@ -763,11 +763,11 @@ void Filters::miniCheckDNA(shared_ptr<DNA> d, shared_ptr<DNA> d2) {
 			}
 		}
 		//conditions for failing read on not finding fwd primer
-		if (!d->getFwdPrimCut() && bRequireFwdPrim) {
+		if (!d->getFwdPrimDetect() && bRequireFwdPrim) {
 			d->setYellowQual(true);
 		}
 		//conditions for failing read on not finding rev primer
-		if (d2 != nullptr && bRequireRevPrim && !d->getRevPrimCut()) {//failed to find reverse primer
+		if (d2 != nullptr && bRequireRevPrim && !d->getRevPrimDetect()) {//failed to find reverse primer
 			d->setYellowQual(true);
 		}
 	}
@@ -1309,8 +1309,6 @@ bool Filters::betterSeed(shared_ptr<DNAunique> d1,
 //should be safe to call from different threads
 bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 	int& tagIdx, bool doSeeding) {
-	int tagIdx2(-2);
-	unsigned int hindrance = 0;
 	int pair = max(0, pairPre);//corrects for -1 (undefined pair_) to set to 0
 
 	// We trim for poly-G / homonucleotide tail here, before filtering for length, and before trimming adapter sequences etc. 
@@ -1344,6 +1342,13 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		return false;
 	}
 
+	if ((BextensivePrimerChecks || BcutPrimer || Bcheck4illuAdapts) &&
+		(tagIdx < 0 || (size_t)tagIdx >= PrimerIdx.size() || (size_t)tagIdx >= PrimerIdxRev.size())) {
+		d->QualCtrl.TagFail = true;
+		d->failed();
+		return false;
+	}
+
 	if (BextensivePrimerChecks) {
 		if (checkIfRevPrimerHits(d, PrimerIdx[tagIdx], 0, bShortAmplicons)) {
 			d->reverse_compliment(false);
@@ -1351,31 +1356,32 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 	}
 	//bShortAmplicons checks for reverse primer on 1st read
 	if (BcutPrimer || Bcheck4illuAdapts) {
-		bool fwdRC = false; bool revRC = true;//if this gets changed, the read needs to be reverse complemented
-		if (pair != 1) {//0 or -1
-			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, BextensivePrimerChecks);
-			if (bShortAmplicons) {//also check other end of primer.. also use for PacBio amplicons
-				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, BextensivePrimerChecks);
-				//case for 1) long read 2) look for both primers 3) rev required
-			}
-		}
-		else if (pair != 0) {//pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
-			bool revCheck = pair == -1 || pair == 0;//1:false for RC, else always a reverse check
+       if (pair == 1) {//pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
+			bool revCheck = false;
 			cutPrimerRev(d, PrimerIdxRev[tagIdx], revCheck, false);
 			if (bShortAmplicons) {//also check other end of primer..
 				cutPrimer(d, PrimerIdx[tagIdx], revCheck, pair);
 			}
 		}
+		else {//pair 0 or -1
+			bool fwdRC = false;
+			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, BextensivePrimerChecks);
+			if (bShortAmplicons) {//also check other end of primer.. also use for PacBio amplicons
+               bool revRC = true;
+				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, BextensivePrimerChecks);
+				//case for 1) long read 2) look for both primers 3) rev required
+			}
+		}
 		//conditions for failing read on not finding fwd primer
-		if (pair != 1 && !d->getFwdPrimCut() && bRequireFwdPrim) {
-			if (alt_bRequireRevPrim) {
+		if (pair != 1 && !d->getFwdPrimDetect() && bRequireFwdPrim) {
+			if (alt_bRequireFwdPrim) {
 				d->QualCtrl.PrimerFwdFail = true;
 				d->failed(); return false;
 			}
 			d->setYellowQual(true);
 		}
 		//conditions for failing read on not finding rev primer
-		if (bRequireRevPrim && !d->getRevPrimCut()
+		if (bRequireRevPrim && !d->getRevPrimDetect()
 			&& (pair != 0 || isPaired() == 1)  //only pair2 or 1-read-PacBio will fail
 			) {//failed to find reverse primer
 			if (alt_bRequireRevPrim) {
@@ -1387,9 +1393,6 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 			}
 		}
 
-		if (fwdRC != false || revRC != true) {// matched reverse primer (unexpected).. need to rev compliment
-			//d->reverse_compliment(false);
-		}
 	}
 
 
@@ -1414,8 +1417,9 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		//cut off accumulation error larger than maxAccumQP
 		if (maxAccumQP > 0.0) {
 			int cP = d->qualAccumulate(maxAccumQP);
-			if (check_lengthXtra(d, 0, cP)) {
-				d->isYellowQual();  d->QualCtrl.minLqualTrim = true;//sMinQTrim(pair_);
+            if (check_lengthXtra(d, 0, cP)) {
+				// Mark as mid-quality (yellow) when trimming due to accumulated error
+				d->setYellowQual(true);  d->QualCtrl.minLqualTrim = true;//sMinQTrim(pair_);
 				cP = d->qualAccumulate(alt_maxAccumQP);
 				if (check_lengthXtra(d, 0, cP)) {//check if passes alt
 					d->failed(); return false;
@@ -1427,17 +1431,19 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		}
 
 
+        const bool usePrimaryQualWin = (min_q > 0 || FQWthr > 0);
+		const bool useAltQualWin = (alt_min_q > 0 || alt_FQWthr > 0);
 		int rea(2), rea2(2);
 		float avgQ(min_q);
-		if (min_q > 0 || FQWthr > 0) {
+		float avgQalt(alt_min_q);
+		if (usePrimaryQualWin) {
 			avgQ = d->qualWinfloat(FQWwidth, FQWthr, rea);
+		}
+		if ((avgQ < min_q || rea == 1) && useAltQualWin) {
+			avgQalt = d->qualWinfloat(FQWwidth, alt_FQWthr, rea2);
 		}
 		if (avgQ < min_q) {
 			d->QualCtrl.AvgQual = true; //sAvgQual(pair_);
-			float avgQalt(alt_min_q);
-			if (alt_min_q > 0 || alt_FQWthr > 0) {
-				avgQalt = d->qualWinfloat(FQWwidth, alt_FQWthr, rea2);
-			}
 			if (avgQalt < alt_min_q) {
 				d->QualCtrl.AvgQual = true; //statAddition.AvgQual++;
 				d->failed(); return false;
@@ -1461,27 +1467,36 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 			}
 		}
 	}
-	int ambNTs = d->numACGT();
-	if (MaxAmb >= 0 && ambNTs > MaxAmb) {
-		d->QualCtrl.MaxAmb = true;
-
-		if (alt_MaxAmb != -1 && ambNTs >= alt_MaxAmb) {
-			d->QualCtrl.MaxAmb = true; //statAddition.MaxAmb++;
+	// Fused single-pass: ambiguity count + homonucleotide run detection
+	if (MaxAmb >= 0 || maxHomonucleotide != 0) {
+		int ambNTs = 0;
+		bool homoOK = d->scanSequenceChecks(maxHomonucleotide, ambNTs);
+		if (!homoOK) {
+			d->QualCtrl.HomoNT = true;
 			d->failed(); return false;
 		}
-		else {
-			d->setYellowQual(true);
+		if (MaxAmb >= 0 && ambNTs > MaxAmb) {
+			d->QualCtrl.MaxAmb = true;
+			if (alt_MaxAmb != -1 && ambNTs >= alt_MaxAmb) {
+				d->QualCtrl.MaxAmb = true;
+				d->failed(); return false;
+			}
+			else {
+				d->setYellowQual(true);
+			}
 		}
-	}
-	if (maxHomonucleotide != 0 && !d->HomoNTRuns(maxHomonucleotide)) {
-		d->QualCtrl.HomoNT = true;//sHomoNT(pair_);
-		d->failed(); return false;
 	}
 
 	//adapter removed, quality filtering done. If no map is provided, that is all that is needed
 	if (!bDoMultiplexing) {
 		if (TrimStartNTs > 0) {
-			if (d->length() - TrimStartNTs > max_l) {//length check
+           const size_t readLen = d->length();
+			if (readLen <= (unsigned int)TrimStartNTs) {
+				d->QualCtrl.minL = true;
+				d->failed();
+				return false;
+			}
+         if (readLen - TrimStartNTs > max_l) {//length check
 				d->QualCtrl.maxL = true; //sMaxLength(pair_);
 				d->failed();
 				return false;
@@ -2300,7 +2315,7 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
 
 bool Filters::checkIfRevPrimerHits(shared_ptr<DNA> d, int primerID, int pair, bool twoPrimers) {
 	if (PrimerL.size() == 0 || PrimerL[0].length() == 0) { return true; }
-	if (d->getFwdPrimCut()) {
+	if (d->getFwdPrimDetect()) {
 		return true;
 	}
 	int start(-1), stop(-1);
@@ -2333,7 +2348,7 @@ bool Filters::passedReads(int n) {
 
 bool Filters::checkIfPrimerHits(shared_ptr<DNA> d, int primerID, int pair) {
 	if (PrimerL.size() == 0 || PrimerL[0].length() == 0) { return true; }
-	if (d->getFwdPrimCut()) {
+	if (d->getFwdPrimDetect()) {
 		return true;
 	}
 	int start(-1), stop(-1);
@@ -2362,7 +2377,7 @@ bool Filters::checkIfPrimerHits(shared_ptr<DNA> d, int primerID, int pair) {
 bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, bool extensivePrimerCheck) {
 	//only adapted to singular BC
 	if (PrimerL.size() == 0 || PrimerL[0].length() == 0) { return true; }
-	if (d->getFwdPrimCut()) {
+	if (d->getFwdPrimDetect()) {
 		return true;
 	}
 	int start(-1), stop(-1);
@@ -2459,7 +2474,7 @@ bool Filters::findPrimer(shared_ptr<DNA> d, int primerID, bool RC, int pair) {
 }
 bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extraCheck) {
 	//const string& se = d->getSequence();
-	if (d->getRevPrimCut() || PrimerR.size() == 0) {
+	if (d->getRevPrimDetect() || PrimerR.size() == 0) {
 		return true;
 	}
 

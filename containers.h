@@ -49,7 +49,6 @@ class ofbufstream;
 
 
 
-
 std::ptrdiff_t len_common_prefix_base(char const a[], char const b[]);
 
 struct ltstr
@@ -59,6 +58,8 @@ struct ltstr
     return strcmp(s1.c_str(), s2.c_str()) < 0;
   }
 };
+
+// (HashDNA typedef is defined after DNAuniqSet so the type is available)
 
 template<typename K, typename V>
 vector<pair<K, V>> mapToVector(const unordered_map<K, V>& map) {
@@ -73,7 +74,7 @@ typedef std::unordered_map<std::string, int> ClusterIdx;
 typedef robin_hood::unordered_map<std::string, int> BarcodeMap;//links directly to entry number in Barcode vector
 //typedef std::base_map<std::string, int, ltstr> ClusterIdx;
 //used in UCF file
-typedef std::unordered_map<string, int>::iterator DNAidmapsIT;
+//typedef std::unordered_map<string, int>::iterator DNAidmapsIT;
 typedef std::unordered_map<string, int> DNAidmaps;
 
 #ifdef KHASH 
@@ -178,65 +179,6 @@ private:
 
 bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r);
 
-class DNAuniqSet {
-public:
-	DNAuniqSet():bestDNU(nullptr), bestSet(false), bestHasMerge(false),totalCnts(0),
-		cntsAdded2best(false) {}
-	~DNAuniqSet() {}
-
-	void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaM, int MrgPos1, int sample_id) {
-		
-		dna->setDereplicated();//dna->setYellowQual(false);
-		shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
-		new_dna_unique->saveMem();
-		if (new_dna_unique == nullptr) { return; }
-		/*int bestL = dna->getMergeLength();
-		if (bestL == -1 && dna2 != nullptr) {
-			bestL = dna->mem_length() + dna2->mem_length();
-		}
-		if (bestL == -1) {
-			bestL = dna->mem_length();
-		}
-		new_dna_unique->setBestSeedLength(bestL);
-		*/
-		if (dna2 != nullptr) { new_dna_unique->attachPair(make_shared<DNAunique>(dna2, sample_id)); }
-		if (dnaM != nullptr) { new_dna_unique->attachMerge(make_shared<DNAunique>(dnaM, sample_id)); }
-		DNUs[MrgPos1] = new_dna_unique;
-	}
-	shared_ptr<DNAunique> &operator[] (int x) {
-		return DNUs[x];
-	}
-	map<int, shared_ptr<DNAunique>>::iterator find(const int x) {
-		map<int, shared_ptr<DNAunique>>::iterator r = DNUs.find(x);
-		return r;
-	}
-	const map<int, shared_ptr<DNAunique>>::iterator end() {
-		return DNUs.end();
-	}
-	const map<int, shared_ptr<DNAunique>>::iterator begin() {
-		return DNUs.begin();
-	}
-	size_t size() { return DNUs.size(); }
-	void setBest(bool addCnts);
-	shared_ptr<DNAunique> best(bool addCnts) {
-		if (!bestSet) {
-			this->setBest(addCnts);
-		}
-		
-		return bestDNU;
-	}
-
-	mutex lockMTX;
-private:
-	map<int, shared_ptr<DNAunique>> DNUs;
-	shared_ptr<DNAunique> bestDNU;
-	bool bestSet; bool bestHasMerge;
-	int totalCnts;
-	int cntsAdded2best;
-};
-
-typedef robin_hood::unordered_node_map<string, DNAuniqSet> HashDNA;
-
 
 class Dereplicate{
 public:
@@ -270,6 +212,7 @@ public:
 	}
 
 	void finishMap();
+	bool doSearchWithMerge() { return searchWithMerg; }
 
 
 private:
@@ -308,8 +251,33 @@ private:
 
 	mutable std::shared_mutex drpMTX;
 
+	bool searchWithMerg;
+
 };
 
+
+class betterSeedStruct {
+public:
+	betterSeedStruct() : tdn1(nullptr), bestPID(0.f), len(0), mergLen(0),
+		mergeCnt(0), notMergeCnt(0), cummMergeLen(0){}
+	betterSeedStruct(shared_ptr<DNAunique> t) : 
+		tdn1(t), bestPID(t->getTempFloat()), len(t->length()), mergLen(0),
+		mergeCnt(0), notMergeCnt(0), cummMergeLen(0){
+		if (t->getMerge() != nullptr) { 
+			mergeCnt++; mergLen = t->getMerge()->length(); 
+			cummMergeLen += mergLen;
+		}else { notMergeCnt++; }
+	}
+	bool whoIsBetter2(shared_ptr<DNAunique>);
+
+
+	shared_ptr<DNAunique> tdn1;
+	//shared_ptr<DNA> tdn2;
+	float bestPID;
+	uint len, mergLen;
+	uint mergeCnt, notMergeCnt;
+	long long cummMergeLen;
+};
 
 class UClinks{
 public:
@@ -342,7 +310,7 @@ private:
 	bool uclInOldDNA(const string&, const vector<int>&, float, Filters* fil);
 	bool uclInOldDNA_simple(const string&, const vector<int>&, int&);
 	bool getMAPPERline(string&, string&, float&, vector<int>&, bool addFromHDstring = false);
-	void besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1, shared_ptr<DNA> tdn2, Filters* fil);
+	void besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1,  Filters* fil);
 	void setOTUnms();
 	void resetMarks();//reset the uc file format, in case of cd-hit/vsearch input
 
@@ -358,25 +326,28 @@ private:
 
 	//pair_: important to keep track whether to remove BC etc.: -1 to remove BC (454); 0 not to (MID miSeq)
 	int CurSetPair;
-	//store not matched DNA and keep track
-	//uint maxOldDNAvec;
-	map<int,shared_ptr<DNAunique>> oldDNA;
+    //store not matched DNA and keep track
+	// Combined mapping from sequence id to DNA object for unmatched DNA
+	unordered_map<string, shared_ptr<DNAunique>> unusedDNA;
+	//map<int,shared_ptr<DNA>> oldDNA;
 	//map<int,shared_ptr<DNA>> oldDNA2;
-	DNAidmaps unusedID;
+	//DNAidmaps unusedID;
 	//std::list<string> oldestID;
-	uint DNAunusedPos;
+	//uint DNAunusedPos;
 	string derepMapFile;
 
 	//search terms:  "otu" "chimera" "chimera"
 	//string otu_term, chimera_term, chimera_term_noise;
 
 	ClusterIdx seq2CI;
-	vector<shared_ptr<DNAunique>> bestDNA;
+	//vector<shared_ptr<DNAunique>> bestDNA;
+	vector<shared_ptr<betterSeedStruct>> bestDNA;
+
 	//vector<shared_ptr<DNA>> bestDNA2;
 	vector<string> oriKey;
 	list<string> mapLines;
-	vector<float> bestPID;
-	vector<uint> bestLEN;
+	//vector<float> bestPID;
+	//vector<uint> bestLEN;
 	int clusCnt, uclines;
 	string SEP;
 	ifstream ucf, mapdere;

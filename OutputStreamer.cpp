@@ -5,7 +5,7 @@
 //**************************** ofbufstream ****************************
 ofbufstream::ofbufstream(const string IF, int mif, bool isMC, size_t bufferS)
 	: file(IF), keeper(bufferS), keeperW(bufferS), modeIO(mif), used(0), usedW(0),
-	coutW(false), isGZ(false), doMC(isMC), use_thread_pool(isMC), primary(nullptr), bufS(bufferS), hasKickoff(false) {
+	coutW(false), isGZ(false), doMC(isMC), use_thread_pool(isMC), primary(nullptr), bufS(bufferS) {
 	if (bufS == 0) bufS = 20000;
 	if (file == "" || file == "-") {
 		coutW = true;
@@ -20,14 +20,13 @@ ofbufstream::~ofbufstream() {
 }
 
 void ofbufstream::finishWrites() {
-    if (hasKickoff) {
-		if (use_thread_pool) {
-			// nothing to do: thread-pool futures still usable
-			writeKickoff.wait();
-		} else {
-			writeKickoff.wait();
+    // Wait for all outstanding write tasks to finish
+	{
+		std::lock_guard<std::mutex> lg(writeKickoffs_mtx);
+		for (auto &fut : writeKickoffs) {
+			if (fut.valid()) fut.wait();
 		}
-		hasKickoff = false;
+		writeKickoffs.clear();
 	}
 	emptyStream();
 }
@@ -97,20 +96,26 @@ void ofbufstream::writeStream(bool doKickoff) {
 	{
 		std::lock_guard<std::mutex> lg(append_mtx_);
 		if (used == 0) return; // nothing to write
-		// swap data buffers and used counters
-		keeperW.swap(keeper);
-		std::swap(usedW, used);
+        // move current accumulated data into a temporary buffer for safe async write
+		keeperW.assign(keeper.begin(), keeper.begin() + used);
+		usedW = used;
+		used = 0;
 	}
+	// copy out the buffer to be written in the task
+	std::vector<char> bufCopy;
+	bufCopy.reserve(usedW);
+	bufCopy.insert(bufCopy.end(), keeperW.data(), keeperW.data() + usedW);
 
 	if (use_thread_pool) {
-		// submit write task to persistent thread-pool
-		writeKickoff = ThreadPool::instance().submit([this]() -> bool {
-			return this->internalWrite(false);
+		// submit write task to persistent thread-pool and store future
+		auto fut = ThreadPool::instance().submit([this, b = std::move(bufCopy)]() -> bool {
+			return this->internalWriteBuffer(std::move(const_cast<std::vector<char>&>(b)), false);
 		});
-		hasKickoff = true;
+		std::lock_guard<std::mutex> lg(writeKickoffs_mtx);
+		writeKickoffs.push_back(std::move(fut));
 	} else {
-		// synchronous write
-		internalWrite(false);
+		// synchronous write using the copied buffer
+		internalWriteBuffer(std::move(bufCopy), false);
 	}
 }
 
@@ -118,10 +123,19 @@ bool ofbufstream::internalWrite(bool closeThis) {
     if (!primary) {
 		return false;
 	}
-	primary->write(keeperW.data(), static_cast<std::streamsize>(usedW));
+    primary->write(keeperW.data(), static_cast<std::streamsize>(usedW));
 	if (closeThis) {
 		deactivate();
 	}
+	return true;
+}
+
+bool ofbufstream::internalWriteBuffer(std::vector<char>&& buf, bool closeThis) {
+	if (!primary) { return false; }
+	if (!buf.empty()) {
+		primary->write(buf.data(), static_cast<std::streamsize>(buf.size()));
+	}
+	if (closeThis) { deactivate(); }
 	return true;
 }
 
@@ -472,7 +486,8 @@ vector<bool> OutputStreamer::analyzeDNA(shared_ptr<DNA> p1, shared_ptr<DNA> p2, 
 }
 
 bool OutputStreamer::checkFastqHeadVersion(shared_ptr<DNA> d, bool disable) {
-	if (!b_checkedHeaderChange) {
+    // If we've already checked, return cached result
+	if (b_checkedHeaderChange) {
 		return b_changeFQheadVer;
 	}
 	b_checkedHeaderChange = true;
@@ -1055,7 +1070,9 @@ bool OutputStreamer::saveForWrite_merge(shared_ptr<DNAunique> d,
      thread_local string mergedFastqTmp;
 		mergedFastqTmp.clear();
 		dna_merged->writeFastQ(mergedFastqTmp);
-		*(of_merged_fq[0]) << mergedFastqTmp;
+       if (of_merged_fq.size() > 0 && of_merged_fq[0]) {
+			*(of_merged_fq[0]) << mergedFastqTmp;
+		}
 		return true;
 	}
 	if (!elseWriteD1) {//not passed? not my problem..
@@ -1066,7 +1083,9 @@ bool OutputStreamer::saveForWrite_merge(shared_ptr<DNAunique> d,
   thread_local string mergedFastqTmp;
 	mergedFastqTmp.clear();
 	d->writeFastQ(mergedFastqTmp);
-	*(of_merged_fq[0]) << mergedFastqTmp;
+       if (of_merged_fq.size() > 0 && of_merged_fq[0]) {
+			*(of_merged_fq[0]) << mergedFastqTmp;
+		}
 
 	return false;
 }
@@ -1354,7 +1373,7 @@ void OutputStreamer::openOFstreamFQpair(const string opOF, const string opOF2, s
 		exit(5);
 	}
         if (!fqPairFile[p1]->open(opOF2, wrMode, 1, doTIO, 350000)) {
-		cerr << "Could not open " << errMsg << " pair 2 fastq output file " << opOF << endl << p1 << " " << totalFileStrms << endl;
+		cerr << "Could not open " << errMsg << " pair 2 fastq output file " << opOF2 << endl << p1 << " " << totalFileStrms << endl;
 		exit(5);
 	}
         fqPairFile[p1]->activate();

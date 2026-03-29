@@ -277,11 +277,11 @@ public:
 
 
 protected:
-	bool check_lengthXtra(shared_ptr<DNA> d, int hindrance = 0, int leng = -1) {
+	bool check_lengthXtra(const shared_ptr<DNA>& d, int hindrance = 0, int leng = -1) {
+		if (leng == -1) {
+			leng = d->length();
+		}
 		if (min_l > 0) {
-			if (leng == -1) {
-				leng = d->length();
-			}
 			if (leng - hindrance < min_l) {
 				d->QualCtrl.minL = true;
 				if (leng - hindrance >= alt_min_l) {

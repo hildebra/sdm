@@ -28,22 +28,30 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // Utilities are implemented in Common.cpp (defined once in Common.cpp)
 
-	//compares two DNA entries, decides which one has overall better stats
+
+
+
+//compares two DNA entries, decides which one has overall better stats
 bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM, 
-	shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM, 
-	float& ever_best, bool forSeed) {
+			shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM, 
+			float& ever_best, bool forSeed, DNAunique* merge_stats_owner,
+			int dSiz , int rSiz) {
+	
+	if (d1 == nullptr || r1 == nullptr) {
+		return false;
+	}
 
 	//if (forSeed) { 		return false; 	}
 	//check if two primers present
 	if (d2 == nullptr) {//hard reason .. only for PacBio etc reads
 		if (d1->has2PrimersDetected() && !r1->has2PrimersDetected()) { return true; }
 		if (!d1->has2PrimersDetected() && r1->has2PrimersDetected()) { return false; }
-	} else {
-		if (d2->getRevPrimCut() && !r1->getFwdPrimCut() && !r2->getRevPrimCut()) {	return true;}
+    } else {
+		//if (r2 != nullptr && d2->getRevPrimDetect() && !r1->getFwdPrimDetect() && !r2->getRevPrimDetect()) {	return true;}
 	}
 	//check if at least 1 primers present
-	if (d1->getFwdPrimCut() && !r1->getFwdPrimCut()) { return true; }//hard reason
-	if (!d1->getFwdPrimCut() && r1->getFwdPrimCut()) { return false; }
+	if (d1->getFwdPrimDetect() && !r1->getFwdPrimDetect()) { return true; }//hard reason
+	if (!d1->getFwdPrimDetect() && r1->getFwdPrimDetect()) { return false; }
 
 	double d1pid(1.), refpid(1.);
 	if (ever_best >=0) {
@@ -68,12 +76,27 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 		//if (r2 != NULL) { refL += (double) r2->length(); }
 		rMerg = false;
 	}
+    if (merge_stats_owner != nullptr) {
+		merge_stats_owner->recordWhoIsBetterCompare(d1->getMergeLength(), r1->getMergeLength());
+	}
+    double mergedFraction = 0.0;
+	double avgMergeLen = 0.0;
+	if (merge_stats_owner != nullptr) {
+		const auto& ms = merge_stats_owner->getWhoIsBetterMergeStats();
+		const uint64_t totalCompared = ms.merged_compares + ms.non_merged_compares;
+		if (totalCompared > 0) {
+			mergedFraction = static_cast<double>(ms.merged_compares) / static_cast<double>(totalCompared);
+		}
+		avgMergeLen = ms.merged_compares > 0 ? static_cast<double>(ms.accumulated_merge_length) / static_cast<double>(ms.merged_compares) : 0.0;
+	}
+	bool mergAdv = dMerge && !rMerg;//if d merged but ref did not, go for d, hard filter
 
 	//first check if d1 has merged, but ref did not.. clearly go for d, hard filter
 	//if (d1->getMergeLength() != -1 && r1->getMergeLength() == -1) { return true; }
 
 	//hard check on length ratios.. too drastically small , don't use d1
-	if ((curL) / (refL) < BestLengthRatio ) { return false; }
+   if (refL <= 0.) { return false; }
+	if ((curL) / (refL) < BestLengthRatio && !mergAdv) { return false; }
 	//at least 90% length of "good" hit
 	//if (r1->getMergeErrors() < 0) {//no merge, can look at read1 only
 	//	if (d1->length() / r1->length() < RefLengthRatio) { return false; }
@@ -91,14 +114,16 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 			refMergErrSco = (float)r1->getMergeErrors() + r1->getMergeErrorsQual() / 30;// *log10((maxQErr - (float)r1->getMergeErrorsQual()));
 		}
 		//scale to 1
-		float maxMerr = max(refMergErrSco, dmergErrSco);
-		dmergErrSco /= maxMerr; 	refMergErrSco /= maxMerr;
-		dmergErrSco = 1.f - dmergErrSco; refMergErrSco = 1.f - refMergErrSco;
+        float maxMerr = max(refMergErrSco, dmergErrSco);
+		if (maxMerr > 0.f) {
+			dmergErrSco /= maxMerr; 	refMergErrSco /= maxMerr;
+			dmergErrSco = 1.f - dmergErrSco; refMergErrSco = 1.f - refMergErrSco;
+		}
 	}
 
 	//choose merged DNA if possible; d2 no longer needed then
 	shared_ptr<DNA> dx, rx;
-	bool allowMergeGuide = false;
+	bool allowMergeGuide = dMerge && rMerg;
 	if (allowMergeGuide && dM != nullptr) { dx = dM; 	d2 = nullptr; } 	else { dx = d1; }
 	if (allowMergeGuide && rM != nullptr) { rx = rM; r2 = nullptr;}else { rx = r1; }
 	float thScore =  dx->getAvgQual(); //*(d1pid / 100)* log((float)curL);
@@ -107,22 +132,67 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 		//also check for stable lowest score
 		// if (d1->minQual() > r1->minQual() - MinQualDiff) { return true; }
 	//}
-	float maxScore = max(thScore, rScore);
-	thScore /= maxScore; 	rScore /= maxScore;
+  float maxScore = max(thScore, rScore);
+	if (maxScore > 0.f) {
+		thScore /= maxScore; 	rScore /= maxScore;
+	}
 
 
+	/*
+	* accumulated error was overall too harsh.. switch to qual ratio instead..
 	//checks if the new DNA has a better overall quality
 	double dAcSc = dx->getAccumError();	double dLen = dx->mem_length();
 	double tAcSc = rx->getAccumError();	double tLen = rx->mem_length();
 	if (d2 != nullptr) { dAcSc += d2->getAccumError(); dLen += d2->mem_length(); }
 	if (r2 != nullptr) { tAcSc += r2->getAccumError(); tLen += r2->mem_length(); }
-	dAcSc /= dLen; 	tAcSc /= tLen;
+	if (dLen <= 0. || tLen <= 0.) {
+		return false;
+	}
+	//dAcSc /= dLen; 	tAcSc /= tLen;
 	
 	//calculate ratios to compare more easily among metrics
-	double ratAccErr =  log(dAcSc)/log(tAcSc); //smaller better, log changes terms around
+	double ratAccErr = dAcSc / tAcSc;///logRatio(dAcSc, tAcSc);
+	*/
+
+	double dQ=dx->getAvgQual(); double rQ=rx->getAvgQual();
+	if (d2 != nullptr) { dQ += d2->getAccumError();  }
+	if (r2 != nullptr) { rQ += r2->getAccumError();  }
+
+	double qualRatio = dQ / rQ; //higher better
+
+
 	double ratLength = double(curL) / (double)refL; //higher better
-	double ratId = d1pid / refpid * 10 - 9.; //higher better //10-fold weighting
-	if ((ratAccErr * ratLength * ratId) > 1.) {
+    double ratId = 1.;
+	if (refpid > 0.) {
+		ratId = d1pid / refpid * 10. - 9.; //higher better //10-fold weighting
+	}
+
+	//preference based on merge status, but modulated by how often merged DNAs have been better in the past (mergedFraction)
+	double mergePreference = 1.0;
+	if (dMerge != rMerg) {
+		if (dMerge) {
+			mergePreference = 1.0 + mergedFraction;
+		}
+		else {
+			mergePreference = 1.0 - (0.5 * mergedFraction);
+		}
+	}
+
+	//also take into account the merge length and if this is the averaged norm:
+	double mergeLenDevRatio = 1.;
+	if (dMerge && rMerg) {
+		double dMLDIFF = (double) abs(avgMergeLen - d1->getMergeLength());
+		double rMLDIFF = (double) abs(avgMergeLen - r1->getMergeLength());
+		mergeLenDevRatio = (dMLDIFF+ avgMergeLen) / (rMLDIFF+ avgMergeLen);
+		//mergeLenDeviation = (double)(rMLDIFF - dMLDIFF) / (double)(avgMergeLen + 1e-12); //positive if d is closer to average merge length, negative if r is closer
+	}
+
+	//also capture the size difference.. as higher abudant reads might be more trustworthy, but only if other metrics are not too different
+	double logsizeRatio = logRatio(double(dSiz), double(rSiz)); //higher better for r
+
+
+	double thresh(1.05f);
+	if ( ((qualRatio * ratLength * ratId * mergePreference * logsizeRatio * mergeLenDevRatio) ) > thresh) {
 		return true;
 	}
 	//normalize and invert
@@ -145,6 +215,58 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 
 	return false;
 }
+
+
+bool whoIsBetter(shared_ptr<DNAunique> d1,
+	shared_ptr<DNAunique> r1,
+	float& ever_best, bool forSeed) {
+	
+
+	bool ret = whoIsBetter(d1, d1->getPair(), d1->getMerge(),
+		r1, r1->getPair(), r1->getMerge(), ever_best, forSeed, d1.get(),
+		d1->totalSum(), r1->totalSum());
+
+	return ret;
+
+}
+
+
+double logRatio(double v1, double v2) {
+	double ret = 1.f;
+	if (v1 > 0. && v2 > 0.) {
+		double logRef = std::log(v2);
+		if (std::isfinite(logRef) && std::abs(logRef) > 1e-12) {
+			ret = std::log(v1) / logRef; //smaller better, log changes terms around
+		}
+		else {
+			ret = (v1 / (v1+v2)) + 0.5;
+		}
+	}
+	if (ret > 0.) {
+		return ret;
+	}
+	return -1. * ret;
+}
+
+double loglogRatio(double v1, double v2) {
+	double ret = 1.f;
+	if (v1 > 0. && v2 > 0.) {
+		double logRef = std::log(std::log(v2));
+		if (std::isfinite(logRef) && std::abs(logRef) > 1e-12) {
+			ret = std::log(std::log(v1)) / logRef; //smaller better, log changes terms around
+		}
+		else {
+			ret = v1 / v2;
+		}
+	}
+	if (ret > 0.) {
+		return ret;
+	}
+	return -1. * ret;
+}
+
+
+
 
 
 ///////////////////////////////////////////////////////////////
@@ -267,9 +389,17 @@ void InputStreamer::minmaxQscore(shared_ptr<DNA> t, bool& print) {
 qual_score InputStreamer::minmaxQscore(qual_score t,bool& print) {
 	if (t < 0) {
 		if (fqSolexaFmt ){
-			if (t < -5 && print) { cerr << "Unusually low sloexa quality score (" << t << "); setting to 0.\n"; print = false; }
+            if (t < -5 && print) { cerr << "Unusually low Solexa quality score (" << t << "); setting to 0.\n"; print = false; }
 		} else {
-			if (t >= -5) { if (print) { cerr << "Resetting auto format to Solexa (illumina 1.0-1.3) format.\n"; print = false; } }
+          if (fastQver == 64 && t >= -5) {
+				fqSolexaFmt = true;
+				if (print) { cerr << "Detected negative qualities in +64 range; enabling Solexa interpretation.\n"; print = false; }
+			}
+			else if (fastQver == 64 && t < -5) {
+				fastQver = 33;
+				fqSolexaFmt = false;
+				if (print) { cerr << "Detected qualities incompatible with +64; switching to Phred+33.\n"; print = false; }
+			}
 			else { if (print) { cerr << "Unusually low quality score (" << t << "); setting to 0.\n"; print = false; } }
 		}
 		t = 0;
@@ -446,13 +576,9 @@ bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
         if (stillMore) {
 			lnCnt[pos] += 4;
 		}
-		if (stillMore && (fastQver == 0 || lnCnt[pos] == 4)) { // ok first time just has to be done in function, after this can be unloaded outside
-			bool printB(true);
-			//cerr << "AutoFQ!!";
-			shared_ptr<DNA> tdn = make_shared<DNA>(ret, fastQver);
-			minmaxQscore(tdn,printB);
-			auto_fq_version();
-			//tdn->resetQualOffset(auto_fq_version(), fqSolexaFmt);
+     if (stillMore && fastQver == 0) {
+		 fastQver = auto_fq_version(ret);
+		 QverSet = true;			
 		}
 	}
 	if (stillMore) {
@@ -471,12 +597,16 @@ shared_ptr<DNA> InputStreamer::getDNA(int pos){
 	//}
 	bool stillMore = true;
 	if (pos == 1 && numPairs <= 1) {
-		return NULL;
+		return nullptr;
 	}
-	shared_ptr<DNA> ret;
+	shared_ptr<DNA> ret(nullptr);
 	bool corrupt(false); //corrupt state isn't implemented for fnaread
 	bool repairInStream(false);
 	if (isFasta) {//get DNA from fasta + qual_ files
+		if (fasta_istreams[pos] == nullptr || fasta_istreams[pos]->eof()) {
+			stillMore = false;
+			return nullptr;
+		}
 		vector<string>tmpStr(3, "");
 		stillMore = fasta_istreams[pos]->getlines(tmpStr[0],false);//header
 		int lnRd = 1;//read 1 header line
@@ -490,14 +620,18 @@ shared_ptr<DNA> InputStreamer::getDNA(int pos){
 		ret = str2DNA(tmpStr, keepPairHD, fastQver,pos);
 
 		if (!stillMore || fasta_istreams[pos]->eof() || (!*(fasta_istreams[pos]))) {
-			if (ret != NULL) { if (!ret->seal() || ret->isEmpty()) { ret = NULL; } } //delete ret;
+			if (ret != nullptr) { if (!ret->seal() || ret->isEmpty()) { ret = nullptr; } } //delete ret;
 			stillMore = false; 
 		}
-		else if (ret == NULL || !ret->seal() || ret->isEmpty()) {
+		else if (ret == nullptr || !ret->seal() || ret->isEmpty()) {
 			corrupt = true;
 		}
 	}
 	else { //fqRead
+		if (fastq_istreams[pos] == nullptr || fastq_istreams[pos]->eof()) {
+			stillMore = false;
+			return nullptr;
+		}
 		vector<string>tmpLines(4, "");
 		stillMore = getDNAlines(tmpLines,pos);
 		if (stillMore) {
@@ -505,17 +639,17 @@ shared_ptr<DNA> InputStreamer::getDNA(int pos){
 		}
 
 		if (!stillMore || fastq_istreams[pos]->eof()) {
-			if (ret != NULL) { if (!ret->seal() || ret->isEmpty()) { ret = NULL; } }
+			if (ret != nullptr) { if (!ret->seal() || ret->isEmpty()) { ret = nullptr; } }
 			stillMore = false;
-		} else if (ret == NULL || !ret->seal() || ret->isEmpty()) {
+		} else if (ret == nullptr || !ret->seal() || ret->isEmpty()) {
 			corrupt = true;
 		}
 
-		if (ret != NULL && !keepPairHD) {//better cut in early
+		if (ret != nullptr && !keepPairHD) {//better cut in early
 			ret->setHeader(ret->getPositionFreeId());
 		}
 		if (corrupt) {
-			ret = NULL;
+			ret = nullptr;
 			repairInStream = true;
 		}
 	}
@@ -770,20 +904,49 @@ void InputStreamer::setupFna(string in) {
 	}
 }
 
-int InputStreamer::auto_fq_version() {
+qual_score InputStreamer::auto_fq_version() {
 	if (fastQver != 0) {
 		return fastQver;
 	}
-	fastQver = (qual_score)auto_fq_version(minQScore, maxQScore);
+
+	return (qual_score)auto_fq_version(minQScore, maxQScore);
+}
+
+qual_score InputStreamer::auto_fq_version(qual_score minQScoreIn, qual_score maxQScoreIn) {
+  // minQScoreIn/maxQScoreIn are raw ASCII quality characters from FASTQ lines.
+	// Prefer Phred+33 unless there is strong evidence for legacy +64.
+	if ((int)minQScoreIn < 59) { return 33; }
+	if ((int)maxQScoreIn > 74) { return 64; }
+	return 33;
+}
+qual_score InputStreamer::auto_fq_version(const vector<string>& ret) {
+	qual_score minAscii = SCHAR_MAX;
+	qual_score maxAscii = 0;
+	for (unsigned char ch : ret[3]) {
+		qual_score q = static_cast<qual_score>(ch);
+		if (q < minAscii) { minAscii = q; }
+		if (q > maxAscii) { maxAscii = q; }
+	}
+
+	if (minAscii < minQScore) { minQScore = minAscii; }
+	if (maxAscii > maxQScore) { maxQScore = maxAscii; }
+
+	const bool modernIlluminaHeader =
+		(ret[0].find(" 1:N:") != string::npos) ||
+		(ret[0].find(" 2:N:") != string::npos) ||
+		(ret[0].find(" 1:Y:") != string::npos) ||
+		(ret[0].find(" 2:Y:") != string::npos);
+
+	if (modernIlluminaHeader) {
+		fastQver = 33;
+		fqSolexaFmt = false;
+	}
+	else {
+		fastQver = static_cast<qual_score>(auto_fq_version(minQScore, maxQScore));
+	}
 	return fastQver;
 }
 
-int InputStreamer::auto_fq_version(qual_score minQScoreIn, qual_score maxQScoreIn) {
-	(void)maxQScoreIn;
-	// Conservative default: modern fastq is Phred+33, old Illumina is +64.
-	if ((int)minQScoreIn < 59) return 33;
-	return 64;
-}
 
 bool InputStreamer::setupFastaQual(string path, string fasta, string qual, int& pairs, string subsPairs, bool simu) {
 	allStreamClose();
