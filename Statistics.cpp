@@ -19,8 +19,8 @@ void MEstats::addStats(shared_ptr<MEstats> o) {
 void MEstats::print(ostream& give) {
     if (!merged_counter_) { return; }
     give << "merged reads: " << merged_counter_ << "/"
-        << total_read_preMerge_ << " (" << (double)merged_counter_ / total_read_preMerge_
-        << ")" << std::endl;
+        << total_read_preMerge_ << " (" << 100.*(double)merged_counter_ / total_read_preMerge_
+        << "%)" << std::endl;
 }
 
 void ReportStats::setbLvsQlogs(bool b) {

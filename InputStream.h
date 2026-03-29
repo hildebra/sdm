@@ -419,8 +419,12 @@ private:
                 std::unique_lock<std::mutex> lk(reader_mutex);
                 reader_cv.wait(lk, [this]() { return stop_reader.load() || !worker_has_data.load(); });
                 if (stop_reader.load()) break;
-                bool ok = internalReadChunk();
-                if (bufSW == 0) {
+                bool ok = false;
+                {
+                    std::lock_guard<std::mutex> lg(localMTX);
+                    ok = internalReadChunk();
+                }
+                if (!ok || bufSW == 0) {
                     worker_has_data.store(false);
                     stop_reader.store(true);
                     reader_cv.notify_one();
@@ -533,7 +537,8 @@ private:
 
 class InputStreamer{
 public:
-    InputStreamer(bool fnRd, qual_score fq, string ignore_IO_errors,string pairedRD_HD_out, int threads) :
+    InputStreamer(bool fnRd, qual_score fq, string ignore_IO_errors,
+        string pairedRD_HD_out, int threads) :
             _fileLength(10), _max(60), _last(0),
 			_globalRdsRead(0), _globalMaxRdsRead(-1), _localRdsRead(0),
             fasta_istreams(3, NULL), quality_istreams(3, NULL), fastq_istreams(3, NULL),

@@ -558,7 +558,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	collectStatistics(2, nullptr), statAddition(2, nullptr),
 	FastaF(of->FastaF), QualF(of->QualF), FastqF(of->FastqF),
 	MIDfqF(of->MIDfqF), derepMinNum(of->derepMinNum),
-	lMD(nullptr),
+   lMD(of->lMD),
 	tAdapter(of->tAdapter), tAdapterLength(of->tAdapterLength),
 	removeAdapter(of->removeAdapter), bDoMultiplexing(of->bDoMultiplexing),
 	bDoBarcode(of->bDoBarcode), bDoBarcode2(of->bDoBarcode2), bDoBarcode2Rd1(of->bDoBarcode2Rd1),
@@ -1983,12 +1983,18 @@ bool Filters::eval_reversingBC(bool fwd) {
 	if (!fwd && !bDoBarcode2) {
 		return true;
 	}
+    if (BCdFWDREV.size() < 2) {
+		return true;
+	}
 	/*BCdecide lbcd(BCdFWD);
 	if ( !fwd ) {
 		lbcd = BCdREV;
 	}*/
 	if (BCdFWDREV[!fwd].b_BCdirFix) { return true; }
-	BCdFWDREV[!fwd].b_BCdirFix = true; lMD->setBCfixed(true, fwd);
+  BCdFWDREV[!fwd].b_BCdirFix = true;
+	if (lMD != nullptr) {
+		lMD->setBCfixed(true, fwd);
+	}
 	if (BCdFWDREV[!fwd].BCrevhit > BCdFWDREV[!fwd].BChit * 8) {//use reversed_ BC ..
 		BCdFWDREV[!fwd].reversedBCs = true;
 		if (fwd) {

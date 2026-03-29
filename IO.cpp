@@ -445,6 +445,7 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 				MD->checkFastqHeadVersion(tmp);
 				fqHeadVer = false;
 			}
+			cdbg("FASTQversion: " + to_string(fastqVer) + ". ");
 		}
 		IS->allStreamReset();
 		cdbg( " is " + to_string(taskBatchMultiplier) + ". ");
@@ -515,7 +516,8 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 			// If we read any records into the tmp buffer, process them even if cont==false (partial final block).
 			if (tmpStrHolders[thrCnt]->size() > 0) {
 				//fastqVer = IS->fastQscore();
-				bool cont2 = multi_read_paired_STRready(tmpStrHolders[thrCnt], MIDuse, MD, 0, keepPairedHD, fastqVer);
+				bool cont2 = multi_read_paired_STRready(tmpStrHolders[thrCnt], MIDuse, 
+					MD, 0, keepPairedHD, fastqVer);
 			}
 			if (!cont && tmpStrHolders[thrCnt]->size() == 0) { break; }
 				//if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
