@@ -154,9 +154,12 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 	double ratAccErr = dAcSc / tAcSc;///logRatio(dAcSc, tAcSc);
 	*/
 
+<<<<<<< HEAD
 	double dAccuE = dx->getAccumError(); double rAccuE = rx->getAccumError();
 	double AccErrRatio = pointFiveRatio(dAccuE, rAccuE,0.25);
 
+=======
+>>>>>>> 28917b13a49e93926c57ceaa7fc8d91376d45114
 	double dQ=dx->getAvgQual(); double rQ=rx->getAvgQual();
 	if (d2 != nullptr) { dQ += d2->getAccumError();  }
 	if (r2 != nullptr) { rQ += r2->getAccumError();  }
@@ -164,8 +167,12 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 	double qualRatio = dQ / rQ; //higher better
 
 
+<<<<<<< HEAD
 	//double ratLength = double(curL) / (double)refL; //higher better
 	double ratLength = pointFiveRatio(double(curL), (double)refL); //higher better, but not too much better, as this can be due to chimeras etc
+=======
+	double ratLength = double(curL) / (double)refL; //higher better
+>>>>>>> 28917b13a49e93926c57ceaa7fc8d91376d45114
     double ratId = 1.;
 	if (refpid > 0.) {
 		ratId = d1pid / refpid * 10. - 9.; //higher better //10-fold weighting
@@ -176,7 +183,12 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 	if (dMerge != rMerg) {
 		if (dMerge) {
 			mergePreference = 1.0 + mergedFraction;
+<<<<<<< HEAD
 		}else {
+=======
+		}
+		else {
+>>>>>>> 28917b13a49e93926c57ceaa7fc8d91376d45114
 			mergePreference = 1.0 - (0.5 * mergedFraction);
 		}
 	}
@@ -191,12 +203,20 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 	}
 
 	//also capture the size difference.. as higher abudant reads might be more trustworthy, but only if other metrics are not too different
+<<<<<<< HEAD
 	double logsizeRatio = pointFiveRatio(double(dSiz), double(rSiz),0.25); //higher better for r
 
 
 	double thresh(1.02f);
 	//qualRatio 
 	if ( ((AccErrRatio* ratLength * ratId * mergePreference * logsizeRatio * mergeLenDevRatio) ) > thresh) {
+=======
+	double logsizeRatio = logRatio(double(dSiz), double(rSiz)); //higher better for r
+
+
+	double thresh(1.05f);
+	if ( ((qualRatio * ratLength * ratId * mergePreference * logsizeRatio * mergeLenDevRatio) ) > thresh) {
+>>>>>>> 28917b13a49e93926c57ceaa7fc8d91376d45114
 		return true;
 	}
 	//normalize and invert
@@ -234,6 +254,7 @@ bool whoIsBetter(shared_ptr<DNAunique> d1,
 
 }
 
+<<<<<<< HEAD
 double pointFiveRatio(double v1, double v2, double scale ) {
 	
 	double ret = 1.0;
@@ -246,6 +267,8 @@ double pointFiveRatio(double v1, double v2, double scale ) {
 	}
 	return ret;
 }
+=======
+>>>>>>> 28917b13a49e93926c57ceaa7fc8d91376d45114
 
 double logRatio(double v1, double v2) {
 	double ret = 1.f;
