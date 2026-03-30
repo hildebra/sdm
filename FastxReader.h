@@ -2,6 +2,7 @@
 #pragma once
 
 #include <sstream>
+#include <vector>
 
 enum FileFormat {
     FORMAT_AUTO_DETECT,
@@ -36,7 +37,7 @@ private:
     std::stringstream str_stream_;
     std::string str_buffer_ = "";
     FileFormat file_format_;
-    char* block_buffer_;
+    std::vector<char> block_buffer_;
     size_t block_buffer_size_;
     bool strip_space_ = true;
     

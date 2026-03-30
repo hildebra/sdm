@@ -49,7 +49,30 @@ void ini_DNAconstants() {
     DNA_trans['t'] = 'A';
     DNA_trans['c'] = 'G';
     DNA_trans['g'] = 'C';
+
+    DNA_trans['W'] = 'W';
+    DNA_trans['w'] = 'W';
+    DNA_trans['S'] = 'S';
+    DNA_trans['s'] = 'S';
+    DNA_trans['M'] = 'K';
+    DNA_trans['m'] = 'K';
+    DNA_trans['K'] = 'M';
+    DNA_trans['k'] = 'M';
     
+    DNA_trans['R'] = 'Y';
+    DNA_trans['r'] = 'Y';
+    DNA_trans['Y'] = 'R';
+    DNA_trans['y'] = 'R';
+    DNA_trans['B'] = 'V';
+    DNA_trans['b'] = 'V';
+    DNA_trans['D'] = 'H';
+    DNA_trans['d'] = 'H';
+
+    DNA_trans['H'] = 'D';
+    DNA_trans['h'] = 'D';
+    DNA_trans['V'] = 'B';
+    DNA_trans['v'] = 'B';
+ 
     //memset(DNA_amb, unsigned int(1), 256);
 	for (int i = 0; i < 256; i++) {
 		DNA_amb[i] = 1;
@@ -80,9 +103,9 @@ void ini_DNAconstants() {
     NT_POS['c'] = 3;
     NT_POS['n'] = 4;
     
-    //for ( int i = 0; i < 256 * 256; i++ ) { DNA_IUPAC[i] = 1;  }
+    for ( int i = 0; i < 256 * 256; i++ ) { DNA_IUPAC[i] = 1;  }
     
-    memset(DNA_IUPAC, 1, 1 << 16);
+    //memset(DNA_IUPAC, 1, 1 << 16);
     
     // ?  Don't you want to iterate the whole DNA space (which comprises 15 elements)
     // For each char in the DNA space mapping with N is a hit.
