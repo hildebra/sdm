@@ -719,11 +719,8 @@ bool whoIsBetter(shared_ptr<DNAunique> d1, shared_ptr<DNAunique> r1, float& ever
 
 double logRatio(double v1, double v2);
 double loglogRatio(double v1, double v2);
-<<<<<<< HEAD
 double pointFiveRatio(double v1, double v2, double scale = 0.5);
 
-=======
->>>>>>> 28917b13a49e93926c57ceaa7fc8d91376d45114
 
 
 
