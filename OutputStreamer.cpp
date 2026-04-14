@@ -76,10 +76,35 @@ void ofbufstream::emptyStream() {
 void ofbufstream::activate() {
 	if (coutW) return;
 	if (primary) return;
+    string outFile = file;
+	trim(outFile);
+	if (outFile.size() >= 2) {
+		const char first = outFile.front();
+		const char last = outFile.back();
+		if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+			outFile = outFile.substr(1, outFile.size() - 2);
+			trim(outFile);
+		}
+	}
+	file = outFile;
+	isGZ = isGZfile(file);
 	ios_base::openmode m = ios::out;
 	if (modeIO == ios::app) m |= ios::app;
 	else m |= ios::trunc;
-	primary = std::make_unique<std::ofstream>(file.c_str(), m | ios::binary);
+
+	if (isGZ) {
+#if defined(_gzipread)
+		primary = std::make_unique<zstr::ofstream>(file.c_str(), m | ios::binary);
+#elif defined(_isa1gzip)
+		primary = std::make_unique<GzipOfstream>(file.c_str(), 8 * 1024 * 1024);
+#else
+		cerr << "Warning: gzip output requested but no gzip support compiled in; writing uncompressed output to " << file << endl;
+		primary = std::make_unique<std::ofstream>(file.c_str(), m | ios::binary);
+#endif
+	}
+	else {
+		primary = std::make_unique<std::ofstream>(file.c_str(), m | ios::binary);
+	}
 }
 
 void ofbufstream::deactivate() {
@@ -146,7 +171,7 @@ void ofbufstream::write(std::string s, std::string file) {
 }
 
 dualOfBufStream::dualOfBufStream(void)
-	: buf1S(20000), buf2S(20000), bufs(2, ""), FileNames(2, ""), ostr(2), opened(2, false), active(false) {
+	: buf1S(20000), buf2S(20000), bufs(2, ""), FileNames(2, ""), dualOutStr(2), opened(2, false), active(false) {
 	bufs[0].reserve(buf1S);
 	bufs[1].reserve(buf2S);
 }
@@ -169,50 +194,50 @@ void dualOfBufStream::write(const string& in, int stream) {
 
 void dualOfBufStream::write2(const string& in, const string& in2) {
  Instr::TimedLockGuard lg(dualMtx);
-	if (ostr.size() > 1 && ostr[1]) {
-		(*ostr[1]) << in2;
+	if (dualOutStr.size() > 1 && dualOutStr[1]) {
+		(*dualOutStr[1]) << in2;
 	}
-	if (ostr.size() > 0 && ostr[0]) {
-		(*ostr[0]) << in;
+	if (dualOutStr.size() > 0 && dualOutStr[0]) {
+		(*dualOutStr[0]) << in;
 	}
 }
 
 bool dualOfBufStream::open(const string IF, int mif, int pair, bool isMC, size_t bufferS) {
-  if (pair < 0 || (size_t)pair >= ostr.size() || (size_t)pair >= opened.size() || (size_t)pair >= FileNames.size()) {
+  if (pair < 0 || (size_t)pair >= dualOutStr.size() || (size_t)pair >= opened.size() || (size_t)pair >= FileNames.size()) {
 		return false;
 	}
 	if (opened[pair]) {
 		return false;
 	}
-	ostr[pair] = std::make_unique<ofbufstream>(IF, mif, isMC, bufferS);
+	dualOutStr[pair] = std::make_unique<ostr>(IF, mif, isMC, bufferS);
 	opened[pair] = true;
 	FileNames[pair] = IF;
-	if (!ostr[pair]) { return false; }
+	if (!dualOutStr[pair]) { return false; }
 	return true;
 }
 
 bool dualOfBufStream::activate() {
 	if (active) { return true; }
-	for (size_t i = 0; i < ostr.size(); i++) { if (ostr[i] != nullptr) { ostr[i]->activate(); } }
+	for (size_t i = 0; i < dualOutStr.size(); i++) { if (dualOutStr[i] != nullptr) { dualOutStr[i]->activate(); } }
 	active = true;
 	cerr << "Activating dual ostreams: " << FileNames[0] << "," << FileNames[1] << endl;
 	return true;
 }
 
 bool dualOfBufStream::deactivate() {
-	for (size_t i = 0; i < ostr.size(); i++) { if (ostr[i] != nullptr) { ostr[i]->deactivate(); } }
+	for (size_t i = 0; i < dualOutStr.size(); i++) { if (dualOutStr[i] != nullptr) { dualOutStr[i]->deactivate(); } }
 	active = false;
 	return true;
 }
 
 void dualOfBufStream::emptyStreams(bool force) {
  Instr::TimedLockGuard lg(dualMtx);
-	if ((force || bufs[1].size() >= buf2S) && ostr.size() > 1 && ostr[1]) {
-		(*ostr[1]) << bufs[1];
+	if ((force || bufs[1].size() >= buf2S) && dualOutStr.size() > 1 && dualOutStr[1]) {
+		(*dualOutStr[1]) << bufs[1];
 		bufs[1].clear();
 	}
-	if ((force || bufs[0].size() >= buf1S) && ostr.size() > 0 && ostr[0]) {
-		(*ostr[0]) << bufs[0];
+	if ((force || bufs[0].size() >= buf1S) && dualOutStr.size() > 0 && dualOutStr[0]) {
+		(*dualOutStr[0]) << bufs[0];
 		bufs[0].clear();
 	}
 }

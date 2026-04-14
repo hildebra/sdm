@@ -115,7 +115,7 @@ private:
     size_t buf1S, buf2S;
     vector<string> bufs;
     vector<string> FileNames;
-	vector<std::shared_ptr<ofbufstream>> ostr;
+	vector<std::shared_ptr<ofbufstream>> dualOutStr;
     vector<bool> opened;
     bool active;
     mutex dualMtx;
@@ -230,7 +230,7 @@ public:
 	bool Demulti2Fls() { return bDoDemultiplexIntoFiles; }
 	bool doDeriplicate() { return	b_doDereplicate; }
 	bool doWriteNonBCrds() { return fqNoBCFile.size() == 2; }
-	bool doDerepMrgSrch() { return dereplicator->doSearchWithMerge(); }
+	bool doDerepMrgSrch() { if (dereplicator != nullptr) { return dereplicator->doSearchWithMerge(); } else { return false; } }
 
 
 private:

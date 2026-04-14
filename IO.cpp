@@ -313,7 +313,7 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 
 		}
 	}
-	if ( ( MD->mergeReads() || MD->doDerepMrgSrch()) && read2notNull) {
+	if (MD->isPEseq() == 2 && ( MD->mergeReads() || MD->doDerepMrgSrch()) && read2notNull) {
 		MD->findSeedForMerge(tdn[0], tdn[1], curThread);
 	}
 

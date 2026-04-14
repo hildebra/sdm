@@ -16,7 +16,7 @@ isa_FLAGS2 :=
 #isa_FLAGS2 := -lisal 
 
 UNAME := $(shell uname)
-CPPFLAGS += -O3 -std=c++17 -pthread $(isa_FLAGS)
+CPPFLAGS += -O3 -std=c++20 -pthread $(isa_FLAGS)
 #-D_isa1gzip
 CPPFLAGS += $(foreach includedir,$(program_INCLUDE_DIRS),-I$(includedir))
 CXXFLAGS=-D__STDC_CONSTANT_MACROS

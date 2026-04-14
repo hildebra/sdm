@@ -81,11 +81,33 @@ std::string ftos(float number,int digits) {
     return ss.str();
 }
 
-bool isGZfile(const string fi) {
-    if (fi.size() >= 3 && fi.compare(fi.size() - 3, 3, ".gz") == 0) {
-        return true;
+static string normalizePathToken(string fi) {
+    trim(fi);
+    if (fi.size() >= 2) {
+        const char first = fi.front();
+        const char last = fi.back();
+        if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+            fi = fi.substr(1, fi.size() - 2);
+            trim(fi);
+        }
     }
-    return false;
+    return fi;
+}
+
+bool isGZfile(const string fi) {
+    string f = normalizePathToken(fi);
+    if (f.size() < 3) {
+        return false;
+    }
+    const size_t p = f.size() - 3;
+    const char c0 = static_cast<char>(std::tolower(static_cast<unsigned char>(f[p])));
+    const char c1 = static_cast<char>(std::tolower(static_cast<unsigned char>(f[p + 1])));
+    const char c2 = static_cast<char>(std::tolower(static_cast<unsigned char>(f[p + 2])));
+    return (c0 == '.' && c1 == 'g' && c2 == 'z');
+}
+
+static string normalizeInputPath(string fileS) {
+    return normalizePathToken(std::move(fileS));
 }
 
 std::istream& safeGetline(std::istream& is, std::string& t) {
@@ -303,14 +325,39 @@ string detectSeqFmt(const string inF) {
     vector<string> tfasP = splitByCommas(inF, ';');
     for (size_t i = 0; i < tfasP.size(); i++) {
         vector<string> tfas = splitByCommas(tfasP[i]);
-        string fileS = tfas[0];
+        string fileS = normalizeInputPath(tfas[0]);
         std::unique_ptr<std::istream> fnax;
         string file_type = "test file";
         string tmp("");
         string ret = "";
         if (fileS != "") {
+            string fLower = fileS;
+            std::transform(fLower.begin(), fLower.end(), fLower.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+
+            // Prefer extension-based detection for gzip files to avoid stream backend issues during auto-detect.
+            if (isGZfile(fileS)) {
+                string base = fLower.substr(0, fLower.size() - 3);
+                if (base.size() >= 6 && (base.compare(base.size() - 6, 6, ".fastq") == 0)) {
+                    return "-i_fastq";
+                }
+                if (base.size() >= 3 && (base.compare(base.size() - 3, 3, ".fq") == 0)) {
+                    return "-i_fastq";
+                }
+                if (base.size() >= 6 && (base.compare(base.size() - 6, 6, ".fasta") == 0)) {
+                    return "-i_fna";
+                }
+                if (base.size() >= 4 && (base.compare(base.size() - 4, 4, ".fna") == 0 || base.compare(base.size() - 3, 3, ".fa") == 0)) {
+                    return "-i_fna";
+                }
+            }
+
 #ifdef _gzipread
-            fnax.reset(new zstr::ifstream(fileS.c_str(), std::ios::in));
+            if (isGZfile(fileS)) {
+                fnax.reset(new zstr::ifstream(fileS.c_str()));
+            }
+            else {
+                fnax.reset(new std::ifstream(fileS.c_str(), std::ios::in));
+            }
 #else
             fnax.reset(new std::ifstream(fileS.c_str(), std::ios::in));
 #endif
@@ -331,7 +378,8 @@ string detectSeqFmt(const string inF) {
                     ;
                 }
                 else {
-                    std::cerr << " Could not auto detect input format. First non-empty line of your file looked like:\n" << tmp << std::endl;
+					bool isGZ = isGZfile(fileS);
+                    std::cerr << "\nCouldn't open " << file_type << " file \"" << fileS << "\"! Skipping..\n";
                     exit(888);
                 }
             }
