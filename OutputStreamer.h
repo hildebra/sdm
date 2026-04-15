@@ -13,6 +13,9 @@
 #include <memory>
 #include <vector>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 
 
 #ifdef _isa1gzip
@@ -43,12 +46,12 @@ typedef gzFile_t* gzFile;
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
     ofbufstream() :file("T"), keeper(0), keeperW(0), modeIO(ios::app), used(0), usedW(0),
-		coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(0) {}
+     coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(5* 1024 * 1024) {}
 	ofbufstream(size_t bufferS) :file("T"), keeper(0), keeperW(0), modeIO(ios::app), used(0), usedW(0),
 		coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(bufferS) {
 
     }
-    ofbufstream(const string IF, int mif, bool isMC = false, size_t bufferS = 20000);
+    ofbufstream(const string IF, int mif, bool isMC = false, size_t bufferS = 5* 1024 * 1024);
     ~ofbufstream();
     void finishWrites();
     bool operator! (void);
@@ -65,6 +68,11 @@ private:
     bool internalWriteBuffer(std::vector<char>&& buf, bool closeThis);
     void write(std::string s, std::string file);
     void writeStream(bool doKickoff = true);
+	void enqueueBuffer(std::vector<char>&& buf);
+	void writerLoop();
+	void startWriterThread();
+	void stopWriterThread();
+	bool shouldUseAsyncWriter() const;
 
     //functions
     string file;
@@ -84,9 +92,13 @@ private:
 	// Use a persistent thread-pool for task submission
 	bool use_thread_pool = false;
     // end
-    // track outstanding async write tasks
-	std::vector<std::future<bool>> writeKickoffs;
-	std::mutex writeKickoffs_mtx;
+    bool asyncWriterEnabled = false;
+	bool stopWriter = false;
+	bool writerStarted = false;
+	size_t maxQueuedBuffers = 16;
+	std::deque<std::vector<char>> pendingBuffers;
+	std::condition_variable queue_cv;
+	std::thread writerThread;
 
 };
 
@@ -107,7 +119,7 @@ public:
     ~dualOfBufStream(void);
     void write(const string& in, int stream);
     void write2(const string& in, const string& in2);
-    bool open(const string IF, int mif, int pair, bool isMC = false, size_t bufferS = 20000);
+    bool open(const string IF, int mif, int pair, bool isMC = false, size_t bufferS = 1024 * 1024);
     bool activate();
     bool deactivate();
     void emptyStreams(bool force);
@@ -209,6 +221,7 @@ public:
 
 	atomic_size_t merged_counter_ = 0;
 	atomic_size_t total_read_preMerge_ = 0;
+	atomic_size_t paired_sync_skipped_counter_ = 0;
 
 	uint getDemultiBPperSR() { return demultiBPperSR; }
 	void resetDemultiBPperSR() { demultiBPperSR = 0; }

@@ -128,6 +128,11 @@ GzipOfstream::GzipOfstream(const std::string& filename, size_t bufferSize = 20 *
 
 GzipOfstream::~GzipOfstream() {
 	sync();  // Ensure all remaining data is flushed
+
+#if defined(_SDM_PARALLEL_GZIP_OUTPUT)
+	stopParallelWriter();
+#endif
+
 	if (file.is_open()) {
 		file.close();
 	}
@@ -135,8 +140,25 @@ GzipOfstream::~GzipOfstream() {
 
 bool GzipOfstream::compressAndWrite() {
 	size_t dataSize = pptr() - pbase();
+	if (dataSize == 0) {
+		return file.good();
+	}
+
+#if defined(_SDM_PARALLEL_GZIP_OUTPUT)
+	if (!parallelWriteFailed) {
+		std::vector<uint8_t> inputBlock(dataSize);
+		std::memcpy(inputBlock.data(), uncompressedData.data(), dataSize);
+		enqueueCompressedTask(std::move(inputBlock));
+
+		setp(reinterpret_cast<char*>(uncompressedData.data()),
+			reinterpret_cast<char*>(uncompressedData.data() + bufferSize));
+		return file.good();
+	}
+#endif
+
 	state.next_in = uncompressedData.data();
 	state.avail_in = dataSize;
+	state.end_of_stream = 0;
 
 	// Compress until all data is processed
 	while (state.avail_in > 0) {

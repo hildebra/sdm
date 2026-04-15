@@ -16,6 +16,8 @@
 class ThreadPool {
 public:
     static ThreadPool& instance();
+    static void configure(size_t threads);
+    static size_t configured_thread_count();
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
 
@@ -55,6 +57,8 @@ public:
 
 private:
     ThreadPool(size_t threads = 0);
+    static std::atomic<size_t>& configured_threads_();
+    static std::atomic<bool>& instance_created_();
 
     std::vector<std::thread> workers_;
     std::queue<std::function<void()>> tasks_;
@@ -66,9 +70,39 @@ private:
     size_t max_queue_size_ = 0;
 };
 // Inline implementations to make ThreadPool header-only and avoid linker issues
+inline std::atomic<size_t>& ThreadPool::configured_threads_() {
+    static std::atomic<size_t> configured(0);
+    return configured;
+}
+
+inline std::atomic<bool>& ThreadPool::instance_created_() {
+    static std::atomic<bool> created(false);
+    return created;
+}
+
 inline ThreadPool& ThreadPool::instance() {
-    static ThreadPool pool;
+    static ThreadPool pool(configured_threads_().load());
+    instance_created_().store(true);
     return pool;
+}
+
+inline void ThreadPool::configure(size_t threads) {
+    if (threads == 0) {
+        return;
+    }
+    if (instance_created_().load()) {
+        return;
+    }
+    configured_threads_().store(threads);
+}
+
+inline size_t ThreadPool::configured_thread_count() {
+    size_t configured = configured_threads_().load();
+    if (configured > 0) {
+        return configured;
+    }
+    size_t hw = std::thread::hardware_concurrency();
+    return hw > 0 ? hw : 2;
 }
 
 inline ThreadPool::ThreadPool(size_t threads) : stop_(false) {

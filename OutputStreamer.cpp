@@ -2,11 +2,242 @@
 #include "ThreadPool.h"
 #include "Benchmark.h"
 
+#if defined(_gzipread) && defined(_SDM_PARALLEL_GZIP_OUTPUT)
+// Uses zstr (already included in _gzipread builds via OutputStreamer.h).
+#include "include/iowrap.h"
+class ParallelGzipZlibOfstream : public std::ostream, private std::streambuf {
+public:
+	ParallelGzipZlibOfstream(const std::string& filename, std::ios_base::openmode mode, size_t bufferSize)
+		: std::ostream(this), file_(filename, mode), bufferSize_(bufferSize) {
+		if (!file_.is_open()) {
+			throw std::runtime_error("Error opening file: " + filename);
+		}
+		if (bufferSize_ == 0) {
+			bufferSize_ = 1024 * 1024;
+		}
+		buffer_.resize(bufferSize_);
+		setp(buffer_.data(), buffer_.data() + buffer_.size());
+		startWriterThread();
+	}
+
+	~ParallelGzipZlibOfstream() override {
+		sync();
+		stopWriterThread();
+		if (file_.is_open()) {
+			file_.close();
+		}
+	}
+
+protected:
+	std::streambuf::int_type overflow(std::streambuf::int_type ch) override {
+		if (ch != std::streambuf::traits_type::eof()) {
+			*pptr() = static_cast<char>(ch);
+			pbump(1);
+		}
+		return compressAndQueue() ? ch : std::streambuf::traits_type::eof();
+	}
+
+	int sync() override {
+		return compressAndQueue() ? 0 : -1;
+	}
+
+private:
+	bool compressAndQueue() {
+		const size_t dataSize = static_cast<size_t>(pptr() - pbase());
+		if (dataSize == 0) {
+			return file_.good();
+		}
+
+		std::vector<uint8_t> input(dataSize);
+		std::memcpy(input.data(), buffer_.data(), dataSize);
+
+		{
+			std::unique_lock<std::mutex> lk(mtx_);
+			cv_.wait(lk, [this]() {
+				return stop_ || inFlight_ < maxInFlight_;
+			});
+			if (stop_) {
+				return false;
+			}
+			pending_.emplace_back(ThreadPool::instance().submit([in = std::move(input)]() mutable {
+				return compressMember(std::move(in));
+			}));
+			++inFlight_;
+		}
+		cv_.notify_all();
+
+		setp(buffer_.data(), buffer_.data() + buffer_.size());
+		return file_.good();
+	}
+
+	static std::vector<uint8_t> compressMember(std::vector<uint8_t>&& input) {
+		if (input.empty()) {
+			return std::vector<uint8_t>();
+		}
+
+		z_stream strm;
+		std::memset(&strm, 0, sizeof(strm));
+		const int initRc = deflateInit2(&strm, Z_BEST_SPEED, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
+		if (initRc != Z_OK) {
+			throw std::runtime_error("deflateInit2 failed with code: " + std::to_string(initRc));
+		}
+
+		std::vector<uint8_t> out(compressBound(static_cast<uLong>(input.size())) + 128);
+		strm.next_in = reinterpret_cast<Bytef*>(input.data());
+		strm.avail_in = static_cast<uInt>(input.size());
+		strm.next_out = out.data();
+		strm.avail_out = static_cast<uInt>(out.size());
+
+		int rc = Z_OK;
+		while (rc == Z_OK) {
+			rc = deflate(&strm, Z_FINISH);
+			if (rc == Z_OK && strm.avail_out == 0) {
+				size_t oldSize = out.size();
+				out.resize(oldSize * 2);
+				strm.next_out = out.data() + oldSize;
+				strm.avail_out = static_cast<uInt>(out.size() - oldSize);
+			}
+		}
+
+		if (rc != Z_STREAM_END) {
+			deflateEnd(&strm);
+			throw std::runtime_error("deflate failed with code: " + std::to_string(rc));
+		}
+
+		const int endRc = deflateEnd(&strm);
+		if (endRc != Z_OK) {
+			throw std::runtime_error("deflateEnd failed with code: " + std::to_string(endRc));
+		}
+
+		out.resize(static_cast<size_t>(strm.total_out));
+		return out;
+	}
+
+	void startWriterThread() {
+		if (started_) {
+			return;
+		}
+		stop_ = false;
+		writer_ = std::thread(&ParallelGzipZlibOfstream::writerLoop, this);
+		started_ = true;
+	}
+
+	void stopWriterThread() {
+		if (!started_) {
+			return;
+		}
+		{
+			std::lock_guard<std::mutex> lk(mtx_);
+			stop_ = true;
+		}
+		cv_.notify_all();
+		if (writer_.joinable()) {
+			writer_.join();
+		}
+		started_ = false;
+	}
+
+	void writerLoop() {
+		for (;;) {
+			std::future<std::vector<uint8_t>> fut;
+			{
+				std::unique_lock<std::mutex> lk(mtx_);
+				cv_.wait(lk, [this]() {
+					return stop_ || !pending_.empty();
+				});
+				if (pending_.empty()) {
+					if (stop_) {
+						break;
+					}
+					continue;
+				}
+				fut = std::move(pending_.front());
+				pending_.pop_front();
+			}
+
+			std::vector<uint8_t> compressed;
+			try {
+				compressed = fut.get();
+			}
+			catch (...) {
+				{
+					std::lock_guard<std::mutex> lk(mtx_);
+					stop_ = true;
+				}
+				cv_.notify_all();
+				break;
+			}
+			if (!compressed.empty()) {
+				file_.write(reinterpret_cast<const char*>(compressed.data()), static_cast<std::streamsize>(compressed.size()));
+			}
+
+			{
+				std::lock_guard<std::mutex> lk(mtx_);
+				if (inFlight_ > 0) {
+					--inFlight_;
+				}
+			}
+			cv_.notify_all();
+		}
+
+		for (;;) {
+			std::future<std::vector<uint8_t>> fut;
+			{
+				std::lock_guard<std::mutex> lk(mtx_);
+				if (pending_.empty()) {
+					break;
+				}
+				fut = std::move(pending_.front());
+				pending_.pop_front();
+			}
+			std::vector<uint8_t> compressed;
+			try {
+				compressed = fut.get();
+			}
+			catch (...) {
+				{
+					std::lock_guard<std::mutex> lk(mtx_);
+					stop_ = true;
+				}
+				cv_.notify_all();
+				break;
+			}
+			if (!compressed.empty()) {
+				file_.write(reinterpret_cast<const char*>(compressed.data()), static_cast<std::streamsize>(compressed.size()));
+			}
+			{
+				std::lock_guard<std::mutex> lk(mtx_);
+				if (inFlight_ > 0) {
+					--inFlight_;
+				}
+			}
+			cv_.notify_all();
+		}
+	}
+
+	std::ofstream file_;
+	size_t bufferSize_;
+	std::vector<char> buffer_;
+	std::deque<std::future<std::vector<uint8_t>>> pending_;
+	std::mutex mtx_;
+	std::condition_variable cv_;
+	std::thread writer_;
+	size_t inFlight_ = 0;
+	size_t maxInFlight_ = 32;
+	bool stop_ = false;
+	bool started_ = false;
+};
+#endif
+
 //**************************** ofbufstream ****************************
 ofbufstream::ofbufstream(const string IF, int mif, bool isMC, size_t bufferS)
 	: file(IF), keeper(bufferS), keeperW(bufferS), modeIO(mif), used(0), usedW(0),
 	coutW(false), isGZ(false), doMC(isMC), use_thread_pool(isMC), primary(nullptr), bufS(bufferS) {
-	if (bufS == 0) bufS = 20000;
+    if (bufS == 0) bufS = 5* 1024 * 1024;
+	if (keeper.size() != bufS) {
+		keeper.resize(bufS);
+		keeperW.resize(bufS);
+	}
 	if (file == "" || file == "-") {
 		coutW = true;
 		return;
@@ -15,20 +246,12 @@ ofbufstream::ofbufstream(const string IF, int mif, bool isMC, size_t bufferS)
 }
 
 ofbufstream::~ofbufstream() {
-	finishWrites();
 	deactivate();
 }
 
 void ofbufstream::finishWrites() {
-    // Wait for all outstanding write tasks to finish
-	{
-		std::lock_guard<std::mutex> lg(writeKickoffs_mtx);
-		for (auto &fut : writeKickoffs) {
-			if (fut.valid()) fut.wait();
-		}
-		writeKickoffs.clear();
-	}
-	emptyStream();
+   emptyStream();
+	stopWriterThread();
 }
 
 bool ofbufstream::operator! (void) {
@@ -38,39 +261,71 @@ bool ofbufstream::operator! (void) {
 }
 
 void ofbufstream::operator<< (const string& X) {
-  Instr::TimedLockGuard guard(output_mtx);
 	if (X.empty()) return;
 	if (coutW) {
 		cout << X;
 		return;
 	}
 	if (bufS == 0) {
+       Instr::TimedLockGuard guard(output_mtx);
 		if (primary) (*primary) << X;
 		return;
 	}
-
-  if (used + X.size() > keeper.size()) {
-		if (primary && used > 0) {
-			primary->write(keeper.data(), (streamsize)used);
+	if (!asyncWriterEnabled) {
+		Instr::TimedLockGuard guard(output_mtx);
+		if (used + X.size() > keeper.size()) {
+			if (primary && used > 0) {
+				primary->write(keeper.data(), (streamsize)used);
+			}
+			used = 0;
 		}
-		used = 0;
-	}
 
-	if (X.size() > keeper.size()) {
-		if (primary) primary->write(X.data(), (streamsize)X.size());
+		if (X.size() > keeper.size()) {
+			if (primary) primary->write(X.data(), (streamsize)X.size());
+			return;
+		}
+
+		memcpy(keeper.data() + used, X.data(), X.size());
+		used += X.size();
 		return;
 	}
 
-	memcpy(keeper.data() + used, X.data(), X.size());
-	used += X.size();
+	std::vector<char> flushBuf;
+	std::vector<char> directBuf;
+	{
+		Instr::TimedLockGuard guard(output_mtx);
+		if (used + X.size() > keeper.size() && used > 0) {
+			flushBuf.assign(keeper.begin(), keeper.begin() + used);
+			used = 0;
+		}
+
+		if (X.size() > keeper.size()) {
+			directBuf.assign(X.begin(), X.end());
+		}
+		else {
+			memcpy(keeper.data() + used, X.data(), X.size());
+			used += X.size();
+		}
+	}
+
+	if (!flushBuf.empty()) {
+		enqueueBuffer(std::move(flushBuf));
+	}
+	if (!directBuf.empty()) {
+		enqueueBuffer(std::move(directBuf));
+	}
 }
 
 void ofbufstream::emptyStream() {
-  Instr::TimedLockGuard guard(output_mtx);
 	if (coutW) return;
-	if (!primary || used == 0) return;
-	primary->write(keeper.data(), (streamsize)used);
-	used = 0;
+  if (!asyncWriterEnabled) {
+		Instr::TimedLockGuard guard(output_mtx);
+		if (!primary || used == 0) return;
+		primary->write(keeper.data(), (streamsize)used);
+		used = 0;
+		return;
+	}
+	writeStream(true);
 }
 
 void ofbufstream::activate() {
@@ -94,7 +349,11 @@ void ofbufstream::activate() {
 
 	if (isGZ) {
 #if defined(_gzipread)
+		#if defined(_SDM_PARALLEL_GZIP_OUTPUT)
+		primary = std::make_unique<ParallelGzipZlibOfstream>(file.c_str(), m | ios::binary, bufS);
+		#else
 		primary = std::make_unique<zstr::ofstream>(file.c_str(), m | ios::binary);
+		#endif
 #elif defined(_isa1gzip)
 		primary = std::make_unique<GzipOfstream>(file.c_str(), 8 * 1024 * 1024);
 #else
@@ -105,10 +364,16 @@ void ofbufstream::activate() {
 	else {
 		primary = std::make_unique<std::ofstream>(file.c_str(), m | ios::binary);
 	}
+
+	asyncWriterEnabled = shouldUseAsyncWriter();
+	if (asyncWriterEnabled) {
+		startWriterThread();
+	}
 }
 
 void ofbufstream::deactivate() {
 	if (coutW) return;
+	finishWrites();
 	if (primary) {
 		primary->flush();
 		primary.reset();
@@ -117,31 +382,106 @@ void ofbufstream::deactivate() {
 
 void ofbufstream::writeStream(bool doKickoff) {
     (void)doKickoff;
-	// swap active and write buffers and submit write task if possible
+  if (!asyncWriterEnabled) {
+		Instr::TimedLockGuard guard(output_mtx);
+		if (!primary || used == 0) {
+			return;
+		}
+		primary->write(keeper.data(), (streamsize)used);
+		used = 0;
+		return;
+	}
+
+	std::vector<char> bufCopy;
 	{
-		std::lock_guard<std::mutex> lg(append_mtx_);
-		if (used == 0) return; // nothing to write
-        // move current accumulated data into a temporary buffer for safe async write
-		keeperW.assign(keeper.begin(), keeper.begin() + used);
-		usedW = used;
+		Instr::TimedLockGuard guard(output_mtx);
+		if (!primary || used == 0) {
+			return;
+		}
+		bufCopy.assign(keeper.begin(), keeper.begin() + used);
 		used = 0;
 	}
-	// copy out the buffer to be written in the task
-	std::vector<char> bufCopy;
-	bufCopy.reserve(usedW);
-	bufCopy.insert(bufCopy.end(), keeperW.data(), keeperW.data() + usedW);
+	enqueueBuffer(std::move(bufCopy));
+}
 
-	if (use_thread_pool) {
-		// submit write task to persistent thread-pool and store future
-		auto fut = ThreadPool::instance().submit([this, b = std::move(bufCopy)]() -> bool {
-			return this->internalWriteBuffer(std::move(const_cast<std::vector<char>&>(b)), false);
-		});
-		std::lock_guard<std::mutex> lg(writeKickoffs_mtx);
-		writeKickoffs.push_back(std::move(fut));
-	} else {
-		// synchronous write using the copied buffer
-		internalWriteBuffer(std::move(bufCopy), false);
+void ofbufstream::enqueueBuffer(std::vector<char>&& buf) {
+	if (!asyncWriterEnabled || buf.empty()) {
+		return;
 	}
+	std::unique_lock<std::mutex> lk(append_mtx_);
+	queue_cv.wait(lk, [this]() {
+		return stopWriter || pendingBuffers.size() < maxQueuedBuffers;
+	});
+	if (stopWriter) {
+		return;
+	}
+	pendingBuffers.emplace_back(std::move(buf));
+	lk.unlock();
+	queue_cv.notify_all();
+}
+
+void ofbufstream::writerLoop() {
+	for (;;) {
+		std::vector<char> buf;
+		{
+			std::unique_lock<std::mutex> lk(append_mtx_);
+			queue_cv.wait(lk, [this]() {
+				return stopWriter || !pendingBuffers.empty();
+			});
+			if (pendingBuffers.empty()) {
+				if (stopWriter) {
+					break;
+				}
+				continue;
+			}
+			buf = std::move(pendingBuffers.front());
+			pendingBuffers.pop_front();
+			queue_cv.notify_all();
+		}
+
+		if (!buf.empty()) {
+			Instr::TimedLockGuard guard(output_mtx);
+			if (primary) {
+				primary->write(buf.data(), static_cast<std::streamsize>(buf.size()));
+			}
+		}
+	}
+}
+
+void ofbufstream::startWriterThread() {
+	if (!asyncWriterEnabled || writerStarted) {
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lg(append_mtx_);
+		stopWriter = false;
+	}
+	writerThread = std::thread(&ofbufstream::writerLoop, this);
+	writerStarted = true;
+}
+
+void ofbufstream::stopWriterThread() {
+	if (!writerStarted) {
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lg(append_mtx_);
+		stopWriter = true;
+	}
+	queue_cv.notify_all();
+	if (writerThread.joinable()) {
+		writerThread.join();
+	}
+	{
+		std::lock_guard<std::mutex> lg(append_mtx_);
+		pendingBuffers.clear();
+	}
+	writerStarted = false;
+	stopWriter = false;
+}
+
+bool ofbufstream::shouldUseAsyncWriter() const {
+	return isGZ;
 }
 
 bool ofbufstream::internalWrite(bool closeThis) {
@@ -171,7 +511,7 @@ void ofbufstream::write(std::string s, std::string file) {
 }
 
 dualOfBufStream::dualOfBufStream(void)
-	: buf1S(20000), buf2S(20000), bufs(2, ""), FileNames(2, ""), dualOutStr(2), opened(2, false), active(false) {
+   : buf1S(5*1024 * 1024), buf2S(5*1024 * 1024), bufs(2, ""), FileNames(2, ""), dualOutStr(2), opened(2, false), active(false) {
 	bufs[0].reserve(buf1S);
 	bufs[1].reserve(buf2S);
 }
@@ -225,7 +565,13 @@ bool dualOfBufStream::activate() {
 }
 
 bool dualOfBufStream::deactivate() {
-	for (size_t i = 0; i < dualOutStr.size(); i++) { if (dualOutStr[i] != nullptr) { dualOutStr[i]->deactivate(); } }
+	Instr::TimedLockGuard lg(dualMtx);
+	for (size_t i = 0; i < dualOutStr.size(); i++) {
+		if (dualOutStr[i] != nullptr) {
+			dualOutStr[i]->finishWrites();
+			dualOutStr[i]->deactivate();
+		}
+	}
 	active = false;
 	return true;
 }
@@ -368,6 +714,10 @@ OutputStreamer::~OutputStreamer() {
 		for (size_t x = 0; x < mergers.size(); x++) {
 			mergers[x].reset();
 		}
+	}
+	if (paired_sync_skipped_counter_ > 0) {
+		cerr << "Warning: skipped " << paired_sync_skipped_counter_.load()
+			<< " paired FASTQ write attempts to keep R1/R2 synchronized." << endl;
 	}
 	cdbg("Subfilters deleted, streams closed\n");
 	//for (size_t x = 0; x < merger.size(); x++) { delete merger[x]; } merger.clear(); 
@@ -980,7 +1330,8 @@ void OutputStreamer::writeForWrite(const shared_ptr<DNA>& d1, int Pair1, int Cst
 	std::shared_ptr<ostr> localFq1, localFq2;
 	thread_local string fastqTmp1;
 	thread_local string fastqTmp2;
-    // decide whether we need pair-level mutex and prepare local handles
+	const bool isStrictPairedFastqWrite = (BWriteFastQ && pairedSeq > 1 && Pair1 > 0 && Pair1 < 3 && Pair2 > 0 && Pair2 < 3);
+	// decide whether we need pair-level mutex and prepare local handles
 	bool doMutex = (Pair1 < 3 && pairedSeq > 1);
 	bool fq1cool = false;
 	bool fq2cool = false;
@@ -1010,6 +1361,12 @@ void OutputStreamer::writeForWrite(const shared_ptr<DNA>& d1, int Pair1, int Cst
 		if (doMutex) {
 			if (BWriteFastQ) {
 				if ((size_t)Cstream1 >= fqPairFile.size() || !fqPairFile[Cstream1] || !d1 || !d2) {
+					if (isStrictPairedFastqWrite) {
+						return;
+					}
+
+				}
+				if (isStrictPairedFastqWrite && Cstream1 != Cstream2) {
 					return;
 				}
 				localFqPair = fqPairFile[Cstream1];
@@ -1024,6 +1381,23 @@ void OutputStreamer::writeForWrite(const shared_ptr<DNA>& d1, int Pair1, int Cst
 	}
 
     // perform the actual writes outside the sqfqostrMTX
+	if (isStrictPairedFastqWrite) {
+		if (!localFqPair || !d1 || !d2) {
+			paired_sync_skipped_counter_++;
+			return;
+		}
+		fastqTmp1.clear(); fastqTmp2.clear();
+		d1->writeFastQ(fastqTmp1);
+		d2->writeFastQ(fastqTmp2);
+		if (fastqTmp1.empty() || fastqTmp2.empty()) {
+			paired_sync_skipped_counter_++;
+			return;
+		}
+		localFqPair->write2(fastqTmp1, fastqTmp2);
+		ReadsWritten++;
+		return;
+	}
+
 	if (localFqPair) {
 		fastqTmp1.clear(); fastqTmp2.clear();
 		d1->writeFastQ(fastqTmp1);

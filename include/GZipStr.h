@@ -4,6 +4,8 @@
 #ifdef _isa1gzip
 
 
+#define _SDM_PARALLEL_GZIP_OUTPUT
+
 #include <streambuf>
 #include <istream>
 #include <iostream>

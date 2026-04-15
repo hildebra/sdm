@@ -33,7 +33,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	bRequireRevPrim(false), alt_bRequireRevPrim(false),
 	bRequireFwdPrim(false), alt_bRequireFwdPrim(false), BcutTag(true),
 	bCompletePairs(false), bShortAmplicons(false),
-	minBCLength1_(0), minBCLength2_(0), maxBCLength1_(0), maxBCLength2_(0), minPrimerLength_(0), maxHomonucleotide(0), trimHomonucleotide(0),
+	minBCLength1_(0), minBCLength2_(0), maxBCLength1_(0), maxBCLength2_(0), minPrimerLength_(0), maxHomonucleotide_(0), trimHomonucleotide_(0),
 	cut5PR1(0), cut5PR2(0),
 	PrimerErrs(0), alt_PrimerErrs(0), barcodeErrors_(0),
 	MaxAmb(-1), alt_MaxAmb(-1),
@@ -432,7 +432,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	this->setFloatingQWin(QualWinWidth, QualWinThr);
 	this->setFloatingEWin(EndWinWidth, EndWinThr);
 	this->setMaxHomo(maxHomoNT);
-	this->setTrimHomo(trimHomoNT);
+	this->setTrimHomo3P(trimHomoNT);
 
 	//alternative options (mid qual filtering)
 	if (addModConf) {
@@ -581,7 +581,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	BcutTag(of->BcutTag),
 
 	bCompletePairs(of->bCompletePairs), bShortAmplicons(of->bShortAmplicons),
-	minBCLength1_(of->minBCLength1_), minBCLength2_(of->minBCLength2_), maxBCLength1_(of->maxBCLength1_), maxBCLength2_(of->maxBCLength2_), minPrimerLength_(of->minPrimerLength_), maxHomonucleotide(of->maxHomonucleotide), trimHomonucleotide(of->trimHomonucleotide),
+	minBCLength1_(of->minBCLength1_), minBCLength2_(of->minBCLength2_), maxBCLength1_(of->maxBCLength1_), maxBCLength2_(of->maxBCLength2_), minPrimerLength_(of->minPrimerLength_), maxHomonucleotide_(of->maxHomonucleotide_), trimHomonucleotide_(of->trimHomonucleotide_),
 	cut5PR1(of->cut5PR1), cut5PR2(of->cut5PR2),
 	PrimerErrs(of->PrimerErrs), alt_PrimerErrs(of->alt_PrimerErrs), barcodeErrors_(of->barcodeErrors_),
 	MaxAmb(of->MaxAmb), alt_MaxAmb(of->alt_MaxAmb),
@@ -1312,8 +1312,8 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 	int pair = max(0, pairPre);//corrects for -1 (undefined pair_) to set to 0
 
 	// We trim for poly-G / homonucleotide tail here, before filtering for length, and before trimming adapter sequences etc. 
-	if (trimHomonucleotide != 0) {
-		unsigned int homoNTnewlength = d->HomoNTTrim(trimHomonucleotide);
+	if (trimHomonucleotide_ != 0) {
+		unsigned int homoNTnewlength = d->HomoNTTrim(trimHomonucleotide_);
 		if (homoNTnewlength > 0) {
 			d->cutSeqPseudo(homoNTnewlength);
 			d->QualCtrl.HomoNTtrimmed = true;
@@ -1468,9 +1468,9 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		}
 	}
 	// Fused single-pass: ambiguity count + homonucleotide run detection
-	if (MaxAmb >= 0 || maxHomonucleotide != 0) {
+	if (MaxAmb >= 0 || maxHomonucleotide_ != 0) {
 		int ambNTs = 0;
-		bool homoOK = d->scanSequenceChecks(maxHomonucleotide, ambNTs);
+		bool homoOK = d->scanSequenceChecks(maxHomonucleotide_, ambNTs);
 		if (!homoOK) {
 			d->QualCtrl.HomoNT = true;
 			d->failed(); return false;
@@ -3526,7 +3526,7 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 		if (p2stat) { give << "; " << intwithcommas((int)cst2->AccErrTrimmed); } give << endl;
 	}
 
-	give << "  > (" << trimHomonucleotide << ") homo-nt trimmed  : " << spaceX(17 - digitsInt(maxHomonucleotide)) << intwithcommas((int)cst->HomoNTtrimmed);
+	give << "  > (" << trimHomonucleotide_ << ") trailing homo-nt trimmed  : " << spaceX(17 - digitsInt(maxHomonucleotide_)) << intwithcommas((int)cst->HomoNTtrimmed);
 	if (p2stat) { give << "; " << intwithcommas((int)cst2->HomoNTtrimmed); } give << endl;
 
 	give << "Rejected due to:\n";
@@ -3547,7 +3547,7 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 	if (p2stat) { give << "; " << intwithcommas((int)cst2->QualWin); } give << endl;
 	give << "  > max Sequence length (" << max_l << ")  : " << spaceX(18 - digitsInt(max_l)) << intwithcommas((int)cst->maxL);
 	if (p2stat) { give << "; " << intwithcommas((int)cst2->maxL); } give << endl;
-	give << "  > (" << maxHomonucleotide << ") homo-nt run  : " << spaceX(21 - digitsInt(maxHomonucleotide)) << intwithcommas((int)cst->HomoNT);
+	give << "  > (" << maxHomonucleotide_ << ") homo-nt run  : " << spaceX(21 - digitsInt(maxHomonucleotide_)) << intwithcommas((int)cst->HomoNT);
 	if (p2stat) { give << "; " << intwithcommas((int)cst2->HomoNT); } give << endl;
 	int val2 = MaxAmb;	if (!greenQualStats) { val2 = alt_MaxAmb; }
 	give << "  > (" << val2 << ") amb. Bases  : " << spaceX(22 - digitsInt(val2)) << intwithcommas((int)cst->MaxAmb);

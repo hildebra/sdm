@@ -862,6 +862,10 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
         if (cmdArgs->find("-threads") != cmdArgs->end()) {
             threads = stoi((*cmdArgs)["-threads"]);
         }
+		if (threads < 1) {
+			threads = 1;
+		}
+		ThreadPool::configure(static_cast<size_t>(threads));
 		/*if ( threads > 1) {
 			pool = DBG_NEW ThreadPool(threads);
 		}*/
