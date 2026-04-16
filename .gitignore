@@ -14,6 +14,12 @@ sdm
 Makefile_d
 MakefileD
 MakefileF
+DEBUG/
+tests/
+
+sdmN
+sdmD
+sdmD2
 
 # Build results
 [Dd]ebug/
@@ -241,3 +247,11 @@ _Pvt_Extensions
 
 # FAKE - F# Make
 .fake/
+
+#zlib experiments
+#include/iowrap*
+include/izlib*
+Makefile.old
+
+#old files..
+deprecated/*

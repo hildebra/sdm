@@ -1,98 +1,254 @@
-#ifndef THREAD_POOL_H
-#define THREAD_POOL_H
-//https://github.com/progschj/ThreadPool
+#pragma once
+
 #include <vector>
-#include <queue>
-#include <memory>
 #include <thread>
-#include <mutex>
-#include <condition_variable>
+#include <queue>
 #include <future>
 #include <functional>
+#include <condition_variable>
+#include <memory>
+#include <atomic>
+#include <mutex>
 #include <stdexcept>
+#include "Benchmark.h"
+
 
 class ThreadPool {
 public:
-    ThreadPool(size_t);
+    static ThreadPool& instance();
+    static void configure(size_t threads);
+    static size_t configured_thread_count();
+    static void set_gzip_mode(bool enabled);
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool& operator=(const ThreadPool&) = delete;
+
     template<class F, class... Args>
-    auto enqueue(F&& f, Args&&... args)
-        ->std::future<typename std::result_of<F(Args...)>::type>;
-    ~ThreadPool();
+    auto submit(F&& f, Args&&... args) -> std::future<decltype(f(args...))> {
+        return submit_impl_(false, std::forward<F>(f), std::forward<Args>(args)...);
+    }
+
+    template<class F, class... Args>
+    auto submit_gzip(F&& f, Args&&... args) -> std::future<decltype(f(args...))> {
+        return submit_impl_(true, std::forward<F>(f), std::forward<Args>(args)...);
+    }
+
 private:
-    // need to keep track of threads so we can join them
-    std::vector< std::thread > workers;
-    // the task queue
-    std::queue< std::function<void()> > tasks;
+    template<class F, class... Args>
+    auto submit_impl_(bool isGzipTask, F&& f, Args&&... args) -> std::future<decltype(f(args...))> {
+        using return_type = decltype(f(args...));
+        auto task = std::make_shared<std::packaged_task<return_type()>>(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+        std::future<return_type> res = task->get_future();
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex_);
+            if (stop_.load()) throw std::runtime_error("submit on stopped ThreadPool");
+            // wait while queue is full
+            while (max_queue_size_ > 0 && (tasks_.size() + gzip_tasks_.size()) >= max_queue_size_) {
+                // block until a worker pops a task (and notifies)
+                condition_not_full_.wait(lock);
+                if (stop_.load()) throw std::runtime_error("submit on stopped ThreadPool");
+            }
+            // capture submission timestamp for queue wait instrumentation (time of enqueue)
+            long long submit_ts = Instr::now_us();
+            auto wrappedTask = [task, submit_ts]() {
+                // when the worker starts this wrapper, record queue wait
+                long long start_ts = Instr::now_us();
+                long long wait_us = start_ts - submit_ts;
+                Instr::add_pool_queue_wait_us(wait_us);
+                // run the actual packaged task
+                (*task)();
+            };
+            if (isGzipTask) {
+                gzip_tasks_.emplace(std::move(wrappedTask));
+            }
+            else {
+                tasks_.emplace(std::move(wrappedTask));
+            }
+            // record sampled queue length (after push)
+            Instr::record_pool_queue_len((long long)(tasks_.size() + gzip_tasks_.size()));
+        }
+        condition_.notify_one();
+        return res;
+    }
 
-    // synchronization
-    std::mutex queue_mutex;
-    std::condition_variable condition;
-    bool stop;
+public:
+    void shutdown();
+    ~ThreadPool();
+
+private:
+    ThreadPool(size_t threads = 0);
+    static std::atomic<size_t>& configured_threads_();
+    static std::atomic<bool>& instance_created_();
+
+    std::vector<std::thread> workers_;
+    std::queue<std::function<void()>> tasks_;
+    std::queue<std::function<void()>> gzip_tasks_;
+
+    std::mutex queue_mutex_;
+    std::condition_variable condition_;
+    std::condition_variable condition_not_full_;
+    std::atomic<bool> stop_;
+    bool gzip_mode_enabled_ = false;
+    size_t gzip_reserved_target_ = 0;
+    size_t gzip_inflight_ = 0;
+    size_t tune_counter_ = 0;
+    size_t worker_count_ = 0;
+    size_t max_queue_size_ = 0;
+
+    bool has_work_() const {
+        return !tasks_.empty() || !gzip_tasks_.empty();
+    }
+    bool should_take_gzip_() const;
+    void maybe_tune_gzip_reservation_();
 };
+// Inline implementations to make ThreadPool header-only and avoid linker issues
+inline std::atomic<size_t>& ThreadPool::configured_threads_() {
+    static std::atomic<size_t> configured(0);
+    return configured;
+}
 
-// the constructor just launches some amount of workers
-inline ThreadPool::ThreadPool(size_t threads)
-    : stop(false)
-{
-    for (size_t i = 0; i < threads; ++i)
-        workers.emplace_back(
-            [this]
-            {
-                for (;;)
+inline void ThreadPool::set_gzip_mode(bool enabled) {
+    ThreadPool& pool = instance();
+    std::lock_guard<std::mutex> lock(pool.queue_mutex_);
+    pool.gzip_mode_enabled_ = enabled;
+    if (!enabled) {
+        pool.gzip_reserved_target_ = 0;
+    }
+    else if (pool.worker_count_ > 1 && pool.gzip_reserved_target_ == 0) {
+        pool.gzip_reserved_target_ = 1;
+    }
+    pool.condition_.notify_all();
+}
+
+inline std::atomic<bool>& ThreadPool::instance_created_() {
+    static std::atomic<bool> created(false);
+    return created;
+}
+
+inline ThreadPool& ThreadPool::instance() {
+    static ThreadPool pool(configured_threads_().load());
+    instance_created_().store(true);
+    return pool;
+}
+
+inline void ThreadPool::configure(size_t threads) {
+    if (threads == 0) {
+        return;
+    }
+    if (instance_created_().load()) {
+        return;
+    }
+    configured_threads_().store(threads);
+}
+
+inline size_t ThreadPool::configured_thread_count() {
+    size_t configured = configured_threads_().load();
+    if (configured > 0) {
+        return configured;
+    }
+    size_t hw = std::thread::hardware_concurrency();
+    return hw > 0 ? hw : 2;
+}
+
+inline ThreadPool::ThreadPool(size_t threads) : stop_(false) {
+    if (threads == 0) {
+        threads = std::thread::hardware_concurrency();
+        if (threads == 0) threads = 2;
+    }
+    worker_count_ = threads;
+    // set a bounded queue size to provide backpressure; a small multiple of threads
+    max_queue_size_ = threads * 4;
+    for (size_t i = 0; i < threads; ++i) {
+        workers_.emplace_back([this]() {
+            for (;;) {
+                std::function<void()> task;
+                bool tookGzip = false;
                 {
-                    std::function<void()> task;
+                    std::unique_lock<std::mutex> lock(this->queue_mutex_);
+                    this->condition_.wait(lock, [this]() { return this->stop_.load() || this->has_work_(); });
+                    if (this->stop_.load() && !this->has_work_()) return;
 
-                    {
-                        std::unique_lock<std::mutex> lock(this->queue_mutex);
-                        this->condition.wait(lock,
-                            [this] { return this->stop || !this->tasks.empty(); });
-                        if (this->stop && this->tasks.empty())
-                            return;
-                        task = std::move(this->tasks.front());
-                        this->tasks.pop();
+                    if (should_take_gzip_()) {
+                        task = std::move(this->gzip_tasks_.front());
+                        this->gzip_tasks_.pop();
+                        ++this->gzip_inflight_;
+                        tookGzip = true;
                     }
-
-                    task();
+                    else if (!this->tasks_.empty()) {
+                        task = std::move(this->tasks_.front());
+                        this->tasks_.pop();
+                    }
+                    else if (!this->gzip_tasks_.empty()) {
+                        task = std::move(this->gzip_tasks_.front());
+                        this->gzip_tasks_.pop();
+                        ++this->gzip_inflight_;
+                        tookGzip = true;
+                    }
+                    else {
+                        continue;
+                    }
+                    // notify one blocked submitter that there is space
+                    this->condition_not_full_.notify_one();
+                }
+                task();
+                if (tookGzip) {
+                    std::lock_guard<std::mutex> lock(this->queue_mutex_);
+                    if (this->gzip_inflight_ > 0) {
+                        --this->gzip_inflight_;
+                    }
+                    this->maybe_tune_gzip_reservation_();
                 }
             }
-            );
-}
-
-// add new work item to the pool
-template<class F, class... Args>
-auto ThreadPool::enqueue(F&& f, Args&&... args)
--> std::future<typename std::result_of<F(Args...)>::type>
-{
-    using return_type = typename std::result_of<F(Args...)>::type;
-
-    auto task = std::make_shared< std::packaged_task<return_type()> >(
-        std::bind(std::forward<F>(f), std::forward<Args>(args)...)
-        );
-
-    std::future<return_type> res = task->get_future();
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-
-        // don't allow enqueueing after stopping the pool
-        if (stop)
-            throw std::runtime_error("enqueue on stopped ThreadPool");
-
-        tasks.emplace([task]() { (*task)(); });
+        });
     }
-    condition.notify_one();
-    return res;
 }
 
-// the destructor joins all threads
-inline ThreadPool::~ThreadPool()
-{
-    {
-        std::unique_lock<std::mutex> lock(queue_mutex);
-        stop = true;
+inline bool ThreadPool::should_take_gzip_() const {
+    if (gzip_tasks_.empty()) {
+        return false;
     }
-    condition.notify_all();
-    for (std::thread& worker : workers)
-        worker.join();
+    if (!gzip_mode_enabled_) {
+        return true;
+    }
+    if (tasks_.empty()) {
+        return true;
+    }
+    return gzip_inflight_ < gzip_reserved_target_;
 }
 
-#endif
+inline void ThreadPool::maybe_tune_gzip_reservation_() {
+    if (!gzip_mode_enabled_ || worker_count_ < 2) {
+        gzip_reserved_target_ = 0;
+        return;
+    }
+    ++tune_counter_;
+    if (tune_counter_ < 32) {
+        return;
+    }
+    tune_counter_ = 0;
+
+    const size_t maxReserve = worker_count_ > 2 ? (worker_count_ - 1) : 1;
+    const size_t backlog = gzip_tasks_.size() + gzip_inflight_;
+
+    if (backlog > gzip_reserved_target_ * 2 && gzip_reserved_target_ < maxReserve) {
+        ++gzip_reserved_target_;
+        return;
+    }
+    if (backlog + 1 < gzip_reserved_target_ && gzip_reserved_target_ > 1) {
+        --gzip_reserved_target_;
+    }
+}
+
+inline ThreadPool::~ThreadPool() {
+    shutdown();
+}
+
+inline void ThreadPool::shutdown() {
+    bool expected = false;
+    if (!stop_.compare_exchange_strong(expected, true)) return;
+    condition_.notify_all();
+    condition_not_full_.notify_all();
+    for (auto &worker : workers_) {
+        if (worker.joinable()) worker.join();
+    }
+}
+
