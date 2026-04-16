@@ -313,21 +313,27 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 		Dereplicate* owner;
 		explicit ActiveAddGuard(Dereplicate* d) : owner(d) {}
 		~ActiveAddGuard() {
-			if (owner->active_adddna_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+			if (owner->active_adddna_.fetch_sub(1, std::memory_order_acq_rel) == 1 &&
+				owner->lifecycle_pause_.load(std::memory_order_acquire)) {
 				std::lock_guard<std::mutex> lk(owner->lifecycle_wait_mtx_);
 				owner->lifecycle_wait_cv_.notify_all();
 			}
 		}
 	};
 	for (;;) {
-		while (lifecycle_pause_.load(std::memory_order_acquire)) {
-			std::this_thread::yield();
+		if (lifecycle_pause_.load(std::memory_order_acquire)) {
+			std::unique_lock<std::mutex> waitLock(lifecycle_wait_mtx_);
+			lifecycle_wait_cv_.wait(waitLock, [this]() {
+				return !lifecycle_pause_.load(std::memory_order_acquire);
+			});
+			continue;
 		}
 		active_adddna_.fetch_add(1, std::memory_order_acq_rel);
 		if (!lifecycle_pause_.load(std::memory_order_acquire)) {
 			break;
 		}
-		if (active_adddna_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+		if (active_adddna_.fetch_sub(1, std::memory_order_acq_rel) == 1 &&
+			lifecycle_pause_.load(std::memory_order_acquire)) {
 			std::lock_guard<std::mutex> lk(lifecycle_wait_mtx_);
 			lifecycle_wait_cv_.notify_all();
 		}
@@ -479,6 +485,7 @@ void Dereplicate::reset() {
 		tracker_shards_[si].clear();
 	}
 	lifecycle_pause_.store(false, std::memory_order_release);
+	lifecycle_wait_cv_.notify_all();
 }
 bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r) { 
 	return l->totalSum() > r->totalSum(); 
@@ -532,6 +539,7 @@ void Dereplicate::finishMap() {
 	std::remove(mapF.c_str());
 	int x = std::rename((mapF + "t").c_str(), mapF.c_str());
 	lifecycle_pause_.store(false, std::memory_order_release);
+	lifecycle_wait_cv_.notify_all();
 
 	return;
 }
