@@ -1623,20 +1623,28 @@ void DNAunique::prepareDerepQualities(int ofastQver) {
 
 
 void DNAunique::writeDerepFastQ(ofstream& wr, bool newHD) {
-	if (!(qual_.size() == 0 || sequence_.length() == 0 || length() == 0)) {
-		string xtr = xtraHdStr();
-		if (FtsDetected.forward) { xtr += "F"; }
-		if (FtsDetected.reverse) { xtr += "R"; }
-		if (newHD) {
-			wr << "@" + new_id_ + "\n";
-		}
-		else {
-			wr << "@" + id_ + "\n";
-		}
-		wr << sequence_.substr(0, length()) + "\n";
-		wr << "+\n";//new_id_<<endl;
-		wr << qualities_avg_ + "\n";
+	if ((qual_.size() == 0 || sequence_.length() == 0 || length() == 0)) {
+		return;
 	}
+	string seqOut = sequence_.substr(0, length());
+	for (size_t i = 0; i < seqOut.size(); ++i) {
+		if (!canonicalDNA(seqOut[i])) {
+			seqOut[i] = 'N';
+		}
+	}
+	string xtr = xtraHdStr();
+	if (FtsDetected.forward) { xtr += "F"; }
+	if (FtsDetected.reverse) { xtr += "R"; }
+	if (newHD) {
+		wr << "@" + new_id_ + "\n";
+	}
+	else {
+		wr << "@" + id_ + "\n";
+	}
+	wr << seqOut + "\n";
+	wr << "+\n";//new_id_<<endl;
+	wr << qualities_avg_ + "\n";
+	
 }
 
 

@@ -441,7 +441,7 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	}
 	// This checks if there are dovetails. When read 2 is reverse transcribed and read1 is offset, 
 	//then the only constellation is that there are dovetails
- const string& Seq1 = read1->getSequence();
+	const string& Seq1 = read1->getSequence();
 	const string& Seq2 = read2->getSequence();
 	const vector<qual_score>& Qual1 = read1->getQual();
 	const vector<qual_score>& Qual2 = read2->getQual();
@@ -562,22 +562,32 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 			summedMismathcQ += min(Qual1[pos1],Qual2[pos2]);
 
 			bool S1canonical = canonicalDNA(S1);
-           bool S2canonical = canonicalDNA(S2);
+			bool S2canonical = canonicalDNA(S2);
 
 			// Different base -> take the higher qual one
 			// here qualities: the bigger the better (as opposed to probabilities)
-			if (Qual1[pos1] > Qual2[pos2]
-				&& (S1canonical || (!S1canonical && !S2canonical))) {
+			if (Qual1[pos1] >= Qual2[pos2]){
+				if (S1canonical || !S2canonical) {
+					new_seq[pos_overlap] = S1;
+				} else {
+					new_seq[pos_overlap] = S2;
+				}
+				//if (S1canonical || (!S1canonical && !S2canonical))) {
 				// Qual read1 is better at overlap position i
-				new_seq[pos_overlap] = S1;
-			}
-			else if (S2canonical) {
+				
+			} else {//if (S2canonical) {
 				// Qual read2 is better at overlap position i
-				new_seq[pos_overlap] = S2;
+				if (S2canonical || !S1canonical) {
+					new_seq[pos_overlap] = S2;
+				}
+				else {
+					new_seq[pos_overlap] = S1;
+				}
+				//new_seq[pos_overlap] = S2;
 			}
-			else {
-				new_seq[pos_overlap] = 'N';
-			}
+			//else {
+		//		new_seq[pos_overlap] = 'N';
+			//}
 		}
 		//            std::cout << "s1: " << Seq1[pos1] << " q: " << (int)Qual1[pos1] << "  -  s2: " << Seq2[pos2] << " q: " << (int)Qual2[pos2] << "  new: " << new_seq[pos_overlap] << " q: " << (int)new_qual[pos_overlap] << std::endl;
 	}

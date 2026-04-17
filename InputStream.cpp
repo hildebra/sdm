@@ -63,6 +63,7 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 		if (d1pid < (refpid - 0.3f) || d1pid < (ever_best - 0.4f ) ) { return false; }
 	}
 
+
 	bool dMerge(true), rMerg(true);
 	double curL = (double)d1->getMergeLength();
 	if (curL < 0) {
@@ -102,6 +103,13 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 	//	if (d1->length() / r1->length() < RefLengthRatio) { return false; }
 	//}
 
+	//also check for number of N in sequence
+	int d1Ncnt = d1->numNonCanonicalDNA(true); int r1Ncnt = r1->numNonCanonicalDNA(true);
+
+	float CanoScore = 1.f;
+	if (d1Ncnt > 0 || r1Ncnt > 0) {
+		CanoScore = 1.f - (float)(d1Ncnt - r1Ncnt) / (float)(d1Ncnt + r1Ncnt + 10);
+	}
 
 	float dmergErrSco = 0.f; 	float refMergErrSco = 0.f;
 	//only check further if both comparisons did merge
@@ -132,7 +140,7 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 		//also check for stable lowest score
 		// if (d1->minQual() > r1->minQual() - MinQualDiff) { return true; }
 	//}
-  float maxScore = max(thScore, rScore);
+	float maxScore = max(thScore, rScore);
 	if (maxScore > 0.f) {
 		thScore /= maxScore; 	rScore /= maxScore;
 	}
@@ -197,7 +205,7 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 
 	double thresh(1.01f);
 	//qualRatio 
-	if ( ((AccErrRatio* ratLength * ratId * mergePreference * logsizeRatio * mergeLenDevRatio) ) > thresh) {
+	if ( ((CanoScore * AccErrRatio* ratLength * ratId * mergePreference * logsizeRatio * mergeLenDevRatio) ) > thresh) {
 		return true;
 	}
 	//normalize and invert
