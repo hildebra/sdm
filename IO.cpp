@@ -65,6 +65,7 @@ bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 	for (size_t k = 0; k < tmpLines->size(); k++) {
 		ret[0].reset();
 		ret[1].reset();
+		ret[2].reset();
 		//cdbg("rpS");
             {
 				Instr::ScopedTimer st(Instr::STR2DNA);
@@ -93,9 +94,10 @@ bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 			if (multDNA.size()) {
 				iniBCsGA = multDNA[0]->getBCnumber();
 			}
+			vector<shared_ptr<DNA>> ret2(3, nullptr);
 			for (size_t xi = 0; xi < multDNA.size(); xi++) {
-				vector<shared_ptr<DNA>> ret2(3, nullptr);
-				//ret2[0].reset();ret2[1].reset();ret2[2].reset();
+				ret2[1].reset();
+				ret2[2].reset();
 				ret2[0] = multDNA[xi];
 				isOK=process_DNA(ret2, MIDuse, MD, curThread);
 				if (ret2[0]->getBCnumber() != iniBCsGA) {//DEBUG
@@ -471,17 +473,35 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 	while ( cont ) {
 		//decide on MC or single core submission route
 		if (doMC) { // multithreading
-
-			//step 0: threadpool checks
-			bool notSubm(true);
-			if (slots[thrCnt].inUse == true){
-				//&& slots[thrCnt].job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-               if (slots[thrCnt].job.valid()) {
-					bool cont2 = slots[thrCnt].job.get();
+			// step 0: find first available slot (free or already completed)
+			size_t slotIdx = static_cast<size_t>(thrCnt);
+			bool hasFreeSlot = false;
+			for (size_t probe = 0; probe < slots.size(); ++probe) {
+				size_t idx = (slotIdx + probe) % slots.size();
+				if (!slots[idx].inUse) {
+					slotIdx = idx;
+					hasFreeSlot = true;
+					break;
 				}
-				slots[thrCnt].inUse = false;
+				if (slots[idx].job.valid() &&
+					slots[idx].job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+					bool doneOk = slots[idx].job.get();
+					(void)doneOk;
+					slots[idx].inUse = false;
+					slotIdx = idx;
+					hasFreeSlot = true;
+					break;
+				}
 			}
-			//now thread X is empty.. and eventual reads in it as well
+			if (!hasFreeSlot) {
+				if (slots[slotIdx].job.valid()) {
+					bool doneOk = slots[slotIdx].job.get();
+					(void)doneOk;
+				}
+				slots[slotIdx].inUse = false;
+				hasFreeSlot = true;
+			}
+			thrCnt = static_cast<int>(slotIdx);
 
             //step 1: read block from input into tmp buffer
 			{
@@ -502,7 +522,6 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 							tmpStrHolders[thrCnt], MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
 						}
 					slots[thrCnt].inUse = true;
-					notSubm = false;
 				}
 			}
 
@@ -891,6 +910,10 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 	for (auto &uFX : files.uniqFxFls) {
 		uint i = uFX.second;
 		cdbg("Unique file " + uFX.first + "(" + itos(i) + ")\n");
+
+		// Sample memory at the start of processing each file
+		Instr::g_memoryTracker.sample();
+
 		if (maxReadsWr > 0 && maxReadsWr - totalReadsWrite <= 0) { cerr << "Skipping file " << uFX.first << "due to firstXreadsWrite .."; break; }
 		if (maxReadsRd > 0 && maxReadsRd - totalReadsRead <= 0) { cerr << "Skipping file " << uFX.first << "due to firstXreadsRead .."; break; }
 		if (files.idx[i].size() == 0) {	

@@ -184,7 +184,7 @@ public:
         if (doMC && !atEnd) {
             start_reader();
             // notify reader to begin first prefetch
-            reader_cv.notify_one();
+            reader_cv.notify_all();
         }
 
 #if __cplusplus >= 201103L
@@ -198,11 +198,11 @@ public:
         cdbg(("destroy ibufstream, total lines: " + to_string(totalLines) + " 4Lines: " + to_string(total4Lines) + "\n"));
         // stop background reader
         stop_reader.store(true);
-        reader_cv.notify_one();
-        if (reader_started) {
+        reader_cv.notify_all();
+        if (reader_started.load()) {
             // Wait for the ThreadPool-submitted reader task to finish
             if (readerTask.valid()) readerTask.wait();
-            reader_started = false;
+            reader_started.store(false);
         }
 #if __cplusplus >= 201103L
         {
@@ -228,11 +228,11 @@ public:
 
     void reset() {
         // stop reader thread if running
-        if (reader_started) {
+        if (reader_started.load()) {
             stop_reader.store(true);
-            reader_cv.notify_one();
+            reader_cv.notify_all();
             if (readerTask.valid()) readerTask.wait();
-            reader_started = false;
+            reader_started.store(false);
             stop_reader.store(false);
             worker_has_data.store(false);
             cdbg("Reset: stopped background reader thread\n"); 
@@ -254,7 +254,7 @@ public:
 
             if (doMC && !atEnd) {
                 start_reader();
-                reader_cv.notify_one();
+                reader_cv.notify_all();
             }
         }
 #else
@@ -271,7 +271,7 @@ public:
 
         if (doMC && !atEnd) {
             start_reader();
-            reader_cv.notify_one();
+            reader_cv.notify_all();
         }
 
         input_mtx.unlock();
@@ -352,6 +352,14 @@ public:
 
     string getInFile() { return file; }
 
+    // Get the first character of the buffer without consuming it
+    int peekFirstChar() {
+        if (atEnd || bufS == 0 || at >= bufS) {
+            return EOF;
+        }
+        return (int)((unsigned char)keeper[at]);
+    }
+
 private:
     bool internalReadChunk() {
         // Cache bufS locally to avoid races with swap operations
@@ -409,15 +417,19 @@ private:
 
     // Start the background reader thread (idempotent)
     void start_reader() {
-        if (reader_started) return;
-        reader_started = true;
+        bool expected = false;
+        if (!reader_started.compare_exchange_strong(expected, true)) return;
         stop_reader.store(false);
         worker_has_data.store(false);
         // submit background reader task to persistent thread-pool
         readerTask = ThreadPool::instance().submit([this]() -> bool {
             for (;;) {
                 std::unique_lock<std::mutex> lk(reader_mutex);
-                reader_cv.wait(lk, [this]() { return stop_reader.load() || !worker_has_data.load(); });
+                reader_cv.wait_for(
+                    lk,
+                    std::chrono::milliseconds(100),
+                    [this]() { return stop_reader.load() || !worker_has_data.load(); }
+                );
                 if (stop_reader.load()) break;
                 bool ok = false;
                 {
@@ -427,12 +439,13 @@ private:
                 if (!ok || bufSW == 0) {
                     worker_has_data.store(false);
                     stop_reader.store(true);
-                    reader_cv.notify_one();
+                    reader_cv.notify_all();
                     break;
                 }
                 worker_has_data.store(true);
-                reader_cv.notify_one();
+                reader_cv.notify_all();
             }
+            reader_started.store(false);
             return true;
         });
     }
@@ -441,9 +454,9 @@ private:
         if (doMC) {
             std::unique_lock<std::mutex> rlk(reader_mutex);
             // Lazy-start reader in case MC mode was enabled after construction/reset.
-            if (!reader_started && !stop_reader.load() && !atEnd) {
+            if (!reader_started.load() && !stop_reader.load() && !atEnd) {
                 start_reader();
-                reader_cv.notify_one();
+                reader_cv.notify_all();
             }
 
             // Avoid indefinite waits: if prefetch does not arrive in time, fallback to sync read.
@@ -467,7 +480,7 @@ private:
                     bufS = newBufS; // Update bufS after at is reset
                     worker_has_data.store(false);
                 }
-                reader_cv.notify_one();
+                reader_cv.notify_all();
                 return true;
             }
 
@@ -480,7 +493,7 @@ private:
                 bufS = newBufS; // Update bufS after at is reset
                 worker_has_data.store(false);
             }
-            reader_cv.notify_one();
+            reader_cv.notify_all();
             return true;
         } else {
             {
@@ -520,7 +533,7 @@ private:
     std::atomic<bool> worker_has_data;
     std::mutex reader_mutex;
     std::condition_variable reader_cv;
-    bool reader_started;
+    std::atomic<bool> reader_started;
 
     size_t bufS, bufSW;
     mutex localMTX;
@@ -625,9 +638,10 @@ private:
 	bool read_fasta_entry(ifbufstream*fasta_is, ifbufstream*quality_is, shared_ptr<DNA> in, shared_ptr<DNA>, int&);
 	//static bool getFastaQualLine(istream&fna,  string&);
 	void maxminQualWarns_fq();
-    qual_score auto_fq_version();
-    qual_score auto_fq_version(qual_score minQScore, qual_score maxQScore=0);
-    qual_score auto_fq_version(const vector<string>& ret);
+	qual_score auto_fq_version();
+	qual_score auto_fq_version(qual_score minQScore, qual_score maxQScore=0);
+	qual_score auto_fq_version(const vector<string>& ret);
+	bool detectAndSwitchFileFormat(ifbufstream* stream, const std::string& filepath);
 	void resetStats() {
 		for (size_t i = 0; i < lnCnt.size(); i++) { lnCnt[i] = 0; }
 		for (size_t i = 0; i < pairs_read.size(); i++) { pairs_read[i] = 0; }
@@ -713,7 +727,7 @@ private:
 bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM, 
 	shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM,
     float& ever_best, bool forSeed, DNAunique* merge_stats_owner = nullptr, 
-    int dSiz = 2, int rSiz=2);
+    uint64_t dSiz = 2, uint64_t rSiz=2);
 
 bool whoIsBetter(shared_ptr<DNAunique> d1, shared_ptr<DNAunique> r1, float& ever_best, bool forSeed);
 

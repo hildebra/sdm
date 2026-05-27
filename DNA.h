@@ -49,7 +49,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "Benchmark.h"
 #include "DNAconsts.h"
 
-class DNA : public std::enable_shared_from_this<DNA> {
+class DNA {
     friend class DNAunique;
 public:
     struct WhoIsBetterMergeStats {
@@ -60,21 +60,19 @@ public:
 
     DNA(string seq, string names) : sequence_(seq), sequence_length_(sequence_.length()),
         id_(names), new_id_(names),
-        qual_(0), qual_traf_(""), sample_id_(-1), avg_qual_(-1.f),
+        qual_(0), sample_id_(-1), avg_qual_(-1.f),
         quality_sum_(0), accumulated_error_(0.),
-        failed_(false), good_quality_(false), mid_quality_(false),
-        reversed_(false),
+        good_quality_(false), mid_quality_(false), failed_(false), reversed_(false),
         read_position_(-1),
         FtsDetected(),
-        id_fixed_(false), tempFloat(0.f), merge_offset_(-1) {}
-    DNA() : sequence_(""), sequence_length_(0), id_(""), new_id_(""), qual_(0), qual_traf_(""),
+        fastq_write_offset_(0), id_fixed_(false), tempFloat(0.f), merge_offset_(-1) {}
+    DNA() : sequence_(""), sequence_length_(0), id_(""), new_id_(""), qual_(0),
         sample_id_(-1), avg_qual_(-1.f),
         quality_sum_(0), accumulated_error_(0.),
-        failed_(false), good_quality_(false), mid_quality_(false),
-        reversed_(false),
+        good_quality_(false), mid_quality_(false), failed_(false), reversed_(false),
         read_position_(-1),
         FtsDetected(),
-        id_fixed_(false), tempFloat(0.f), merge_offset_(-1) {
+        fastq_write_offset_(0), id_fixed_(false), tempFloat(0.f), merge_offset_(-1) {
         sequence_.reserve(151);//set to resonable expectation
     }
     //starts with fastx record
@@ -325,16 +323,26 @@ public:
     //void setSeedScore(float i) { tempFloat = (float)i; }
 
     struct QualStats {
-        bool maxL; bool PrimerFwdFail; bool AvgQual; //sAvgQual
-        bool HomoNT; bool HomoNTtrimmed; bool PrimerRevFail; bool minL;
-        bool minLqualTrim; //<-sMinQTrim trimmed due to quality
-        bool TagFail; bool MaxAmb; bool QualWin;//sQualWin 
-        bool AccErrTrimmed; bool QWinTrimmed;  // either of these makes bool Trimmed; 
-        bool fail_correct_BC; bool suc_correct_BC; bool
-            failedDNAread;
+        uint32_t maxL : 1;
+        uint32_t PrimerFwdFail : 1;
+        uint32_t AvgQual : 1; //sAvgQual
+        uint32_t HomoNT : 1;
+        uint32_t HomoNTtrimmed : 1;
+        uint32_t PrimerRevFail : 1;
+        uint32_t minL : 1;
+        uint32_t minLqualTrim : 1; //<-sMinQTrim trimmed due to quality
+        uint32_t TagFail : 1;
+        uint32_t MaxAmb : 1;
+        uint32_t QualWin : 1;//sQualWin 
+        uint32_t AccErrTrimmed : 1;
+        uint32_t QWinTrimmed : 1;  // either of these makes bool Trimmed; 
+        uint32_t fail_correct_BC : 1;
+        uint32_t suc_correct_BC : 1;
+        uint32_t failedDNAread : 1;
         //bool adapterRem; -> setTA_cut
-        bool RevPrimFound;
-        bool BinomialErr; bool dblTagFail;
+        uint32_t RevPrimFound : 1;
+        uint32_t BinomialErr : 1;
+        uint32_t dblTagFail : 1;
         QualStats() :
             maxL(false), PrimerFwdFail(false), AvgQual(false), HomoNT(false), HomoNTtrimmed(false),
             PrimerRevFail(false), minL(false), minLqualTrim(false),
@@ -400,23 +408,30 @@ public:
     bool isReversed() { return reversed_; }
 
 protected:
-    std::string qual_traf_;
     int sample_id_;
 
     //const char* DN;
     float avg_qual_;
     unsigned int quality_sum_;
     double accumulated_error_;
-    bool good_quality_, mid_quality_, failed_;
-    bool reversed_;
+    uint8_t good_quality_ : 1;
+    uint8_t mid_quality_ : 1;
+    uint8_t failed_ : 1;
+    uint8_t reversed_ : 1;
 
 
     short read_position_;//-1=unkown; 0=pair1 (fwd primer); 1=pair2 (rev primer); 3=MID seq ;
 
+    qual_score fastq_write_offset_;
+
     struct ElementsDetection {
-        bool forward; bool reverse;//primers detected
-        bool TA_cut; bool barcode_detected;  bool barcode_cut; bool dereplicated;
-        bool revPairConstellation;
+        uint8_t forward : 1;
+        uint8_t reverse : 1;//primers detected
+        uint8_t TA_cut : 1;
+        uint8_t barcode_detected : 1;
+        uint8_t barcode_cut : 1;
+        uint8_t dereplicated : 1;
+        uint8_t revPairConstellation : 1;
         //read merging related stats
         int errInOverlap;        qual_score meanQInOverlapMismatch;
         int mergeLength;
@@ -458,7 +473,9 @@ protected:
     float tempFloat;
 };
 
-typedef std::vector<long> read_occ;
+using sample_count_t = uint32_t;
+using read_occ_entry = std::pair<int, sample_count_t>;
+typedef std::vector<read_occ_entry> read_occ;
 
 struct DNAHasher
 {
@@ -474,11 +491,11 @@ class DNAunique : public DNA {//used for dereplication
     friend class DNA;
 public:
     // Constructors and Destructors
-    DNAunique() : DNA(), pair_(0) {}
-    DNAunique(string s, string x) : DNA(s, x) {}
+    DNAunique() : DNA(), pair_(0), total_sum_cache_(0), total_sum_cache_valid_(false), derep_fastq_offset_(0) {}
+    DNAunique(string s, string x) : DNA(s, x), total_sum_cache_(0), total_sum_cache_valid_(false), derep_fastq_offset_(0) {}
 
     // Mostly used constructor
-    DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), pair_(0) {//best_seed_length_((uint)sequence_.size())
+    DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), pair_(0), total_sum_cache_(0), total_sum_cache_valid_(false), derep_fastq_offset_(0) {//best_seed_length_((uint)sequence_.size())
         incrementSampleCounter(BC);
     }
     ~DNAunique() = default;
@@ -494,9 +511,9 @@ public:
     void incrementSampleCounter(int sample_id);
     void writeMap(ofstream& os, const string&, vector<int>&, const vector<int>&);
     //inline int getCount() { return count_; }
-    int totalSum();
+    uint64_t totalSum();
     //uint getBestSeedLength() { return best_seed_length_; }
-    //void setBestSeedLength(uint i) { best_seed_length_ = i; }//DNAuniMTX.lock(); DNAuniMTX.unlock();}
+    //void setBestSeedLength(uint i) { best_seed_length_ = i; }
     void incrementSampleCounterBy(int sample_id, long count);
     void transferOccurence(shared_ptr<DNAunique>);
     const read_occ& getDerepMap() { return occurence; }
@@ -511,9 +528,13 @@ public:
     void prepSumQuals();
     void sumQualities(const shared_ptr<DNAunique>& dna);
     void sumQualities(const shared_ptr<DNA>& dna);
+    void releaseRawQualitiesIfPromoted();
 
     void prepareDerepQualities(int ofastQver);
     void writeDerepFastQ(ofstream&, bool = true);
+    void writeFastQ(ostream&, bool = true);
+    string writeFastQ(bool = true);
+    void writeFastQ(string&, bool = true);
 
     void saveMem();
 
@@ -529,15 +550,11 @@ public:
     //int counts() const { return count_; }
 
     void takeOver(shared_ptr<DNAunique> dna_unique_old);
-    void takeOverDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaMerge);
+    void takeOverDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaMerge, bool keepQualities = true);
+    void compactForFastaDerepStorage();
     std::vector<qual_accum_t> transferPerBaseQualitySum();
 
     std::vector<qual_accum_t> quality_sum_per_base_;
-
-    //void lock() { DNAuniMTX.lock(); }
-    //void unlock() { DNAuniMTX.unlock(); }
-    mutex DNAuniMTX;
-
 
 private:
     //int count_;
@@ -545,12 +562,24 @@ private:
     //int best_seed_length_;
 
     read_occ occurence;
+    mutable uint64_t total_sum_cache_;
+    mutable uint8_t total_sum_cache_valid_ : 1;
+
+    inline void invalidateTotalSumCache() {
+        total_sum_cache_valid_ = false;
+    }
+
+    void promoteQualitiesToSums(bool releaseRawQualities);
+
+    read_occ::iterator findOccurrenceEntry(int sample_id);
+    read_occ::const_iterator findOccurrenceEntry(int sample_id) const;
+
     shared_ptr<DNAunique> pair_;
 
     shared_ptr<DNAunique> merge_;
 
     // to calculate mean
-    std::string qualities_avg_;
+    qual_score derep_fastq_offset_;
     WhoIsBetterMergeStats who_is_better_merge_stats_;
 
     //threadsafe
@@ -566,7 +595,7 @@ public:
     ~DNAuniqSet() {}
 
     void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
-        shared_ptr<DNA> dnaM, int MrgPos1, int sample_id);
+        shared_ptr<DNA> dnaM, int MrgPos1, int sample_id, bool b_derep_as_fasta_);
     shared_ptr<DNAunique>& operator[] (int x) {
         return DNUs[x];
     }

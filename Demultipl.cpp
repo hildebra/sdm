@@ -16,12 +16,43 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-
+#if defined(_WIN32)
+    #define NOMINMAX  // Prevent min/max macros
+    #include <windows.h>
+    #include <psapi.h>
+    #pragma comment(lib, "psapi.lib")
+#else
+    #include <sys/resource.h>
+#endif
 
 #include "IO.h"
 #include "Filters.h"
 #include "Benchmark.h"
 #include "ReadMerger.h"
+
+// Implementation of SimpleMemoryTracker::sample()
+void Instr::SimpleMemoryTracker::sample() {
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS pmc;
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+        size_t current = pmc.WorkingSetSize;
+        size_t peak = peak_bytes_.load(std::memory_order_relaxed);
+        while (current > peak &&
+            !peak_bytes_.compare_exchange_weak(peak, current, std::memory_order_relaxed)) {
+        }
+    }
+#else
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        // ru_maxrss is in kilobytes on Unix/Linux; convert to bytes
+        size_t current = (size_t)usage.ru_maxrss * 1024;
+        size_t peak = peak_bytes_.load(std::memory_order_relaxed);
+        while (current > peak &&
+            !peak_bytes_.compare_exchange_weak(peak, current, std::memory_order_relaxed)) {
+        }
+    }
+#endif
+}
 
 
 int main(int argc, char* argv[])
@@ -89,7 +120,13 @@ int main(int argc, char* argv[])
 //	fprintf(stderr,"Time taken: %.2fs\n", (double)(clock() - tStart) / CLOCKS_PER_SEC);
 
 	sdm_benchmark->stop();
+
+	// Sample peak memory usage
+	Instr::g_memoryTracker.sample();
+
+	// Print benchmark and memory results
 	sdm_benchmark->printResults(std::cerr);
+	Instr::g_memoryTracker.printPeak(std::cerr);
 
 	//clean up
 	delete sdm_benchmark;
@@ -100,7 +137,7 @@ int main(int argc, char* argv[])
 	_CrtDumpMemoryLeaks();
 #endif
 
-	
+
 	return 0;
 }
 

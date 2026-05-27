@@ -158,6 +158,39 @@ namespace Instr {
         os << "----------------------------------------------------------\n";
     }
 
+    // Cross-platform memory tracker for overall program memory usage
+    class SimpleMemoryTracker {
+        std::atomic<size_t> peak_bytes_{ 0 };
+    public:
+        SimpleMemoryTracker() = default;
+
+        // Sample current memory and update peak if higher
+        void sample();
+
+        // Get peak memory in bytes
+        size_t peakBytes() const {
+            return peak_bytes_.load(std::memory_order_relaxed);
+        }
+
+        // Get peak memory in MiB
+        double peakMiB() const {
+            return static_cast<double>(peakBytes()) / (1024.0 * 1024.0);
+        }
+
+        // Print peak memory usage
+        void printPeak(std::ostream &os = std::cerr) const {
+            const size_t peakBytes = peak_bytes_.load(std::memory_order_relaxed);
+            const double peakMiB = static_cast<double>(peakBytes) / (1024.0 * 1024.0);
+            os << "Peak process memory: " << peakBytes << " bytes (" << peakMiB << " MiB)\n";
+        }
+
+    private:
+        friend void update_peak_mem(std::atomic<size_t>* peak);
+    };
+
+    // Global instance for tracking overall program memory
+    inline SimpleMemoryTracker g_memoryTracker;
+
     // Timed exclusive lock for std::mutex and similar
     class TimedLockGuard {
         std::mutex* mtx_ = nullptr;
@@ -223,6 +256,34 @@ enum Point {
     inline void add_us(Point, long long) {}
 
     inline void printResults(std::ostream &os = std::cerr) {}
+
+    // Keep memory tracker API available in non-debug builds as well.
+    class SimpleMemoryTracker {
+        std::atomic<size_t> peak_bytes_{ 0 };
+    public:
+        SimpleMemoryTracker() = default;
+
+        void sample();
+
+        size_t peakBytes() const {
+            return peak_bytes_.load(std::memory_order_relaxed);
+        }
+
+        double peakMiB() const {
+            return static_cast<double>(peakBytes()) / (1024.0 * 1024.0);
+        }
+
+        void printPeak(std::ostream &os = std::cerr) const {
+            const size_t peakBytes = peak_bytes_.load(std::memory_order_relaxed);
+            const double peakMiB = static_cast<double>(peakBytes) / (1024.0 * 1024.0);
+            os << "Peak process memory: " << peakBytes << " bytes (" << peakMiB << " MiB)\n";
+        }
+
+    private:
+        friend void update_peak_mem(std::atomic<size_t>* peak);
+    };
+
+    inline SimpleMemoryTracker g_memoryTracker;
 
     // No-op helpers for pool instrumentation (present in debug build)
     inline void add_pool_queue_wait_us(long long) {}

@@ -188,9 +188,7 @@ bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r);
 class Dereplicate{
 public:
 	Dereplicate(OptContainer*, Filters* mf);//
-	~Dereplicate() {
-		if (merger != nullptr) { delete merger; merger = nullptr;}
-	}
+	~Dereplicate();
 	int getHighestBCoffset() { return (int)barcode_number_to_sample_id_.size(); }
 	//bool addDNA(shared_ptr<DNA> dna);
 	bool addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2);
@@ -235,6 +233,7 @@ private:
 	bool b_pairedInput;
 	vector<int> minCopies;
 	size_t minCopiesSiz;
+	int minCopiesFastFailThreshold;
 	string minCopiesStr;
 	//int passedSize;
 	int tmpCnt;
@@ -262,7 +261,9 @@ private:
 	mutable std::condition_variable lifecycle_wait_cv_;
 
 	inline size_t shard_index_for(const string& seq) const {
-		return std::hash<string>{}(seq) & (kDerepShardCount - 1);
+		// Use the same hash algorithm as robin_hood::unordered_node_map (HashDNA)
+		// so the sequence is not hashed with two different algorithms per addDNA call.
+		return robin_hood::hash<string>{}(seq) & (kDerepShardCount - 1);
 	}
 	inline size_t tracker_size_total() const {
 		size_t total = 0;

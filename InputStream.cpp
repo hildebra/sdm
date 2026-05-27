@@ -35,7 +35,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM, 
 			shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM, 
 			float& ever_best, bool forSeed, DNAunique* merge_stats_owner,
-			int dSiz , int rSiz) {
+			uint64_t dSiz , uint64_t rSiz) {
 	
 	if (d1 == nullptr || r1 == nullptr) {
 		return false;
@@ -716,6 +716,38 @@ void InputStreamer::openMIDseqs(string p,string in){
 	hasMIDs=true;
 }
 
+bool InputStreamer::detectAndSwitchFileFormat(ifbufstream* stream, const std::string& filepath) {
+	if (stream == nullptr || stream->eof()) {
+		return false;  // Can't detect format if stream is not available
+	}
+
+	// Peek at the first character to determine actual format
+	int firstChar = stream->peekFirstChar();
+
+	if (firstChar == EOF) {
+		return false;  // Empty file
+	}
+
+	bool detectedFasta = (firstChar == '>');
+	bool detectedFastq = (firstChar == '@');
+
+	// Check if detected format differs from assumed format
+	if (detectedFasta && !isFasta) {
+		cerr << "WARNING: File " << filepath << " contains FASTA format (starts with '>')" 
+			 << " but was opened as FASTQ. Switching to FASTA mode.\n";
+		isFasta = true;
+		return true;  // Format was switched
+	}
+	else if (detectedFastq && isFasta) {
+		cerr << "WARNING: File " << filepath << " contains FASTQ format (starts with '@')" 
+			 << " but was opened as FASTA. Switching to FASTQ mode.\n";
+		isFasta = false;
+		return true;  // Format was switched
+	}
+
+	return false;  // No format switch needed
+}
+
 bool InputStreamer::setupFastq(string path, string fileS, int& pairs, string subsPairs,
 	bool simu, bool verbose) {
 	allStreamClose();
@@ -815,6 +847,9 @@ bool InputStreamer::setupFastaQual2(string p1, string p2, string file_type) {
 		return false;
 	}
 
+	// Detect and switch format if needed
+	detectAndSwitchFileFormat(fasta_istreams[pos], p1);
+
 	if (!p2.empty()) {
 		quality_istreams[pos] = DBG_NEW ifbufstream(p2, INPUT_BUFFER_SIZE, doTIO);
 		if (quality_istreams[pos]->eof()) {
@@ -879,6 +914,8 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 			fastq_istreams[0] = nullptr;
 			return false;
 		}
+		// Detect and switch format if needed
+		detectAndSwitchFileFormat(fastq_istreams[0], p1);
 	}
 	if (!p2.empty()) {
 		file_type = "fastq file 2";
@@ -888,6 +925,8 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 			fastq_istreams[1] = nullptr;
 			return false;
 		}
+		// Detect and switch format if needed
+		detectAndSwitchFileFormat(fastq_istreams[1], p2);
 	}
 	if (!midp.empty()) {
 		this->openMIDseqs("", midp);
@@ -936,11 +975,12 @@ string InputStreamer::setupInput(string path, int t, const string& uniqueFastxFi
 
 void InputStreamer::setupFna(string in) {
 	int paired = 1;
-	if (detectSeqFmt(in) == "-i_fna") {
-		setupFastaQual("", in, "", paired, "", false);
+	string fmt = detectSeqFmt(in);
+	if (fmt == "-i_fastq") {
+		setupFastq("", in, paired, "", false, false);
 	}
 	else {
-		setupFastq("", in, paired, "", false, false);
+		setupFastaQual("", in, "", paired, "", false);
 	}
 }
 

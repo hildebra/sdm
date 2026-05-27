@@ -153,7 +153,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.27: 11.4.26: bugfixes..
 //3.28: 15.4.26: faster output of .gz files..
 //3.29: 16.4.26: multithreaded sharding for derep
-static const char* sdm_version = "3.29";
+//3.30: 20.5.26: Derep improvements on sorting logic
+//3.31: 26.5.26: memory usage more than halved (unless dada2 is used)
+//3.32: 27.5.26: mutext lockup in inputstreamer removed, further mem savings, fastq format detection more robust
+static const char* sdm_version = "3.32";
 static const char* sdm_status = "beta";
 
 

@@ -19,7 +19,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #ifndef _IO_h
 #define _IO_h
 
-
 #include "containers.h"
 
 class OutputStreamer;

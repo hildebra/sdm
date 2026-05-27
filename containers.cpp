@@ -207,7 +207,7 @@ void ReadSubset::findMatches(shared_ptr<InputStreamer> IS, OutputStreamer* MD, b
 Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
         barcode_number_to_sample_id_(0), b_usearch_fmt(true), b_singleLine(true), b_pairedInput(false),
         minCopies(1,0), minCopiesStr("0"), //default minCopies accepts every derep
-        minCopiesSiz(1),
+		minCopiesSiz(1), minCopiesFastFailThreshold(-1),
 		tmpCnt(0), curBCoffset(0), b_derep_as_fasta_(true), b_derepPerSR(false),
 		b_wroteMapHD(false), b_merge_pairs_derep_(false),merger(nullptr),
 		mapF(""), outHQf(""), outHQf_p2(""), outRest(""),
@@ -285,6 +285,16 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
    else {
 		minCopiesSiz = minCopies.size();
 	}
+
+	minCopiesFastFailThreshold = -1;
+	for (size_t i = 0; i < minCopies.size(); ++i) {
+		if (minCopies[i] <= 0) {
+			continue;
+		}
+		if (minCopiesFastFailThreshold == -1 || minCopies[i] < minCopiesFastFailThreshold) {
+			minCopiesFastFailThreshold = minCopies[i];
+		}
+	}
 	// set up output format of dereplication:
 	if (cmdArgs->find("-derep_format") != cmdArgs->end()) {
 		auto res = (*cmdArgs)["-derep_format"];
@@ -301,10 +311,14 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 	}
 
 	// Flag for merging paired end fsatq reads
-    if (cmdArgs->find("-merge_pairs_derep") != cmdArgs->end() && 
+	if (cmdArgs->find("-merge_pairs_derep") != cmdArgs->end() && 
 		(*cmdArgs)["-merge_pairs_derep"] == "1") {
 		b_merge_pairs_derep_ = true;
-    }
+	}
+}
+
+Dereplicate::~Dereplicate() {
+	if (merger != nullptr) { delete merger; merger = nullptr; }
 }
 
 
@@ -315,7 +329,9 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 		~ActiveAddGuard() {
 			if (owner->active_adddna_.fetch_sub(1, std::memory_order_acq_rel) == 1 &&
 				owner->lifecycle_pause_.load(std::memory_order_acquire)) {
-				std::lock_guard<std::mutex> lk(owner->lifecycle_wait_mtx_);
+				// notify_all() does not require the mutex to be held; calling it
+				// outside avoids waking finishMap() only for it to immediately
+				// block again reacquiring the same mutex (hurry-up-and-wait).
 				owner->lifecycle_wait_cv_.notify_all();
 			}
 		}
@@ -334,7 +350,6 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 		}
 		if (active_adddna_.fetch_sub(1, std::memory_order_acq_rel) == 1 &&
 			lifecycle_pause_.load(std::memory_order_acquire)) {
-			std::lock_guard<std::mutex> lk(lifecycle_wait_mtx_);
 			lifecycle_wait_cv_.notify_all();
 		}
 	}
@@ -404,58 +419,60 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
     // See if DNA object is present
     // auto dna_unique = Tracker.find(new_dna_unique);
 	bool new_insert(true);
-	map<int, shared_ptr<DNAunique>>::iterator dna_unique;
 	const size_t shardIdx = shard_index_for(srchSeq);
 	HashDNA& shard = tracker_shards_[shardIdx];
 	std::shared_mutex& shardMtx = drpMTX_shards_[shardIdx];
 	{
 		std::shared_lock<std::shared_mutex> shardReadLock(shardMtx); // lock for hash shard
-		auto dna_unique1 = shard.find(srchSeq);
-		if (dna_unique1 != shard.end()) {// found something
-			new_insert = false;
+		auto shard_it = shard.find(srchSeq);
+		if (shard_it != shard.end()) {// found something
 			// lock the DNAuniqSet for this sequence
-			unique_ptr<DNAuniqSet>& dnuSet = dna_unique1->second;
+			unique_ptr<DNAuniqSet>& dnuSet = shard_it->second;
 			std::lock_guard<std::mutex> setLock(dnuSet->lockMTX);
-			dna_unique = dnuSet->find(MrgPos1);
+			auto dna_unique = dnuSet->find(MrgPos1);
 			// truly dereplicated? at least overlap should fit..
 			if (dna_unique == dnuSet->end()) {
-				dnuSet->addNewDNAuniq(dna, dna2, dna_merged, MrgPos1, sample_id);
+				dnuSet->addNewDNAuniq(dna, dna2, dna_merged, MrgPos1, sample_id, b_derep_as_fasta_);
 			}
 			else { // compare to existing DNA
 				dna_unique->second->matchedDNA(dna, dna2, dna_merged, sample_id, b_derep_as_fasta_);
 			}
+			return false;
 		}
 	}
 
-	if (new_insert && pass) {
-		// create/find entry under exclusive lock and acquire set lock before releasing
-		// to avoid races with container rehash/reference invalidation.
-		std::unique_lock<std::shared_mutex> shardWriteLock(shardMtx);
-		auto& entry = shard[srchSeq];
-		bool freshEntry = !entry;
-		if (freshEntry) {
-			entry = std::make_unique<DNAuniqSet>();
-		}
-		std::lock_guard<std::mutex> setLock(entry->lockMTX);
-		shardWriteLock.unlock();
-		if (!freshEntry) {
-			// Another thread inserted the same srchSeq between our shared unlock
-			// and exclusive lock. Match against existing entries instead of
-			// blindly adding a duplicate.
-			auto dna_unique_it = entry->find(MrgPos1);
-			if (dna_unique_it != entry->end()) {
-				dna_unique_it->second->matchedDNA(dna, dna2, dna_merged, sample_id, b_derep_as_fasta_);
-			}
-			else {
-				entry->addNewDNAuniq(dna, dna2, dna_merged, MrgPos1, sample_id);
-			}
+	if (!pass) {
+		return new_insert;
+	}
+
+	// create/find entry under exclusive lock and acquire set lock before releasing
+	// to avoid races with container rehash/reference invalidation.
+	std::unique_lock<std::shared_mutex> shardWriteLock(shardMtx);
+	auto [shard_it, freshEntry] = shard.try_emplace(srchSeq, nullptr);
+	unique_ptr<DNAuniqSet>& entry = shard_it->second;
+	if (freshEntry) {
+		entry = std::make_unique<DNAuniqSet>();
+	}
+	std::lock_guard<std::mutex> setLock(entry->lockMTX);
+	shardWriteLock.unlock();
+	if (!freshEntry) {
+		new_insert = false;
+		// Another thread inserted the same srchSeq between our shared unlock
+		// and exclusive lock. Match against existing entries instead of
+		// blindly adding a duplicate.
+		auto dna_unique_it = entry->find(MrgPos1);
+		if (dna_unique_it != entry->end()) {
+			dna_unique_it->second->matchedDNA(dna, dna2, dna_merged, sample_id, b_derep_as_fasta_);
 		}
 		else {
-			entry->addNewDNAuniq(dna, dna2, dna_merged, MrgPos1, sample_id);
+			entry->addNewDNAuniq(dna, dna2, dna_merged, MrgPos1, sample_id, b_derep_as_fasta_);
 		}
 	}
+	else {
+		entry->addNewDNAuniq(dna, dna2, dna_merged, MrgPos1, sample_id, b_derep_as_fasta_);
+	}
 	//drpMTX.unlock();
-    return new_insert;//didn't do a thing..
+	return new_insert;//didn't do a thing..
 }
 
 void Dereplicate::BCnamesAdding(Filters* fil) {
@@ -507,8 +524,10 @@ void Dereplicate::finishMap() {
 		std::unique_lock<std::shared_mutex> lk(drpMTX_shards_[si]);
 		tracker_shards_[si].clear();
 	}
-	std::ifstream inputFile(mapF.c_str(),ios::in);
-	std::ofstream outputFile((mapF+"t").c_str(), ios::out);
+	const string tmpMap = mapF + ".tmp";
+	const string bakMap = mapF + ".bak";
+	std::ifstream inputFile(mapF.c_str(), ios::in);
+	std::ofstream outputFile(tmpMap.c_str(), ios::out | ios::trunc);
 
 	outputFile << "#SMPLS";
 	bool bCombiSmpl = mainFilter->combineSamples();
@@ -531,13 +550,43 @@ void Dereplicate::finishMap() {
 	outputFile << "\n";
 	b_wroteMapHD = true;
 
-	outputFile << inputFile.rdbuf();
+	if (inputFile) {
+		outputFile << inputFile.rdbuf();
+	}
 
 	inputFile.close();
 	outputFile.close();
 
-	std::remove(mapF.c_str());
-	int x = std::rename((mapF + "t").c_str(), mapF.c_str());
+	bool replaced = false;
+	bool hadOriginal = false;
+	{
+		std::ifstream probe(mapF.c_str(), ios::in);
+		hadOriginal = static_cast<bool>(probe);
+	}
+	if (hadOriginal) {
+		std::remove(bakMap.c_str());
+		if (std::rename(mapF.c_str(), bakMap.c_str()) != 0) {
+			cerr << "Warning: Could not backup existing map file before replace: " << mapF << "\n";
+		}
+	}
+
+	if (std::rename(tmpMap.c_str(), mapF.c_str()) == 0) {
+		replaced = true;
+	}
+	else {
+		cerr << "Warning: Could not promote temporary map file: " << tmpMap << " -> " << mapF << "\n";
+	}
+
+	if (hadOriginal) {
+		if (!replaced) {
+			if (std::rename(bakMap.c_str(), mapF.c_str()) != 0) {
+				cerr << "Warning: Could not restore previous map file from backup: " << bakMap << "\n";
+			}
+		}
+		else {
+			std::remove(bakMap.c_str());
+		}
+	}
 	lifecycle_pause_.store(false, std::memory_order_release);
 	lifecycle_wait_cv_.notify_all();
 
@@ -620,6 +669,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 			if (!dd->second) {
 				continue;
 			}
+			std::lock_guard<std::mutex> setLock(dd->second->lockMTX);
 			dereplicated_dnas.push_back(dd->second->best(true));
 		}
 	}
@@ -688,6 +738,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 		dna->resetTruncation();
 		dna->prepareWrite(fastqVer);
 		dna->writeFastQ(of2);
+		dna->releaseRawQualitiesIfPromoted();
 
 		if (b_pairedInput) {
 			shared_ptr<DNAunique> oD = dna->getPair();
@@ -695,12 +746,14 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 				oD->resetTruncation();
 				oD->prepareWrite(fastqVer);
 				oD->writeFastQ(of2p2);
+				oD->releaseRawQualitiesIfPromoted();
 			} else {
 				shared_ptr<DNA> tmp = make_shared< DNA>("", dna->getId());
 				tmp->writeFastQEmpty(of2p2);
 
 			}
 		}
+		
 	}
 //	if (tmpCnt != passedSize) {
 //		cerr << "Counting failed\n" << tmpCnt << " " << passedSize<<endl;
@@ -708,15 +761,22 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	of.close(); omaps.close();  ofRest.close();
 	float avgSize = passed_hits > 0 ? (float)passedSize / (float)(passed_hits) : 0.f;
     string report = "";
+	auto formatCount64 = [](uint64_t value) {
+		std::string s = std::to_string(value);
+		for (int pos = static_cast<int>(s.size()) - 3; pos > 0; pos -= 3) {
+			s.insert(static_cast<size_t>(pos), ",");
+		}
+		return s;
+	};
 	string N_notPassed = intwithcommas(int(dereplicated_dnas.size() - passed_hits));
 	string N_total = intwithcommas(int(dereplicated_dnas.size()));
 	string N_passed = intwithcommas((int)passed_hits);
 	report += "Dereplication: " + N_passed + " unique sequences (avg size ";
-	report += intwithcommas((int)avgSize) + "; " + intwithcommas((int)passedSize) + " counts, ";
-	report += intwithcommas(passedMerge) + " merged)\n";
+	report += intwithcommas((int)avgSize) + "; " + formatCount64(static_cast<uint64_t>(passedSize)) + " counts, ";
+	report += formatCount64(static_cast<uint64_t>(passedMerge)) + " merged)\n";
 	
 		if (passed_hits > 0) {
-       report += N_notPassed + "/" + N_total + " not passing derep conditions (" + intwithcommas((int)notPassedSize) + " counts; "+ minCopiesStr;
+	   report += N_notPassed + "/" + N_total + " not passing derep conditions (" + formatCount64(static_cast<uint64_t>(notPassedSize)) + " counts; "+ minCopiesStr;
 		if (dereplicate_sample_specific) { report += " & sample specific restrictions"; }
 	report += ")";
 	}
@@ -764,6 +824,9 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 
 
 bool Dereplicate::pass_deprep_conditions(shared_ptr<DNAunique> d) {
+	if (minCopiesFastFailThreshold > 0 && d->totalSum() < minCopiesFastFailThreshold) {
+		return false;
+	}
 	vector<int> x = d->getDerepMapSort(minCopiesSiz);
 	int cumSum(0);
 	for (size_t i = 0; i < x.size(); i++) {
@@ -1668,11 +1731,11 @@ void UClinks::add2OTUmat(const string& smplID, int curCLID, matrixUnit spl) {
 }
 void UClinks::add2OTUmat(shared_ptr<DNAunique> d, int curCLID, matrixUnit rep) {
 	if (d == NULL) { cerr << " add2OTUmat::d is NULL\n"; exit(85); }
-    const read_occ& map = d->getDerepMap();
+	const read_occ& map = d->getDerepMap();
 	if ( rep <1 ) { rep = 1; }
-  for (size_t sample_id = 0; sample_id < map.size(); sample_id++) {
-		if (map[sample_id] <= 0) { continue; }
-		OTUmat[sample_id][curCLID] += (matrixUnit)map[sample_id] / rep;
+	for (const auto& entry : map) {
+		if (entry.second == 0 || entry.first < 0 || static_cast<size_t>(entry.first) >= OTUmat.size()) { continue; }
+		OTUmat[entry.first][curCLID] += static_cast<matrixUnit>(entry.second) / rep;
 	}
 }
 

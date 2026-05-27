@@ -366,22 +366,49 @@ string detectSeqFmt(const string inF) {
                 std::cerr << "\nCouldn't open " << file_type << " file \"" << fileS << "\"! Skipping..\n";
                 continue;
             }
-            while (safeGetline(*fnax, tmp)) {
-                if (tmp.empty()) { continue; }
-                if (tmp[0] == '>') {
-                    ret = "-i_fna"; break;
-                }
-                else if (tmp[0] == '@') {
-                    ret = "-i_fastq"; break;
-                }
-                else if (tmp.length() == 0) {
-                    ;
+            // Peek first non-whitespace character to determine sequence format.
+            // '>' => FASTA, '@' => FASTQ
+            int ch = fnax->peek();
+            if (ch == 0xEF) {
+                int b1 = fnax->get();
+                int b2 = fnax->peek();
+                if (b2 == 0xBB) {
+                    fnax->get();
+                    int b3 = fnax->peek();
+                    if (b3 == 0xBF) {
+                        fnax->get();
+                    }
+                    else {
+                        fnax->putback((char)0xBB);
+                    }
                 }
                 else {
-					bool isGZ = isGZfile(fileS);
-                    std::cerr << "\nCouldn't open " << file_type << " file \"" << fileS << "\"! Skipping..\n";
-                    exit(888);
+                    fnax->putback((char)b1);
                 }
+            }
+
+            while ((ch = fnax->peek()) != EOF) {
+                if (ch == '\n' || ch == '\r' || ch == ' ' || ch == '\t') {
+                    fnax->get();
+                    continue;
+                }
+                break;
+            }
+
+            if (ch == '>') {
+                ret = "-i_fna";
+            }
+            else if (ch == '@') {
+                ret = "-i_fastq";
+            }
+            else if (ch == EOF) {
+                ret = "";
+            }
+            else {
+                std::cerr << "\nCould not detect sequence format for \"" << fileS
+                    << "\". Expected first non-whitespace character to be '>' (FASTA) or '@' (FASTQ), got '"
+                    << (char)ch << "'.\n";
+                exit(888);
             }
         }
         if (ret == "") {

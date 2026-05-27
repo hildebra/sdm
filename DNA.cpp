@@ -1,7 +1,16 @@
 #include "DNA.h"
 #include "InputStream.h" // for helpers and globals (rtrim, parseInt, DNA_amb, NT_POS, DNA_IUPAC, itos, whoIsBetter)
 
-
+namespace {
+	std::string buildFastqQualityString(const std::vector<qual_score>& quals, size_t len, qual_score fastqOffset) {
+		std::string out(len, static_cast<char>(fastqOffset));
+		const size_t copyLen = std::min(len, quals.size());
+		for (size_t i = 0; i < copyLen; ++i) {
+			out[i] = static_cast<char>(quals[i] + fastqOffset);
+		}
+		return out;
+	}
+}
 
 
 void DNA::fixQ0(void) {
@@ -323,12 +332,17 @@ void DNA::appendQuality(const vector<qual_score>& q)
 
 float DNA::getAvgQual() {
 	if (avg_qual_ < 0.f) {
-		if (quality_sum_ == 0) {
-			for (unsigned int i = 0; i < this->length(); i++) {
+		if (quality_sum_ == 0 && !qual_.empty()) {
+			for (unsigned int i = 0; i < std::min((size_t)this->length(), qual_.size()); i++) {
 				quality_sum_ += qual_[i];
 			}
 		}
-		avg_qual_ = static_cast<float>(quality_sum_) / static_cast<float>(this->length());
+		if (this->length() == 0) {
+			avg_qual_ = 0.f;
+		}
+		else {
+			avg_qual_ = static_cast<float>(quality_sum_) / static_cast<float>(this->length());
+		}
 
 	}
 	return avg_qual_;
@@ -736,7 +750,6 @@ void DNA::reset() {
 	accumulated_error_ = 0.; good_quality_ = false; mid_quality_ = false;
 	//FtsDetected.reset();
 	avg_qual_ = -1.f; quality_sum_ = 0; tempFloat = 0.f;
-	qual_traf_ = "";
 
 	this->resetTruncation();
 }
@@ -745,7 +758,6 @@ void DNA::reverse_compliment(bool reset) {
 	reverseTS(sequence_);
 	std::reverse(qual_.begin(), qual_.end());
 	reversed_ = !reversed_;
-	qual_traf_ = "";
 	if (!reset) {
 		return;
 	}
@@ -1055,16 +1067,17 @@ void DNA::writeQual(string& str, bool singleLine) {
 
 
 void DNA::writeFastQ(ostream& wr, bool newHD) {//, int fastQver){
-    if (qual_.size() == 0 || sequence_.length() == 0 || length() == 0) { return; }
+	if (qual_.size() == 0 || sequence_.length() == 0 || length() == 0) { return; }
 	const size_t seqLen = this->length();
 	const string& hdr = newHD ? new_id_ : id_;
+	const std::string qual_traf = buildFastqQualityString(qual_, seqLen, fastq_write_offset_);
 
 	wr.put('@');
 	wr << hdr;
 	wr.put('\n');
 	wr.write(sequence_.data(), seqLen);
 	wr << "\n+\n";
-    wr.write(qual_traf_.data(), static_cast<std::streamsize>(qual_traf_.size()));
+	wr.write(qual_traf.data(), static_cast<std::streamsize>(qual_traf.size()));
 	wr.put('\n');
 }
 string DNA::writeFastQ(bool newHD) {
@@ -1076,14 +1089,15 @@ void DNA::writeFastQ(string& ret, bool newHD) {
 	if (qual_.size() == 0 || sequence_.length() == 0 || length() == 0) { return; }
 	const size_t seqLen = this->length();
 	const string& hdr = newHD ? new_id_ : id_;
-	ret.reserve(ret.size() + hdr.size() + seqLen + qual_traf_.size() + 5);
+	const std::string qual_traf = buildFastqQualityString(qual_, seqLen, fastq_write_offset_);
+	ret.reserve(ret.size() + hdr.size() + seqLen + qual_traf.size() + 5);
 
 	ret.push_back('@');
 	ret += hdr;
 	ret.push_back('\n');
 	ret.append(sequence_.data(), seqLen);
 	ret += "\n+\n";
-	ret.append(qual_traf_.data(), qual_traf_.size());
+	ret.append(qual_traf.data(), qual_traf.size());
 	ret.push_back('\n');
 }
 /*
@@ -1181,17 +1195,7 @@ void DNA::setPassed(bool b) {
 
 
 void DNA::prepareWrite(int ofastQver) {
-	uint len = length();
-	if (qual_traf_.size() == len) {
-		return;
-	}
-	qual_traf_.resize(len);
-
-	
-	for (unsigned int i = 0; i < len; i++) {
-		qual_traf_[i] = char(qual_[i] + ofastQver);
-	}
-	//qual_traf_[i] = '\0';
+	fastq_write_offset_ = static_cast<qual_score>(ofastQver);
 }
 void DNA::resetQualOffset(int x, bool fqSol) {
 	for (size_t i = 0; i < qual_.size(); i++) {
@@ -1274,7 +1278,6 @@ void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
 		return;
 	}
 
-	std::unique_lock<std::mutex> lock(DNAuniMTX);
 	if (doCounterUpdate) {
 		incrementSampleCounter(sample_id);
 	}
@@ -1284,14 +1287,27 @@ void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
 	// only replace old unique dna with new if it has good quality and its seed is better
 	// betterPreSeed makes sense with uparse/
 	float tmp(-1.f);
-   if (doReplacementCheck &&
-		whoIsBetter(dna, dna2, dnaM, shared_from_this(), this->getPair(), this->getMerge(),
-         tmp, false, this)) { //this->getBestSeedLength(),
+	const shared_ptr<DNA> self_view(this, [](DNA*) {});
+	if (doReplacementCheck &&
+		whoIsBetter(dna, dna2, dnaM, self_view, this->getPair(), this->getMerge(),
+		 tmp, false, this)) { //this->getBestSeedLength(),
 		//betterPreSeed(dna, dna2)) {
 		// Uparse does NOT use qualities for clustering, therefore we do not need to calculate average qualities for this dna object
 		// Lotus uses qualities for constructing taxonomy (therefore we do replace dna if theres a better quality read)
-		takeOverDNA(dna, dna2, dnaM);
+		takeOverDNA(dna, dna2, dnaM, true);
 	}
+}
+
+read_occ::iterator DNAunique::findOccurrenceEntry(int sample_id) {
+	return std::find_if(occurence.begin(), occurence.end(), [sample_id](const read_occ_entry& entry) {
+		return entry.first == sample_id;
+		});
+}
+
+read_occ::const_iterator DNAunique::findOccurrenceEntry(int sample_id) const {
+	return std::find_if(occurence.begin(), occurence.end(), [sample_id](const read_occ_entry& entry) {
+		return entry.first == sample_id;
+		});
 }
 
 void DNAunique::incrementSampleCounter(int sample_id) {
@@ -1300,20 +1316,34 @@ void DNAunique::incrementSampleCounter(int sample_id) {
 	}
 	//count_++;
 #ifdef _MAPDEREPLICATE
-    if (occurence.size() <= static_cast<size_t>(sample_id)) {
-		occurence.resize(static_cast<size_t>(sample_id) + 1, 0);
+	auto it = findOccurrenceEntry(sample_id);
+	if (it == occurence.end()) {
+		occurence.emplace_back(sample_id, static_cast<sample_count_t>(1));
 	}
-  occurence[sample_id]++;
+	else if (it->second < std::numeric_limits<sample_count_t>::max()) {
+		++(it->second);
+	}
+	invalidateTotalSumCache();
 #endif
 }
 void DNAunique::incrementSampleCounterBy(int sample_id, long count) {
-    if (sample_id < 0) {
+	if (sample_id < 0 || count <= 0) {
 		return;
 	}
-	if (occurence.size() <= static_cast<size_t>(sample_id)) {
-		occurence.resize(static_cast<size_t>(sample_id) + 1, 0);
+	sample_count_t add_count = count >= static_cast<long>(std::numeric_limits<sample_count_t>::max())
+		? std::numeric_limits<sample_count_t>::max()
+		: static_cast<sample_count_t>(count);
+	auto it = findOccurrenceEntry(sample_id);
+	if (it == occurence.end()) {
+		occurence.emplace_back(sample_id, add_count);
 	}
-   occurence[sample_id] += count;
+	else if (it->second > (std::numeric_limits<sample_count_t>::max() - add_count)) {
+		it->second = std::numeric_limits<sample_count_t>::max();
+	}
+	else {
+		it->second += add_count;
+	}
+	invalidateTotalSumCache();
 }
 /*vector<pair_<int, int>> DNAunique::getDerepMapSort2(size_t wh ){
 	typedef std::pair_<int, int> mypair;
@@ -1336,22 +1366,21 @@ void DNAunique::incrementSampleCounterBy(int sample_id, long count) {
 bool sortDescending(int i, int j) { return (i > j); }//descending sort
 vector<int>  DNAunique::getDerepMapSort(size_t wh) {
 	vector<int> vals;
-  size_t siz = 0;
-	for (size_t i = 0; i < occurence.size(); i++) {
-		if (occurence[i] > 0) {
-			siz++;
-		}
+	vals.reserve(occurence.size());
+	for (const auto& entry : occurence) {
+		if (entry.second == 0) { continue; }
+		vals.push_back(static_cast<int>(entry.second));
 	}
-	if (wh > siz) { wh = siz; }
-	vals.reserve(siz);
-    for (size_t i = 0; i < occurence.size(); i++) {
-		if (occurence[i] > 0) {
-			vals.push_back(static_cast<int>(occurence[i]));
-		}
+	if (wh > vals.size()) { wh = vals.size(); }
+	if (vals.size() <= 1 || wh == 0) {
+		return vals;
 	}
-	//partial sort doesn't make sense, as I want to break border asap
-	//partial_sort(vals.begin(), vals.begin() + wh, vals.end(), sortDescending);
-	sort(vals.begin(), vals.end(), sortDescending);
+	if (wh >= vals.size()) {
+		sort(vals.begin(), vals.end(), sortDescending);
+	}
+	else {
+		std::partial_sort(vals.begin(), vals.begin() + wh, vals.end(), sortDescending);
+	}
 	return vals;
 }
 
@@ -1359,11 +1388,10 @@ bool DNAunique::pass_deprep_smplSpc(const vector<int>& cv) {
 	//unordered_map<int, int> occ;
 	//combined samples will not be considered
 	//occ = occurence;
-    const size_t maxSz = std::min(occurence.size(), cv.size());
-	for (size_t i = 0; i < maxSz; i++) {
-		if (occurence[i] <= 0) { continue; }
-		int ref = cv[i];
-		if (ref != -1 && occurence[i] >= ref) {
+	for (const auto& entry : occurence) {
+		if (entry.second == 0 || entry.first < 0 || static_cast<size_t>(entry.first) >= cv.size()) { continue; }
+		int ref = cv[entry.first];
+		if (ref != -1 && entry.second >= static_cast<sample_count_t>(ref)) {
 			return true;
 		}
 	}
@@ -1380,47 +1408,66 @@ void DNAunique::transferOccurence(const shared_ptr<DNAunique> dna_unique) {
 	if (dereplication_map.empty()) {
 		return;
 	}
-	if (occurence.size() < dereplication_map.size()) {
-		occurence.resize(dereplication_map.size(), 0);
+	for (const auto& entry : dereplication_map) {
+		if (entry.second == 0) { continue; }
+		auto it = findOccurrenceEntry(entry.first);
+		if (it == occurence.end()) {
+			occurence.push_back(entry);
+		}
+		else if (it->second > (std::numeric_limits<sample_count_t>::max() - entry.second)) {
+			it->second = std::numeric_limits<sample_count_t>::max();
+		}
+		else {
+			it->second += entry.second;
+		}
 	}
-	for (size_t i = 0; i < dereplication_map.size(); i++) {
-		occurence[i] += dereplication_map[i];
-	}
+	invalidateTotalSumCache();
 }
 
 
 void DNAunique::writeMap(ofstream& os, const string& hd, vector<int>& counts_per_sample, const vector<int>& combiID) {
 	if (occurence.empty()) { return; }
-	int total_count(0);
-   std::unordered_map<int, long> sample_counters;
+	uint64_t total_count(0);
+	std::unordered_map<int, uint64_t> sample_counters;
 
 	if (combiID.size() > 0) {//combine all counts on combined categories
 
-        for (size_t i = 0; i < occurence.size(); i++) {
-			if (occurence[i] <= 0 || i >= combiID.size()) { continue; }
-			sample_counters[combiID[i]] += occurence[i];
+		for (const auto& entry : occurence) {
+			if (entry.second == 0 || entry.first < 0 || static_cast<size_t>(entry.first) >= combiID.size()) { continue; }
+			sample_counters[combiID[entry.first]] += entry.second;
 		}
 	}
 	else {
-        for (size_t i = 0; i < occurence.size(); i++) {
-			if (occurence[i] <= 0) { continue; }
-			sample_counters[static_cast<int>(i)] = occurence[i];
+		for (const auto& entry : occurence) {
+			if (entry.second == 0) { continue; }
+			sample_counters[entry.first] += entry.second;
 		}
 	}
 
 	//prints combined sample counts
 	os << hd;
-    for (auto iter = sample_counters.begin(); iter != sample_counters.end(); ++iter) {
-		int count = static_cast<int>(iter->second);
+	for (auto iter = sample_counters.begin(); iter != sample_counters.end(); ++iter) {
+		const uint64_t rawCount = iter->second;
+		int count = rawCount > static_cast<uint64_t>(std::numeric_limits<int>::max())
+			? std::numeric_limits<int>::max()
+			: static_cast<int>(rawCount);
 		total_count += count;
 		os << "\t";
 		os << iter->first << ":" << count;
 	}
 
 	//counts non-combined sample counts
-    for (size_t i = 0; i < occurence.size(); i++) {
-		if (occurence[i] <= 0 || i >= counts_per_sample.size()) { continue; }
-		counts_per_sample[i] += static_cast<int>(occurence[i]);
+	for (const auto& entry : occurence) {
+		if (entry.second == 0 || entry.first < 0 || static_cast<size_t>(entry.first) >= counts_per_sample.size()) { continue; }
+		const int add = entry.second > static_cast<sample_count_t>(std::numeric_limits<int>::max())
+			? std::numeric_limits<int>::max()
+			: static_cast<int>(entry.second);
+		if (counts_per_sample[entry.first] > (std::numeric_limits<int>::max() - add)) {
+			counts_per_sample[entry.first] = std::numeric_limits<int>::max();
+		}
+		else {
+			counts_per_sample[entry.first] += add;
+		}
 	}
 	os << endl;
 
@@ -1430,11 +1477,18 @@ void DNAunique::writeMap(ofstream& os, const string& hd, vector<int>& counts_per
 	}*/
 }
 
-int DNAunique::totalSum() {
-	int ret(0);
-	for (auto xx : occurence) { ret += static_cast<int>(xx); }
-	if (ret == 0) { ret = 1; }
-	return ret;
+uint64_t DNAunique::totalSum() {
+	if (!total_sum_cache_valid_) {
+		total_sum_cache_ = 0;
+		for (const auto& xx : occurence) {
+			total_sum_cache_ += static_cast<uint64_t>(xx.second);
+		}
+		total_sum_cache_valid_ = true;
+	}
+	if (total_sum_cache_ == 0) {
+		return 1;
+	}
+	return total_sum_cache_;
 }
 
 
@@ -1451,8 +1505,6 @@ void DNAunique::addToQualSum(qual_accum_t& target, qual_accum_t value) {
 
 
 void DNAunique::saveMem() {
-	qual_traf_.clear();
-	qual_traf_.shrink_to_fit();
 	if (!id_.empty()) {
 		new_id_.assign(id_.data(), getSpaceHeadPos(id_));
 	}
@@ -1480,15 +1532,24 @@ void DNAunique::attachMerge(shared_ptr<DNAunique> dnamerge) {
 	FtsDetected.mergeLength = merge_->length();
 }
 
-void DNAunique::prepSumQuals() {
+void DNAunique::promoteQualitiesToSums(bool releaseRawQualities) {
 	if (quality_sum_per_base_.empty()) {
 		quality_sum_per_base_.assign(length(), 0);
-		for (uint i = 0; i < length(); i++) {
+		const size_t copyLen = std::min(static_cast<size_t>(length()), qual_.size());
+		for (size_t i = 0; i < copyLen; i++) {
 			if (qual_[i] > 0) {
 				quality_sum_per_base_[i] = static_cast<qual_accum_t>(qual_[i]);
 			}
 		}
 	}
+	if (releaseRawQualities && !quality_sum_per_base_.empty() && !qual_.empty()) {
+		qual_.clear();
+		qual_.shrink_to_fit();
+	}
+}
+
+void DNAunique::prepSumQuals() {
+	promoteQualitiesToSums(false);
 }
 void DNAunique::sumQualities(const shared_ptr<DNAunique>& dna) {
 	if (dna == nullptr) return;
@@ -1518,6 +1579,10 @@ void DNAunique::sumQualities(const shared_ptr<DNA>& dna) {
 	}
 }
 
+void DNAunique::releaseRawQualitiesIfPromoted() {
+	promoteQualitiesToSums(true);
+}
+
 void DNAunique::recordWhoIsBetterCompare(int dMergeLength, int rMergeLength) {
 	if (dMergeLength >= 0) {
 		++who_is_better_merge_stats_.merged_compares;
@@ -1545,10 +1610,10 @@ void DNAunique::Count2Head(bool usFmt) {
 		return;
 	}
 	if (usFmt) {
-		new_id_ += ";size=" + itos(totalSum()) + ";";
+		new_id_ += ";size=" + std::to_string(totalSum()) + ";";
 	}
 	else {
-		new_id_ += "_" + itos(totalSum());
+		new_id_ += "_" + std::to_string(totalSum());
 	}
 	id_fixed_ = true;
 }
@@ -1566,18 +1631,21 @@ void DNAunique::takeOver(shared_ptr<DNAunique> const dna_unique_old) {
 
 	quality_sum_per_base_ = dna_unique_old->transferPerBaseQualitySum();
 }
-void DNAunique::takeOverDNA(shared_ptr<DNA> const better_dna, shared_ptr<DNA> const dna2, shared_ptr<DNA> const dnaMerge) {
+void DNAunique::takeOverDNA(shared_ptr<DNA> const better_dna, shared_ptr<DNA> const dna2, shared_ptr<DNA> const dnaMerge, bool keepQualities) {
 
+	keepQualities = true;
 
 	if (dna2 != nullptr) {
-		this->attachPair(make_shared<DNAunique>(dna2, -1));
+		auto pair_unique = make_shared<DNAunique>(dna2, -1);
+		this->attachPair(pair_unique);
 	}
 	if (dnaMerge != nullptr) {
-		this->attachMerge(make_shared<DNAunique>(dnaMerge, -1));
+		auto merge_unique = make_shared<DNAunique>(dnaMerge, -1);
+		this->attachMerge(merge_unique);
 	}
 
-	avg_qual_ = better_dna->avg_qual_;
-	accumulated_error_ = better_dna->accumulated_error_;
+	avg_qual_ = keepQualities ? better_dna->avg_qual_ : 0.f;
+	accumulated_error_ = keepQualities ? better_dna->accumulated_error_ : 0.;
 	FtsDetected = better_dna->FtsDetected;
   failed_ = better_dna->failed_;
 	id_ = better_dna->id_;
@@ -1589,9 +1657,9 @@ void DNAunique::takeOverDNA(shared_ptr<DNA> const better_dna, shared_ptr<DNA> co
 	merge_seed_pos_ = better_dna->merge_seed_pos_;
 	reversed_merge_ = better_dna->reversed_merge_;
 	seed_length_ = better_dna->seed_length_;
-	quality_sum_ = better_dna->quality_sum_;
+	quality_sum_ = keepQualities ? better_dna->quality_sum_ : 0;
 	QualCtrl = better_dna->QualCtrl;
-	qual_ = better_dna->qual_;
+	qual_ = keepQualities ? better_dna->qual_ : vector<qual_score>();
 	sequence_ = better_dna->sequence_;
 	sequence_length_ = better_dna->sequence_length_;
 	sample_id_ = better_dna->sample_id_;
@@ -1603,27 +1671,97 @@ void DNAunique::takeOverDNA(shared_ptr<DNA> const better_dna, shared_ptr<DNA> co
 	this->saveMem();
 }
 
+void DNAunique::compactForFastaDerepStorage() {
+	qual_.clear();
+	qual_.shrink_to_fit();
+	quality_sum_per_base_.clear();
+	quality_sum_per_base_.shrink_to_fit();
+	quality_sum_ = 0;
+	avg_qual_ = 0.f;
+	accumulated_error_ = 0.;
+}
+
 std::vector<DNAunique::qual_accum_t> DNAunique::transferPerBaseQualitySum() {
 	return std::move(quality_sum_per_base_);
 }
 
 void DNAunique::prepareDerepQualities(int ofastQver) {
 	prepSumQuals();
-	if (qualities_avg_.size() == length()) {
+	derep_fastq_offset_ = static_cast<qual_score>(ofastQver);
+}
+
+void DNAunique::writeFastQ(ostream& wr, bool newHD) {
+	if (!qual_.empty()) {
+		DNA::writeFastQ(wr, newHD);
 		return;
 	}
-	qualities_avg_.resize(length());
-
-	for (unsigned int i = 0; i < length(); i++) {
-		int newbase = (int)round((double)quality_sum_per_base_[i] / (double)totalSum()) + ofastQver;
-		qualities_avg_[i] = char(newbase);
+	if (sequence_.length() == 0 || length() == 0) {
+		return;
+	}
+	prepSumQuals();
+	if (quality_sum_per_base_.empty()) {
+		return;
+	}
+	const size_t seqLen = this->length();
+	const string& hdr = newHD ? new_id_ : id_;
+	const uint64_t total = std::max<uint64_t>(1, totalSum());
+	std::string qual_traf(seqLen, static_cast<char>(fastq_write_offset_));
+	const size_t qlen = std::min(seqLen, quality_sum_per_base_.size());
+	for (size_t i = 0; i < qlen; ++i) {
+		int q = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + fastq_write_offset_;
+		qual_traf[i] = static_cast<char>(q);
 	}
 
+	wr.put('@');
+	wr << hdr;
+	wr.put('\n');
+	wr.write(sequence_.data(), seqLen);
+	wr << "\n+\n";
+	wr.write(qual_traf.data(), static_cast<std::streamsize>(qual_traf.size()));
+	wr.put('\n');
+}
+
+string DNAunique::writeFastQ(bool newHD) {
+	string ret = string("");
+	this->writeFastQ(ret, newHD);
+	return ret;
+}
+
+void DNAunique::writeFastQ(string& ret, bool newHD) {
+	if (!qual_.empty()) {
+		DNA::writeFastQ(ret, newHD);
+		return;
+	}
+	if (sequence_.length() == 0 || length() == 0) {
+		return;
+	}
+	prepSumQuals();
+	if (quality_sum_per_base_.empty()) {
+		return;
+	}
+	const size_t seqLen = this->length();
+	const string& hdr = newHD ? new_id_ : id_;
+	const uint64_t total = std::max<uint64_t>(1, totalSum());
+	std::string qual_traf(seqLen, static_cast<char>(fastq_write_offset_));
+	const size_t qlen = std::min(seqLen, quality_sum_per_base_.size());
+	for (size_t i = 0; i < qlen; ++i) {
+		int q = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + fastq_write_offset_;
+		qual_traf[i] = static_cast<char>(q);
+	}
+
+	ret.reserve(ret.size() + hdr.size() + seqLen + qual_traf.size() + 5);
+	ret.push_back('@');
+	ret += hdr;
+	ret.push_back('\n');
+	ret.append(sequence_.data(), seqLen);
+	ret += "\n+\n";
+	ret.append(qual_traf.data(), qual_traf.size());
+	ret.push_back('\n');
 }
 
 
 void DNAunique::writeDerepFastQ(ofstream& wr, bool newHD) {
-	if ((qual_.size() == 0 || sequence_.length() == 0 || length() == 0)) {
+	if ((sequence_.length() == 0 || length() == 0)) {
 		return;
 	}
 	string seqOut = sequence_.substr(0, length());
@@ -1632,6 +1770,16 @@ void DNAunique::writeDerepFastQ(ofstream& wr, bool newHD) {
 			seqOut[i] = 'N';
 		}
 	}
+	if (quality_sum_per_base_.empty()) {
+		prepSumQuals();
+	}
+	const uint64_t total = std::max<uint64_t>(1, totalSum());
+	std::string qualities_avg(length(), static_cast<char>(derep_fastq_offset_));
+	for (unsigned int i = 0; i < length(); i++) {
+		int newbase = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + derep_fastq_offset_;
+		qualities_avg[i] = static_cast<char>(newbase);
+	}
+
 	string xtr = xtraHdStr();
 	if (FtsDetected.forward) { xtr += "F"; }
 	if (FtsDetected.reverse) { xtr += "R"; }
@@ -1643,8 +1791,8 @@ void DNAunique::writeDerepFastQ(ofstream& wr, bool newHD) {
 	}
 	wr << seqOut + "\n";
 	wr << "+\n";//new_id_<<endl;
-	wr << qualities_avg_ + "\n";
-	
+	wr << qualities_avg + "\n";
+
 }
 
 
@@ -1714,13 +1862,19 @@ shared_ptr<DNA> str2DNA(vector<string>&& in, bool keepPairHD, int fastQver, int 
 //*******************************************
 
 
-void DNAuniqSet::addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaM, int MrgPos1, int sample_id) {
+void DNAuniqSet::addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaM, int MrgPos1, int sample_id, bool b_derep_as_fasta_) {
 	dna->setDereplicated();//dna->setYellowQual(false);
 	shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
 	new_dna_unique->saveMem();
 	if (new_dna_unique == nullptr) { return; }
-	if (dna2 != nullptr) { new_dna_unique->attachPair(make_shared<DNAunique>(dna2, sample_id)); }
-	if (dnaM != nullptr) { new_dna_unique->attachMerge(make_shared<DNAunique>(dnaM, sample_id)); }
+	if (dna2 != nullptr) {
+		auto pair_unique = make_shared<DNAunique>(dna2, sample_id);
+		new_dna_unique->attachPair(pair_unique);
+	}
+	if (dnaM != nullptr) {
+		auto merge_unique = make_shared<DNAunique>(dnaM, sample_id);
+		new_dna_unique->attachMerge(merge_unique);
+	}
 	DNUs[MrgPos1] = new_dna_unique;
 }
 
@@ -1743,7 +1897,7 @@ shared_ptr<DNAunique> DNAuniqSet::best(bool addCnts) {
 }
 
 void DNAuniqSet::setBest(bool addCnts) {
-	int bestCnt = 0;
+	uint64_t bestCnt = 0;
 	int bestPos = -1;
 	if (DNUs.size() == 1) {
 		bestSet = true;
