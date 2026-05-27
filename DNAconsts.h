@@ -156,7 +156,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.30: 20.5.26: Derep improvements on sorting logic
 //3.31: 26.5.26: memory usage more than halved (unless dada2 is used)
 //3.32: 27.5.26: mutext lockup in inputstreamer removed, further mem savings, fastq format detection more robust
-static const char* sdm_version = "3.32";
+//3.33: mutex lockups / IO problems resolved
+static const char* sdm_version = "3.33";
 static const char* sdm_status = "beta";
 
 

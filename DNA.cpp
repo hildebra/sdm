@@ -1330,18 +1330,11 @@ void DNAunique::incrementSampleCounterBy(int sample_id, long count) {
 	if (sample_id < 0 || count <= 0) {
 		return;
 	}
-	sample_count_t add_count = count >= static_cast<long>(std::numeric_limits<sample_count_t>::max())
-		? std::numeric_limits<sample_count_t>::max()
-		: static_cast<sample_count_t>(count);
 	auto it = findOccurrenceEntry(sample_id);
 	if (it == occurence.end()) {
-		occurence.emplace_back(sample_id, add_count);
-	}
-	else if (it->second > (std::numeric_limits<sample_count_t>::max() - add_count)) {
-		it->second = std::numeric_limits<sample_count_t>::max();
-	}
-	else {
-		it->second += add_count;
+		occurence.emplace_back(sample_id, count);
+	}	else {
+		it->second += count;
 	}
 	invalidateTotalSumCache();
 }

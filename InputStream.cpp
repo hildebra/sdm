@@ -622,8 +622,8 @@ bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 }
 
 shared_ptr<DNA> InputStreamer::getDNA(int pos){
-    // acquire shared lock so multiple readers can proceed concurrently
-	std::shared_lock<std::shared_mutex> lock(protect);
+	// Stream cursors are mutable shared state; access must be serialized.
+	std::unique_lock<std::shared_mutex> lock(protect);
 	//if (sync) {
 	//	while (desync(pos)) {
 	//		jumpToNextDNA(stillMore, pos);

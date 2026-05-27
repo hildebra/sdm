@@ -117,6 +117,7 @@ public:
     ifbufstream(const string& inF, size_t buf1 = 20000, bool isMC = false, bool test = false)
         : file(inF), modeIO(ios::in), at(0), isGZ(false), atEnd(false), doMC(isMC), bufS(buf1),
           bufSW(0), primary(nullptr), reader_started(false), stop_reader(false), worker_has_data(false), 
+          produced_block_seq(0), consumed_block_seq(0), ready_block_seq(0), block_seq_error_reported(false),
         totalLines(0), total4Lines(0){
         if (bufS < 10) {
             cerr << "Buffer size chosen too small: " << bufS << endl << "class ifbufstream\n";
@@ -235,6 +236,10 @@ public:
             reader_started.store(false);
             stop_reader.store(false);
             worker_has_data.store(false);
+            produced_block_seq.store(0, std::memory_order_relaxed);
+            consumed_block_seq.store(0, std::memory_order_relaxed);
+            ready_block_seq.store(0, std::memory_order_relaxed);
+            block_seq_error_reported.store(false, std::memory_order_relaxed);
             cdbg("Reset: stopped background reader thread\n"); 
             totalLines = 0; total4Lines = 0;
         }
@@ -442,6 +447,8 @@ private:
                     reader_cv.notify_all();
                     break;
                 }
+                const uint64_t seq = produced_block_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+                ready_block_seq.store(seq, std::memory_order_relaxed);
                 worker_has_data.store(true);
                 reader_cv.notify_all();
             }
@@ -459,38 +466,33 @@ private:
                 reader_cv.notify_all();
             }
 
-            // Avoid indefinite waits: if prefetch does not arrive in time, fallback to sync read.
-            bool got_data = reader_cv.wait_for(
-                rlk,
-                std::chrono::milliseconds(50),
-                [this]() { return worker_has_data.load() || stop_reader.load(); }
-            );
-
-            if (!got_data) {
-                bool ok = false;
-                {
-                    std::lock_guard<std::mutex> lg(localMTX);
-                    ok = internalReadChunk();
-                    if (!ok || bufSW == 0) {
-                        return false;
-                    }
-                    keeper.swap(keeperW);
-                    size_t newBufS = bufSW;
-                    at = 0;
-                    bufS = newBufS; // Update bufS after at is reset
-                    worker_has_data.store(false);
-                }
-                reader_cv.notify_all();
-                return true;
+            // Wait for prefetched data. Do not do direct fallback reads here,
+            // because mixing producer and consumer reads can reorder/skip blocks.
+            while (!worker_has_data.load() && !stop_reader.load()) {
+                reader_cv.wait_for(
+                    rlk,
+                    std::chrono::milliseconds(100),
+                    [this]() { return worker_has_data.load() || stop_reader.load(); }
+                );
             }
 
             if (!worker_has_data.load()) return false;
             {
                 std::lock_guard<std::mutex> lg(localMTX);
+                const uint64_t observed = ready_block_seq.load(std::memory_order_relaxed);
+                const uint64_t expected = consumed_block_seq.load(std::memory_order_relaxed) + 1;
+                if (observed != expected && !block_seq_error_reported.exchange(true, std::memory_order_relaxed)) {
+                    cerr << "[ifbufstream:block-seq] Non-monotonic consume in " << file
+                         << " expected=" << expected << " observed=" << observed
+                         << " produced=" << produced_block_seq.load(std::memory_order_relaxed)
+                         << " consumed=" << consumed_block_seq.load(std::memory_order_relaxed)
+                         << "\n";
+                }
                 keeper.swap(keeperW);
                 size_t newBufS = bufSW;
                 at = 0;
                 bufS = newBufS; // Update bufS after at is reset
+                consumed_block_seq.store(observed, std::memory_order_relaxed);
                 worker_has_data.store(false);
             }
             reader_cv.notify_all();
@@ -534,6 +536,10 @@ private:
     std::mutex reader_mutex;
     std::condition_variable reader_cv;
     std::atomic<bool> reader_started;
+    std::atomic<uint64_t> produced_block_seq;
+    std::atomic<uint64_t> consumed_block_seq;
+    std::atomic<uint64_t> ready_block_seq;
+    std::atomic<bool> block_seq_error_reported;
 
     size_t bufS, bufSW;
     mutex localMTX;
