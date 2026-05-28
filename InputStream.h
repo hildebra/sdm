@@ -19,6 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "DNA.h"
 #include "Common.h"
 #include <chrono>
+#include <thread>
 
 #ifdef _isa1gzip
 #include "include/GZipStr.h"
@@ -92,6 +93,7 @@ struct filesStr {//used in separateByFile
 
 
 
+
 struct multi_tmp_lines {
     multi_tmp_lines() :tmp(0) {}
     multi_tmp_lines(int s) :tmp(0)
@@ -116,9 +118,8 @@ class ifbufstream {
 public:
     ifbufstream(const string& inF, size_t buf1 = 20000, bool isMC = false, bool test = false)
         : file(inF), modeIO(ios::in), at(0), isGZ(false), atEnd(false), doMC(isMC), bufS(buf1),
-          bufSW(0), primary(nullptr), reader_started(false), stop_reader(false), worker_has_data(false), 
-          produced_block_seq(0), consumed_block_seq(0), ready_block_seq(0), block_seq_error_reported(false),
-        totalLines(0), total4Lines(0){
+        bufSW(0), primary(nullptr),
+        totalLines(0), total4Lines(0) {
         if (bufS < 10) {
             cerr << "Buffer size chosen too small: " << bufS << endl << "class ifbufstream\n";
             exit(236);
@@ -139,7 +140,8 @@ public:
                 atEnd = true;
                 return;
             }
-        } else {
+        }
+        else {
             if (!primary) {
                 atEnd = true;
                 return;
@@ -164,11 +166,13 @@ public:
             int rd = gzread(primaryG, keeper.data(), bufS);
             if (rd <= 0) {
                 bufS = 0; atEnd = true; keeperW.clear();
-            } else {
+            }
+            else {
                 bufS = (size_t)rd;
                 if (gzeof(primaryG)) atEnd = true;
             }
-        } else {
+        }
+        else {
             primary->read(keeper.data(), bufS);
             size_t read = (size_t)primary->gcount();
             if (read == 0) { bufS = 0; atEnd = true; keeperW.clear(); }
@@ -181,13 +185,6 @@ public:
         else { bufS = read; if (primary->eof() || !primary->good()) atEnd = true; }
 #endif
 
-        // If multithreaded mode requested, start background reader to prefetch next block
-        if (doMC && !atEnd) {
-            start_reader();
-            // notify reader to begin first prefetch
-            reader_cv.notify_all();
-        }
-
 #if __cplusplus >= 201103L
         }
 #else
@@ -197,14 +194,6 @@ public:
 
     ~ifbufstream() {
         cdbg(("destroy ibufstream, total lines: " + to_string(totalLines) + " 4Lines: " + to_string(total4Lines) + "\n"));
-        // stop background reader
-        stop_reader.store(true);
-        reader_cv.notify_all();
-        if (reader_started.load()) {
-            // Wait for the ThreadPool-submitted reader task to finish
-            if (readerTask.valid()) readerTask.wait();
-            reader_started.store(false);
-        }
 #if __cplusplus >= 201103L
         {
             Instr::TimedSharedLockGuard input_lock_del(input_mtx);
@@ -228,21 +217,7 @@ public:
     }
 
     void reset() {
-        // stop reader thread if running
-        if (reader_started.load()) {
-            stop_reader.store(true);
-            reader_cv.notify_all();
-            if (readerTask.valid()) readerTask.wait();
-            reader_started.store(false);
-            stop_reader.store(false);
-            worker_has_data.store(false);
-            produced_block_seq.store(0, std::memory_order_relaxed);
-            consumed_block_seq.store(0, std::memory_order_relaxed);
-            ready_block_seq.store(0, std::memory_order_relaxed);
-            block_seq_error_reported.store(false, std::memory_order_relaxed);
-            cdbg("Reset: stopped background reader thread\n"); 
-            totalLines = 0; total4Lines = 0;
-        }
+        totalLines = 0; total4Lines = 0;
 
 #if __cplusplus >= 201103L
         {
@@ -257,10 +232,6 @@ public:
             if (read == 0) { bufS = 0; atEnd = true; keeperW.clear(); }
             else { bufS = read; if (primary->eof() || !primary->good()) atEnd = true; }
 
-            if (doMC && !atEnd) {
-                start_reader();
-                reader_cv.notify_all();
-            }
         }
 #else
         input_mtx.lock();
@@ -274,11 +245,6 @@ public:
         if (read == 0) { bufS = 0; atEnd = true; keeperW.clear(); }
         else { bufS = read; if (primary->eof() || !primary->good()) atEnd = true; }
 
-        if (doMC && !atEnd) {
-            start_reader();
-            reader_cv.notify_all();
-        }
-
         input_mtx.unlock();
 #endif
     }
@@ -286,10 +252,17 @@ public:
     void setMC(bool b) { doMC = b; }
     bool eof() { return atEnd && at >= bufS; }
     bool operator! (void) { return !atEnd; }
-    void jumpLines(int x = 1) { string mpt; for (int y = 0; y < x; y++) this->getlines(mpt,false); }
+    void jumpLines(int x = 1) { string mpt; for (int y = 0; y < x; y++) this->getlines(mpt, false); }
+    int peekFirstChar() const {
+        if (bufS == 0 || keeper.empty()) {
+            return std::char_traits<char>::eof();
+        }
+        return static_cast<unsigned char>(keeper[0]);
+    }
+    int peerFirstChar() const { return peekFirstChar(); }
 
 
-    bool getlines(string& ret, bool untilNextFasta=false, bool nwlRspace = false) { // int& linesRead,
+    bool getlines(string& ret, bool untilNextFasta = false, bool nwlRspace = false) { // int& linesRead,
         if (atEnd && at >= bufS) return false;
         ret.clear();
         for (;;) {
@@ -313,7 +286,8 @@ public:
                 if (len > 0) {
                     if (keeper[pos - 1] == '\r') ret.append(keeper.data() + at, len - 1);
                     else ret.append(keeper.data() + at, len);
-                } else {
+                }
+                else {
                     // Handle CRLF split across chunks: previous chunk ended with '\r', current starts with '\n'
                     if (!ret.empty() && ret.back() == '\r') ret.pop_back();
                 }
@@ -321,15 +295,16 @@ public:
 #ifdef _DEBUG
                 totalLines++;
 #endif
-				if (!untilNextFasta) return true;
-//                linesRead++;
+                if (!untilNextFasta) return true;
+                //                linesRead++;
                 if (nwlRspace) ret.push_back(' ');
                 currentBufS = bufS; // Re-read before next check
                 if (at >= currentBufS && !readChunk()) return !ret.empty();
                 currentBufS = bufS;
                 if (at < currentBufS && keeper[at] == '>') return true;
                 continue;
-            } else {
+            }
+            else {
                 ret.append(start, rem);
                 at = currentBufS;
                 continue;
@@ -343,7 +318,7 @@ public:
         if (in.size() < 4) in.resize(4);
         in[0].clear(); in[1].clear(); in[2].clear(); in[3].clear();
 
-        const bool l0 = this->getlines(in[0],false);
+        const bool l0 = this->getlines(in[0], false);
         const bool l1 = this->getlines(in[1], false);
         const bool l2 = this->getlines(in[2], false);
         const bool l3 = this->getlines(in[3], false);
@@ -356,14 +331,6 @@ public:
 
 
     string getInFile() { return file; }
-
-    // Get the first character of the buffer without consuming it
-    int peekFirstChar() {
-        if (atEnd || bufS == 0 || at >= bufS) {
-            return EOF;
-        }
-        return (int)((unsigned char)keeper[at]);
-    }
 
 private:
     bool internalReadChunk() {
@@ -378,7 +345,8 @@ private:
 #ifdef _izlib
         if (isGZ) {
             if (!primaryG) { keeperW.clear(); atEnd = true; bufSW = 0; return false; }
-        } else {
+        }
+        else {
             if (!primary || !(*primary)) { keeperW.clear(); atEnd = true; bufSW = 0; return false; }
         }
 #else
@@ -389,7 +357,8 @@ private:
             int rd = gzread(primaryG, keeperW.data(), (int)localBufS);
             if (rd <= 0) { bufSW = 0; keeperW.clear(); }
             else bufSW = (size_t)rd;
-        } else {
+        }
+        else {
             primary->read(keeperW.data(), localBufS);
             size_t read = (size_t)primary->gcount();
             bufSW = read;
@@ -415,100 +384,23 @@ private:
 #else
             cerr << "gzip not supported in your sdm build\n (ifbufstream) " << file; exit(50);
 #endif
-        } else {
+        }
+        else {
             primary = std::make_unique<std::ifstream>(file, modeIO | ios::binary);
         }
     }
 
-    // Start the background reader thread (idempotent)
-    void start_reader() {
-        bool expected = false;
-        if (!reader_started.compare_exchange_strong(expected, true)) return;
-        stop_reader.store(false);
-        worker_has_data.store(false);
-        // submit background reader task to persistent thread-pool
-        readerTask = ThreadPool::instance().submit([this]() -> bool {
-            for (;;) {
-                std::unique_lock<std::mutex> lk(reader_mutex);
-                reader_cv.wait_for(
-                    lk,
-                    std::chrono::milliseconds(100),
-                    [this]() { return stop_reader.load() || !worker_has_data.load(); }
-                );
-                if (stop_reader.load()) break;
-                bool ok = false;
-                {
-                    std::lock_guard<std::mutex> lg(localMTX);
-                    ok = internalReadChunk();
-                }
-                if (!ok || bufSW == 0) {
-                    worker_has_data.store(false);
-                    stop_reader.store(true);
-                    reader_cv.notify_all();
-                    break;
-                }
-                const uint64_t seq = produced_block_seq.fetch_add(1, std::memory_order_relaxed) + 1;
-                ready_block_seq.store(seq, std::memory_order_relaxed);
-                worker_has_data.store(true);
-                reader_cv.notify_all();
-            }
-            reader_started.store(false);
-            return true;
-        });
-    }
-
     bool readChunk() {
-        if (doMC) {
-            std::unique_lock<std::mutex> rlk(reader_mutex);
-            // Lazy-start reader in case MC mode was enabled after construction/reset.
-            if (!reader_started.load() && !stop_reader.load() && !atEnd) {
-                start_reader();
-                reader_cv.notify_all();
-            }
-
-            // Wait for prefetched data. Do not do direct fallback reads here,
-            // because mixing producer and consumer reads can reorder/skip blocks.
-            while (!worker_has_data.load() && !stop_reader.load()) {
-                reader_cv.wait_for(
-                    rlk,
-                    std::chrono::milliseconds(100),
-                    [this]() { return worker_has_data.load() || stop_reader.load(); }
-                );
-            }
-
-            if (!worker_has_data.load()) return false;
-            {
-                std::lock_guard<std::mutex> lg(localMTX);
-                const uint64_t observed = ready_block_seq.load(std::memory_order_relaxed);
-                const uint64_t expected = consumed_block_seq.load(std::memory_order_relaxed) + 1;
-                if (observed != expected && !block_seq_error_reported.exchange(true, std::memory_order_relaxed)) {
-                    cerr << "[ifbufstream:block-seq] Non-monotonic consume in " << file
-                         << " expected=" << expected << " observed=" << observed
-                         << " produced=" << produced_block_seq.load(std::memory_order_relaxed)
-                         << " consumed=" << consumed_block_seq.load(std::memory_order_relaxed)
-                         << "\n";
-                }
-                keeper.swap(keeperW);
-                size_t newBufS = bufSW;
-                at = 0;
-                bufS = newBufS; // Update bufS after at is reset
-                consumed_block_seq.store(observed, std::memory_order_relaxed);
-                worker_has_data.store(false);
-            }
-            reader_cv.notify_all();
-            return true;
-        } else {
-            {
-                std::lock_guard<std::mutex> lg(localMTX);
-                bool ok = internalReadChunk();
-                if (!ok || bufSW == 0) { return false; }
-                keeper.swap(keeperW);
-                size_t newBufS = bufSW;
-                at = 0;
-                bufS = newBufS; // Update bufS after at is reset
-            }
-            return true;
+        {
+            std::lock_guard<std::mutex> lg(localMTX);
+            bool ok = internalReadChunk();
+            if (!ok || bufSW == 0) { return false; }
+            keeper.swap(keeperW);
+            size_t newBufS = bufSW;
+            at = 0;
+            bufS = newBufS; // Update bufS after at is reset
         }
+        return true;
     }
 
     void iniBufStrm() {
@@ -529,28 +421,11 @@ private:
     gzFile primaryG;
 #endif
 
-    // background reader thread control (migrated to thread-pool)
-    std::future<bool> readerTask;
-    std::atomic<bool> stop_reader;
-    std::atomic<bool> worker_has_data;
-    std::mutex reader_mutex;
-    std::condition_variable reader_cv;
-    std::atomic<bool> reader_started;
-    std::atomic<uint64_t> produced_block_seq;
-    std::atomic<uint64_t> consumed_block_seq;
-    std::atomic<uint64_t> ready_block_seq;
-    std::atomic<bool> block_seq_error_reported;
-
     size_t bufS, bufSW;
     mutex localMTX;
     shared_mutex input_mtx;
     long long totalLines, total4Lines;
 };
-
-
-
-
-
 
 
 
