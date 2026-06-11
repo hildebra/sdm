@@ -2,6 +2,11 @@
 #include "InputStream.h" // for helpers and globals (rtrim, parseInt, DNA_amb, NT_POS, DNA_IUPAC, itos, whoIsBetter)
 
 namespace {
+const int MAX_FASTQ_HEADER_WARNINGS = 20;
+int g_fastqHeaderWarnings = 0;
+}
+
+namespace {
 	std::string buildFastqQualityString(const std::vector<qual_score>& quals, size_t len, qual_score fastqOffset) {
 		std::string out(len, static_cast<char>(fastqOffset));
 		const size_t copyLen = std::min(len, quals.size());
@@ -132,7 +137,13 @@ DNA::DNA(const vector<string>& fq, qual_score fastQver) :DNA() {
 DNA::DNA(vector<string>&& fq, qual_score fastQver) :DNA() {
 	if (fq.size() != 4 || fq[0].length() == 0) { delself(); return; }
 	while (fq[0][0] != '@') {
-		cerr << "ERROR on line " + fq[0] + ": Could not find '@' when expected (file likely corrupt, trying to recover):\n";
+		if (g_fastqHeaderWarnings < MAX_FASTQ_HEADER_WARNINGS) {
+			cerr << "ERROR on line " + fq[0] + ": Could not find '@' when expected (file likely corrupt, trying to recover):\n";
+		}
+		else if (g_fastqHeaderWarnings == MAX_FASTQ_HEADER_WARNINGS) {
+			cerr << "Further FASTQ header warnings suppressed after " << MAX_FASTQ_HEADER_WARNINGS << " messages.\n";
+		}
+		g_fastqHeaderWarnings++;
 		delself();
 		return;
 
@@ -1418,35 +1429,44 @@ void DNAunique::transferOccurence(const shared_ptr<DNAunique> dna_unique) {
 }
 
 
-void DNAunique::writeMap(ofstream& os, const string& hd, vector<int>& counts_per_sample, const vector<int>& combiID) {
+void DNAunique::writeMap(ofstream& os, const string& hd, vector<int>& counts_per_sample, const vector<int>& combiID, vector<uint64_t>& combined_counts, vector<int>& touched_groups) {
 	if (occurence.empty()) { return; }
 	uint64_t total_count(0);
-	std::unordered_map<int, uint64_t> sample_counters;
 
-	if (combiID.size() > 0) {//combine all counts on combined categories
-
+	//prints combined sample counts
+	os << hd;
+	if (!combiID.empty()) {
 		for (const auto& entry : occurence) {
 			if (entry.second == 0 || entry.first < 0 || static_cast<size_t>(entry.first) >= combiID.size()) { continue; }
-			sample_counters[combiID[entry.first]] += entry.second;
+			const int combined_id = combiID[entry.first];
+			if (combined_id < 0 || static_cast<size_t>(combined_id) >= combined_counts.size()) { continue; }
+			if (combined_counts[combined_id] == 0) {
+				touched_groups.push_back(combined_id);
+			}
+			combined_counts[combined_id] += entry.second;
 		}
+
+		for (size_t i = 0; i < touched_groups.size(); ++i) {
+			const int combined_id = touched_groups[i];
+			const uint64_t rawCount = combined_counts[combined_id];
+			total_count += rawCount;
+			os << "\t";
+			os << combined_id << ":" << rawCount;
+			combined_counts[combined_id] = 0;
+		}
+		touched_groups.clear();
 	}
 	else {
 		for (const auto& entry : occurence) {
 			if (entry.second == 0) { continue; }
-			sample_counters[entry.first] += entry.second;
+			const uint64_t rawCount = entry.second;
+			int count = rawCount > static_cast<uint64_t>(std::numeric_limits<int>::max())
+				? std::numeric_limits<int>::max()
+				: static_cast<int>(rawCount);
+			total_count += count;
+			os << "\t";
+			os << entry.first << ":" << count;
 		}
-	}
-
-	//prints combined sample counts
-	os << hd;
-	for (auto iter = sample_counters.begin(); iter != sample_counters.end(); ++iter) {
-		const uint64_t rawCount = iter->second;
-		int count = rawCount > static_cast<uint64_t>(std::numeric_limits<int>::max())
-			? std::numeric_limits<int>::max()
-			: static_cast<int>(rawCount);
-		total_count += count;
-		os << "\t";
-		os << iter->first << ":" << count;
 	}
 
 	//counts non-combined sample counts
@@ -1547,14 +1567,19 @@ void DNAunique::prepSumQuals() {
 void DNAunique::sumQualities(const shared_ptr<DNAunique>& dna) {
 	if (dna == nullptr) return;
 	prepSumQuals();
+	if (quality_sum_per_base_.empty()) {
+		return;
+	}
 
 	if (!dna->quality_sum_per_base_.empty()) {
-		for (uint i = 0; i < length(); i++) {
+		const size_t lim = std::min(quality_sum_per_base_.size(), dna->quality_sum_per_base_.size());
+		for (size_t i = 0; i < lim; i++) {
 			addToQualSum(quality_sum_per_base_[i], dna->quality_sum_per_base_[i]);
 		}
 	}
 	else {
-		for (uint i = 0; i < length(); i++) {
+		const size_t lim = std::min(quality_sum_per_base_.size(), dna->qual_.size());
+		for (size_t i = 0; i < lim; i++) {
 			if (dna->qual_[i] > 0) {
 				addToQualSum(quality_sum_per_base_[i], static_cast<qual_accum_t>(dna->qual_[i]));
 			}
@@ -1564,8 +1589,12 @@ void DNAunique::sumQualities(const shared_ptr<DNAunique>& dna) {
 void DNAunique::sumQualities(const shared_ptr<DNA>& dna) {
 	if (dna == nullptr) return;
 	prepSumQuals();
+	if (quality_sum_per_base_.empty()) {
+		return;
+	}
 	const vector<qual_score>& quals = dna->getQual();
-	for (uint i = 0; i < length(); i++) {
+	const size_t lim = std::min(quality_sum_per_base_.size(), quals.size());
+	for (size_t i = 0; i < lim; i++) {
 		if (quals[i] > 0) {
 			addToQualSum(quality_sum_per_base_[i], static_cast<qual_accum_t>(quals[i]));
 		}
@@ -1698,7 +1727,8 @@ void DNAunique::writeFastQ(ostream& wr, bool newHD) {
 	const size_t seqLen = this->length();
 	const string& hdr = newHD ? new_id_ : id_;
 	const uint64_t total = std::max<uint64_t>(1, totalSum());
-	std::string qual_traf(seqLen, static_cast<char>(fastq_write_offset_));
+	thread_local std::string qual_traf;
+	qual_traf.assign(seqLen, static_cast<char>(fastq_write_offset_));
 	const size_t qlen = std::min(seqLen, quality_sum_per_base_.size());
 	for (size_t i = 0; i < qlen; ++i) {
 		int q = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + fastq_write_offset_;
@@ -1735,7 +1765,8 @@ void DNAunique::writeFastQ(string& ret, bool newHD) {
 	const size_t seqLen = this->length();
 	const string& hdr = newHD ? new_id_ : id_;
 	const uint64_t total = std::max<uint64_t>(1, totalSum());
-	std::string qual_traf(seqLen, static_cast<char>(fastq_write_offset_));
+	thread_local std::string qual_traf;
+	qual_traf.assign(seqLen, static_cast<char>(fastq_write_offset_));
 	const size_t qlen = std::min(seqLen, quality_sum_per_base_.size());
 	for (size_t i = 0; i < qlen; ++i) {
 		int q = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + fastq_write_offset_;
@@ -1757,34 +1788,41 @@ void DNAunique::writeDerepFastQ(ofstream& wr, bool newHD) {
 	if ((sequence_.length() == 0 || length() == 0)) {
 		return;
 	}
-	string seqOut = sequence_.substr(0, length());
-	for (size_t i = 0; i < seqOut.size(); ++i) {
-		if (!canonicalDNA(seqOut[i])) {
+	const size_t seqLen = length();
+	thread_local std::string seqOut;
+	seqOut.resize(seqLen);
+	for (size_t i = 0; i < seqLen; ++i) {
+		const char base = sequence_[i];
+		if (!canonicalDNA(base)) {
 			seqOut[i] = 'N';
+		}
+		else {
+			seqOut[i] = base;
 		}
 	}
 	if (quality_sum_per_base_.empty()) {
 		prepSumQuals();
 	}
 	const uint64_t total = std::max<uint64_t>(1, totalSum());
-	std::string qualities_avg(length(), static_cast<char>(derep_fastq_offset_));
-	for (unsigned int i = 0; i < length(); i++) {
+	thread_local std::string qualities_avg;
+	qualities_avg.assign(seqLen, static_cast<char>(derep_fastq_offset_));
+	for (size_t i = 0; i < seqLen; i++) {
 		int newbase = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + derep_fastq_offset_;
 		qualities_avg[i] = static_cast<char>(newbase);
 	}
 
-	string xtr = xtraHdStr();
-	if (FtsDetected.forward) { xtr += "F"; }
-	if (FtsDetected.reverse) { xtr += "R"; }
+	wr.put('@');
 	if (newHD) {
-		wr << "@" + new_id_ + "\n";
+		wr << new_id_;
 	}
 	else {
-		wr << "@" + id_ + "\n";
+		wr << id_;
 	}
-	wr << seqOut + "\n";
-	wr << "+\n";//new_id_<<endl;
-	wr << qualities_avg + "\n";
+	wr.put('\n');
+	wr.write(seqOut.data(), static_cast<std::streamsize>(seqLen));
+	wr << "\n+\n";
+	wr.write(qualities_avg.data(), static_cast<std::streamsize>(seqLen));
+	wr.put('\n');
 
 }
 

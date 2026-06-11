@@ -10,14 +10,15 @@ program_LIBRARY_DIRS := ${CPATH}
 program_LIBRARIES :=
 
 
-isa_FLAGS := 
-isa_FLAGS2 := 
-#isa_FLAGS := -D_isa1gzip
-#isa_FLAGS2 := -lisal 
 
 UNAME := $(shell uname)
-CPPFLAGS += -O3 -std=c++20 -pthread $(isa_FLAGS)
-#-D_isa1gzip
+CPPFLAGS +=  -std=c++20 -pthread $(isa_FLAGS)
+#DEBUG - don't use -static in linker!
+#CPPFLAGS += -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined
+#CPPFLAGS += -O1 -g
+
+CPPFLAGS += -O3
+
 CPPFLAGS += $(foreach includedir,$(program_INCLUDE_DIRS),-I$(includedir))
 CXXFLAGS=-D__STDC_CONSTANT_MACROS
 LDFLAGS += $(foreach librarydir,$(program_LIBRARY_DIRS),-L$(librarydir))
@@ -28,18 +29,7 @@ LDLIBS += -lrt -Wl,--whole-archive -lpthread -Wl,--no-whole-archive
 else
 LDLIBS += -lpthread
 endif
-#-lisal 
 
-
-# Check if ISA-L library exists
-#ISA_L_LIBFILE = $(librarydir)/libisal.so
-#ifeq ($(wildcard $(ISA_L_LIBFILE)),)
-#    $(warning ISA-L library not found. Please install it or specify its location.)
-#else
-#    #CXXFLAGS += -I$(ISA_L_INCLUDE)
-#    LDFLAGS +=  -lisal #
-#	#-L$(ISA_L_LIB)
-#endif
 
 
 .PHONY: all clean distclean

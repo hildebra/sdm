@@ -234,7 +234,6 @@ public:
 
 	// mostly collect statistics of filter (green filtered)
 	vector<shared_ptr<collectstats>> collectStatistics; // top quality statistics
-	mutex csMTX1, csMTX2;
 	// stats for additional reads to be output (yellow)
 	vector<shared_ptr<collectstats>> statAddition; // mid quality statistics
 	shared_ptr<GAstats> GAstatistics;//GoldenAxe statistics

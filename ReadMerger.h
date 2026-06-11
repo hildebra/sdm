@@ -121,8 +121,6 @@ private:
 	qualStats qS;
 	bool b_takeStats;
 
-	mutex merg2MTX;
-
 
 
 public:

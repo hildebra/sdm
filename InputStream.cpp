@@ -22,13 +22,147 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include <mutex>
 #include <thread>
+#include <atomic>
 #include "InputStream.h"
 #include "Common.h"
 #include "FastxReader.h"
 
 // Utilities are implemented in Common.cpp (defined once in Common.cpp)
 
+namespace {
+constexpr int MAX_IO_WARNINGS_TO_PRINT = 20;
+std::atomic<int> g_ioWarningsSeen{ 0 };
+std::atomic<bool> g_useClassicSeedSelection{ false };
+}
 
+void setDNAseedSelectionClassic(bool enabled) {
+	g_useClassicSeedSelection.store(enabled, std::memory_order_relaxed);
+}
+
+bool getDNAseedSelectionClassic() {
+	return g_useClassicSeedSelection.load(std::memory_order_relaxed);
+}
+
+
+bool whoIsBetter_old(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
+	shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM,
+	float& ever_best, bool forSeed) {
+
+	//if (forSeed) {		return false;	}
+	//check if two primers present
+	if (d2 == nullptr) {//hard reason .. only for PacBio etc reads
+		if (d1->has2PrimersDetected() && !r1->has2PrimersDetected()) { return true; }
+		if (!d1->has2PrimersDetected() && r1->has2PrimersDetected()) { return false; }
+	}
+	else {
+		if (d2->getRevPrimDetect() && !r1->getFwdPrimDetect() && !r2->getRevPrimDetect()) { return true; }
+	}
+	//check if at least 1 primers present
+	if (d1->getFwdPrimDetect() && !r1->getFwdPrimDetect()) { return true; }//hard reason
+	if (!d1->getFwdPrimDetect() && r1->getFwdPrimDetect()) { return false; }
+
+	double d1pid(1.), refpid(1.);
+	if (ever_best >= 0) {
+		d1pid = (double)d1->getTempFloat(); refpid = (double)r1->getTempFloat();
+		if (d1pid > ever_best) {
+			ever_best = (float)d1pid;
+		}
+		//everbest is likely 100.f (ref OTUs)
+		if (d1pid < (refpid - 0.3f) || d1pid < (ever_best - 0.4f)) { return false; }
+	}
+
+	bool dMerge(true), rMerg(true);
+	double curL = (double)d1->getMergeLength();
+	if (curL < 0) {
+		curL = (double)d1->length();
+		//if (d2 != NULL) { curL += (double) d2->length(); }
+		dMerge = false;
+	}
+	double refL = (double)r1->getMergeLength();
+	if (refL < 0) {
+		refL = (double)r1->length();
+		//if (r2 != NULL) { refL += (double) r2->length(); }
+		rMerg = false;
+	}
+
+	//first check if d1 has merged, but ref did not.. clearly go for d, hard filter
+	//if (d1->getMergeLength() != -1 && r1->getMergeLength() == -1) { return true; }
+
+	//hard check on length ratios.. too drastically small , don't use d1
+	if ((curL) / (refL) < BestLengthRatio) { return false; }
+	//at least 90% length of "good" hit
+	//if (r1->getMergeErrors() < 0) {//no merge, can look at read1 only
+	//	if (d1->length() / r1->length() < RefLengthRatio) { return false; }
+	//}
+
+
+	float dmergErrSco = 0.f;	float refMergErrSco = 0.f;
+	//only check further if both comparisons did merge
+	if (r1->getMergeLength() >= 0 && d1->getMergeLength() >= 0) {
+		if (d1->getMergeErrors() > 0) {
+			dmergErrSco = (float)d1->getMergeErrors();// *log10((maxQErr - (float)d1->getMergeErrorsQual()));
+			dmergErrSco += d1->getMergeErrorsQual() / 30;
+		}
+		if (r1->getMergeErrors() > 0) {
+			refMergErrSco = (float)r1->getMergeErrors() + r1->getMergeErrorsQual() / 30;// *log10((maxQErr - (float)r1->getMergeErrorsQual()));
+		}
+		//scale to 1
+		float maxMerr = max(refMergErrSco, dmergErrSco);
+		dmergErrSco /= maxMerr;	refMergErrSco /= maxMerr;
+		dmergErrSco = 1.f - dmergErrSco; refMergErrSco = 1.f - refMergErrSco;
+	}
+
+	//choose merged DNA if possible; d2 no longer needed then
+	shared_ptr<DNA> dx, rx;
+	bool allowMergeGuide = false;
+	if (allowMergeGuide && dM != nullptr) { dx = dM;	d2 = nullptr; }
+	else { dx = d1; }
+	if (allowMergeGuide && rM != nullptr) { rx = rM; r2 = nullptr; }
+	else { rx = r1; }
+	float thScore = dx->getAvgQual(); //*(d1pid / 100)* log((float)curL);
+	float rScore = rx->getAvgQual();// *(refpid / 100)* log((float)refL);//r1->length()
+	//if (thScore > rScore) {
+		//also check for stable lowest score
+		// if (d1->minQual() > r1->minQual() - MinQualDiff) { return true; }
+	//}
+	float maxScore = max(thScore, rScore);
+	thScore /= maxScore;	rScore /= maxScore;
+
+
+	//checks if the new DNA has a better overall quality
+	double dAcSc = dx->getAccumError();	double dLen = dx->mem_length();
+	double tAcSc = rx->getAccumError();	double tLen = rx->mem_length();
+	if (d2 != nullptr) { dAcSc += d2->getAccumError(); dLen += d2->mem_length(); }
+	if (r2 != nullptr) { tAcSc += r2->getAccumError(); tLen += r2->mem_length(); }
+	dAcSc /= dLen;	tAcSc /= tLen;
+
+	//calculate ratios to compare more easily among metrics
+	double ratAccErr = log(dAcSc) / log(tAcSc); //smaller better, log changes terms around
+	double ratLength = double(curL) / (double)refL; //higher better
+	double ratId = d1pid / refpid * 10 - 9.; //higher better //10-fold weighting
+	if ((ratAccErr * ratLength * ratId) > 1.) {
+		return true;
+	}
+	//normalize and invert
+	//normalize to gene length, and invert to convert to positive score system
+	/*maxScore = max(dAcSc, tAcSc);
+	dAcSc /= maxScore;	tAcSc /= maxScore;
+	dAcSc = 1.f - dAcSc; tAcSc = 1.f - tAcSc;
+	//norm to 1, to compare to other terms
+	double maxEr = max(dAcSc, tAcSc);
+	dAcSc /= maxEr; tAcSc /= maxEr;
+	//dmergErrSco refMergErrSco dAcSc + tAcSc +   thScore  rScore
+	if (  (dAcSc) *(d1pid / 100) * log((float)curL)
+		> (tAcSc)  *(refpid / 100) * log((float)refL )) {
+
+		if (dx->minQual() > rx->minQual() - MinQualDiff) { return true; }
+//		return true;
+
+	}
+	*/
+
+	return false;
+}
 
 
 //compares two DNA entries, decides which one has overall better stats
@@ -36,6 +170,10 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 			shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM, 
 			float& ever_best, bool forSeed, DNAunique* merge_stats_owner,
 			uint64_t dSiz , uint64_t rSiz) {
+
+	if (forSeed && getDNAseedSelectionClassic()) {
+		return whoIsBetter_old(d1, d2, dM, r1, r2, rM, ever_best, forSeed);
+	}
 	
 	if (d1 == nullptr || r1 == nullptr) {
 		return false;
@@ -166,33 +304,43 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 	double AccErrRatio = pointFiveRatio(dAccuE, rAccuE,0.25);
 
 	double dQ=dx->getAvgQual(); double rQ=rx->getAvgQual();
-	if (d2 != nullptr) { dQ += d2->getAccumError();  }
-	if (r2 != nullptr) { rQ += r2->getAccumError();  }
+	if (d2 != nullptr) { dQ += d2->getAvgQual();  }
+	if (r2 != nullptr) { rQ += r2->getAvgQual();  }
 
-	double qualRatio = dQ / rQ; //higher better
+	double qualRatio = pointFiveRatio(dQ, rQ, 0.5); //higher better
 
 
 	//double ratLength = double(curL) / (double)refL; //higher better
 	double ratLength = pointFiveRatio(double(curL), (double)refL); //higher better, but not too much better, as this can be due to chimeras etc
     double ratId = 1.;
 	if (refpid > 0.) {
-		//ratId = d1pid / refpid * 10. - 9.; //higher better //10-fold weighting
-		ratId=pointFiveRatio(double(d1pid), (double)refpid,2.);
+		if (forSeed) {
+			// Stronger identity discrimination for seed selection (legacy-like behavior).
+			ratId = (double(d1pid) / double(refpid)) * 10.0 - 9.0;
+		}
+		else {
+			ratId = pointFiveRatio(double(d1pid), (double)refpid, 2.0);
+		}
 	}
 
 	//preference based on merge status, but modulated by how often merged DNAs have been better in the past (mergedFraction)
 	double mergePreference = 1.0;
 	if (dMerge != rMerg) {
-		if (dMerge) {
+		if (forSeed) {
+			// In seed mode, disable historical merge-bias but still favor merged reads.
+			mergePreference = dMerge ? 1.35 : 0.75;
+		}
+		else if (dMerge) {
 			mergePreference = 1.0 + mergedFraction;
-		}else {
+		}
+		else {
 			mergePreference = 1.0 - (0.5 * mergedFraction);
 		}
 	}
 
 	//also take into account the merge length and if this is the averaged norm:
 	double mergeLenDevRatio = 1.;
-	if (dMerge && rMerg) {
+	if (!forSeed && dMerge && rMerg) {
 		double dMLDIFF = (double) abs(avgMergeLen - d1->getMergeLength());
 		double rMLDIFF = (double) abs(avgMergeLen - r1->getMergeLength());
 		mergeLenDevRatio = (dMLDIFF+ avgMergeLen) / (rMLDIFF+ avgMergeLen);
@@ -204,8 +352,65 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 
 
 	double thresh(1.01f);
-	//qualRatio 
-	if ( ((CanoScore * AccErrRatio* ratLength * ratId * mergePreference * logsizeRatio * mergeLenDevRatio) ) > thresh) {
+	auto clampScore = [](double v) {
+		if (!std::isfinite(v)) {
+			return 1.0;
+		}
+		if (v < 0.2) {
+			return 0.2;
+		}
+		if (v > 2.5) {
+			return 2.5;
+		}
+		return v;
+	};
+
+	double wCano = 0.10;
+	double wAccErr = 0.20;
+	double wQual = 0.25;
+	double wLen = 0.10;
+	double wId = 0.15;
+	double wMergePref = 0.08;
+	double wSize = 0.06;
+	double wMergeLenDev = 0.06;
+
+	if (forSeed) {
+		// Seed selection: prioritize identity and sequence quality.
+		wCano = 0.08; //some preference for fewer Ns, but not too much, as this can be due to chimeras etc
+		wAccErr = 0.44; //some preference for lower accumulated error, but not too much, as this can be affected by length and other factors
+		wQual = 0.14; //strong preference for higher average quality, as this is a strong indicator of good seeds
+		wLen = 0.08;//some preference for longer length, but not too much, as this can be due to chimeras etc
+		wId = 0.42;//strong preference for higher identity to ref OTU, as this is a strong indicator of good seeds
+		wMergePref = 0.10;//some preference for merged reads, but not too much, as this can be affected by the specific dataset and merge performance
+		wSize = 0.02;//small preference for higher abundance, but not too much, as this can be affected by the specific dataset and amplification biases
+		wMergeLenDev = 0.00;//no preference for merge length deviation in seed selection, as this is more relevant for representative selection where we want to avoid outliers, but for seeds we want to allow some diversity in merge lengths
+	}
+	else {
+		// Derep representative selection: prioritize merged-read behavior first,
+		// then merge-length consistency and sequence quality.
+		wCano = 0.08;
+		wAccErr = 0.32;
+		wQual = 0.16;
+		wLen = 0.08;
+		wId = 0.10;
+		wMergePref = 0.34;
+		wSize = 0.04;
+		wMergeLenDev = 0.38;
+	}
+
+	double cumulativeQualityScore =
+		std::pow(clampScore(CanoScore), wCano) *
+		std::pow(clampScore(AccErrRatio), wAccErr) *
+		std::pow(clampScore(qualRatio), wQual) *
+		std::pow(clampScore(ratLength), wLen) *
+		std::pow(clampScore(ratId), wId) *
+		std::pow(clampScore(mergePreference), wMergePref) *
+		std::pow(clampScore(logsizeRatio), wSize) *
+		std::pow(clampScore(mergeLenDevRatio), wMergeLenDev);
+
+	// Previous formula (kept for reference):
+	// if ((CanoScore * AccErrRatio * qualRatio * ratLength * ratId * mergePreference * logsizeRatio * mergeLenDevRatio) > thresh) {
+	if (cumulativeQualityScore > thresh) {
 		return true;
 	}
 	//normalize and invert
@@ -248,6 +453,7 @@ double pointFiveRatio(double v1, double v2, double scale ) {
 	double ret = 1.0;
 	
 	if (scale <= 0.) { cerr << "pointFiveRatio::scale not ok: "<<scale<<endl; scale = 0.5; }
+	if ((v1 + v2) <= 0.) { return 1.0; }
 	
 	ret = (v1 / (v1 + v2)) + 0.5;
 	if (scale != 0.5) {
@@ -363,9 +569,17 @@ bool InputStreamer::read_fasta_entry(ifbufstream* fasta_is, ifbufstream* quality
 
 void InputStreamer::IO_Error(string x) {
 	fqverMTX.lock();
-	cerr << x << endl;
+	int seen = g_ioWarningsSeen.fetch_add(1, std::memory_order_relaxed);
+	if (seen < MAX_IO_WARNINGS_TO_PRINT) {
+		cerr << x << endl;
+	}
+	else if (seen == MAX_IO_WARNINGS_TO_PRINT) {
+		cerr << "Further I/O parse warnings suppressed after " << MAX_IO_WARNINGS_TO_PRINT << " messages." << endl;
+	}
 	if (DieOnError) exit(632);
-	ErrorLog.push_back(x);
+	if ((int)ErrorLog.size() < MAX_IO_WARNINGS_TO_PRINT) {
+		ErrorLog.push_back(x);
+	}
 	fqverMTX.unlock();
 }
 
@@ -582,7 +796,12 @@ bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 		return false;
 	}
 	bool repairInStream(false);
-    if (ret.size() < 4) { ret.resize(4); }
+	if (isFasta) {
+		if (ret.size() != 3) { ret.resize(3); }
+	}
+	else {
+		if (ret.size() < 4) { ret.resize(4); }
+	}
 	//vector<string>tmpLines(4, "");
 	if (isFasta) {//get DNA from fasta + qual_ files
 		if (fasta_istreams[pos] == nullptr || fasta_istreams[pos]->eof()) {

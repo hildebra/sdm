@@ -219,14 +219,35 @@ public:
 
 
 private:
+	struct PendingDerepEntry {
+		string srchSeq;
+		shared_ptr<DNA> dna;
+		shared_ptr<DNA> dna2;
+		shared_ptr<DNA> dna_merged;
+		int mergePos;
+		int sample_id;
+		bool pass;
+	};
+
+	struct ThreadLocalBatch {
+		ThreadLocalBatch() : owner(nullptr), registered(false) {}
+		std::vector<PendingDerepEntry> pending;
+		Dereplicate* owner;
+		bool registered;
+	};
+
+	bool apply_pending_entry_locked(const PendingDerepEntry& pending);
+	void flush_batch(ThreadLocalBatch& batch);
+	void flush_all_batches();
+	std::shared_ptr<ThreadLocalBatch> get_or_create_thread_batch();
+
 	//is the exact derep string fullfilled?
 	inline bool pass_deprep_conditions(shared_ptr<DNAunique>);
 
 	//vector<shared_ptr<DNAunique>> Dnas;
 	//vector<shared_ptr<DNAunique>> DNApair;
 	vector<string> barcode_number_to_sample_id_;
-	static constexpr size_t kDerepShardCount = 64;
-	std::array<HashDNA, kDerepShardCount> tracker_shards_;
+	HashDNA tracker_;
 	//vector<int> counts;
 	string outfile;
 	bool b_usearch_fmt, b_singleLine;
@@ -245,6 +266,8 @@ private:
 	bool b_merge_pairs_derep_;
 	ReadMerger* merger;
 
+	int searchLength;
+
 
 	//output files, that need appending
 	string mapF;// = baseOF + ".map";
@@ -254,23 +277,19 @@ private:
 
 	Filters* mainFilter;
 
-	mutable std::array<std::shared_mutex, kDerepShardCount> drpMTX_shards_;
+	mutable std::shared_mutex drpMTX_;
+	mutable std::mutex batch_registry_mtx_;
+	std::vector<std::weak_ptr<ThreadLocalBatch>> batch_registry_;
 	std::atomic<uint32_t> active_adddna_{ 0 };
+	std::atomic<uint64_t> srch_seq_total_len_{ 0 };
+	std::atomic<uint64_t> srch_seq_count_{ 0 };
 	std::atomic<bool> lifecycle_pause_{ false };
 	mutable std::mutex lifecycle_wait_mtx_;
 	mutable std::condition_variable lifecycle_wait_cv_;
+	static constexpr size_t kThreadBatchFlushThreshold = 256;
 
-	inline size_t shard_index_for(const string& seq) const {
-		// Use the same hash algorithm as robin_hood::unordered_node_map (HashDNA)
-		// so the sequence is not hashed with two different algorithms per addDNA call.
-		return robin_hood::hash<string>{}(seq) & (kDerepShardCount - 1);
-	}
 	inline size_t tracker_size_total() const {
-		size_t total = 0;
-		for (const auto& shard : tracker_shards_) {
-			total += shard.size();
-		}
-		return total;
+		return tracker_.size();
 	}
 
 	bool searchWithMerg;

@@ -591,7 +591,7 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 			(*cmdArgs)[string(argv[i])] = "T";
 		}
 	}
-
+	
 	
 	if (cmdArgs->find("-illuminaClip") == cmdArgs->end()) {
 		(*cmdArgs)["-illuminaClip"] = "0";
@@ -610,7 +610,13 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 		(*cmdArgs)["-GoldenAxeMaxAmpli"] = "0";
 	}
 
-	
+	if (cmdArgs->find("-derepSrchLen") == cmdArgs->end()) {
+		(*cmdArgs)["-derepSrchLen"] = "150";
+	}
+	if (cmdArgs->find("-DNAseedSelectionClassic") == cmdArgs->end()) {
+		(*cmdArgs)["-DNAseedSelectionClassic"] = "1";
+	}
+
 
 	if (cmdArgs->find("-i_MID_fastq") == cmdArgs->end()) {
 		(*cmdArgs)["-i_MID_fastq"] = "";
@@ -829,6 +835,8 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 
 	//if (cmdArgs->count("-i_fna")==0){}
 
+	setDNAseedSelectionClassic((*cmdArgs)["-DNAseedSelectionClassic"] == "1");
+
 	return true;
 }
 
@@ -868,6 +876,11 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 	int maxReadsWr = mainFilter->getXreadsWr(); // should program stop after having written a certain amount of reads?
 	int maxReadsRd = mainFilter->getXreadsRd();
 	int totalReadsRead(0), totalReadsWrite(0);
+	auto printConvertedSummary = [&]() {
+		if ((*cmdArgs)["-o_fna"] != "") {
+			cerr << "Converted sequences written: " << totalReadsWrite << "\n";
+		}
+	};
 	uint accumBPwrite(0), accumBPwriteMerg(0);
 	vector<string> lastSRblock (1,"");  //set up SequencingRun blocks to track
 
@@ -945,34 +958,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 			IS->atFileYofX(i + 1, (unsigned int)files.uniqueFastxFiles.size(), 1);
 		}
 
-		// check first if derep block will change
-		if (totalReadsRead>0 && mainFilter->doDereplicate() && dereplicator->DerepPerSR() 
-			&& lastSRblock.back() != mainFilter->SequencingRun[tarID]) {
-				//sanity check
-			for (uint ii = 0; ii < (lastSRblock.size()-1); ii++) {
-				if (lastSRblock[ii] == lastSRblock.back()) {
-					cerr << "\n\nWrong block order!!\n" << lastSRblock[ii] << ":" << lastSRblock.back() << endl;
-				}
-			}
-
-
-			string deLogLocal = dereplicator->writeDereplDNA(mainFilter, lastSRblock.back());
-			if (dereplicator->DerepPerSR()) {
-				files.deLog += "Dereplication of SequencingRun " + lastSRblock.back() + ":\n";
-			}
-			files.deLog += deLogLocal;
-			dereplicator->printMergeStats(subfile((*cmdArgs)["-merg_readpos"], lastSRblock.back()), 
-				subfile((*cmdArgs)["-qual_readpos"], lastSRblock.back()));
-
-		//continue?
-
-			dereplicator->reset();//and reset..
-			accumBPwrite = 0; accumBPwriteMerg = 0;
-			//OutStreamer->resetDemultiBPperSR();
-		}
-		if (mainFilter->SequencingRun[tarID] != lastSRblock.back()) {
-			lastSRblock.push_back(mainFilter->SequencingRun[tarID]);
-		}
+		const string currentSRblock = mainFilter->SequencingRun[tarID];
 
 		string mainFileShort;
 		
@@ -982,6 +968,32 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 			cerr << "Warning: input file set is empty or unreadable; skipping " << uFX.first << "\n";
 			delete filter;
 			continue;
+		}
+
+		// check if derep block will change; only after input was confirmed readable
+		if (totalReadsRead>0 && mainFilter->doDereplicate() && dereplicator->DerepPerSR()
+			&& lastSRblock.back() != currentSRblock) {
+			//sanity check
+			for (uint ii = 0; ii < (lastSRblock.size()-1); ii++) {
+				if (lastSRblock[ii] == lastSRblock.back()) {
+					cerr << "\n\nWrong block order!!\n" << lastSRblock[ii] << ":" << lastSRblock.back() << endl;
+				}
+			}
+
+			string deLogLocal = dereplicator->writeDereplDNA(mainFilter, lastSRblock.back());
+			if (dereplicator->DerepPerSR()) {
+				files.deLog += "Dereplication of SequencingRun " + lastSRblock.back() + ":\n";
+			}
+			files.deLog += deLogLocal;
+			dereplicator->printMergeStats(subfile((*cmdArgs)["-merg_readpos"], lastSRblock.back()),
+				subfile((*cmdArgs)["-qual_readpos"], lastSRblock.back()));
+
+			dereplicator->reset();//and reset..
+			accumBPwrite = 0; accumBPwriteMerg = 0;
+			//OutStreamer->resetDemultiBPperSR();
+		}
+		if (currentSRblock != lastSRblock.back()) {
+			lastSRblock.push_back(currentSRblock);
 		}
 		if (!IS->qualityPresent()) {
 			filter->deactivateQualFilter();
@@ -996,6 +1008,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 			delete filter;
 			continue;// after this is only qual_ filter, not required from this point on
 		}
+
 		cdbg("Setting up output\n");
 
 
@@ -1175,6 +1188,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		*/
         delete MDx;
 		//delete DerepM;
+		printConvertedSummary();
         return;
     } else if (mainFilter->doDereplicate()) {
 		//this is either the last time dereplicate is written (SRblocks),
@@ -1217,6 +1231,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 #endif
 
     if ((*cmdArgs)["-log"] == "nolog") {
+		printConvertedSummary();
         return;
     }
     if (shortStats) {
@@ -1308,6 +1323,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 			delete merger[x];
 		}
 	}*/
+	printConvertedSummary();
 
 }
 

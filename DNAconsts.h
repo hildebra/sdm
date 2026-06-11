@@ -157,7 +157,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.31: 26.5.26: memory usage more than halved (unless dada2 is used)
 //3.32: 27.5.26: mutext lockup in inputstreamer removed, further mem savings, fastq format detection more robust
 //3.33: mutex lockups / IO problems resolved
-static const char* sdm_version = "3.33";
+//3.34: 29.5.26: added derepSrchLen parameter
+//3.35: whoIsBetter scoring rework
+//3.36: potential fix for missing writing out a derep file, tuned whoisBetter() weights
+static const char* sdm_version = "3.36";
 static const char* sdm_status = "beta";
 
 

@@ -509,7 +509,7 @@ public:
     bool betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2);
     void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, int, bool);
     void incrementSampleCounter(int sample_id);
-    void writeMap(ofstream& os, const string&, vector<int>&, const vector<int>&);
+    void writeMap(ofstream& os, const string&, vector<int>&, const vector<int>&, vector<uint64_t>&, vector<int>&);
     //inline int getCount() { return count_; }
     uint64_t totalSum();
     //uint getBestSeedLength() { return best_seed_length_; }

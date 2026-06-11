@@ -604,11 +604,21 @@ private:
 
 
 
+
+//outdated, don't use
+bool whoIsBetter_old(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
+    shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM,
+    float& ever_best, bool forSeed);
+
+void setDNAseedSelectionClassic(bool enabled);
+bool getDNAseedSelectionClassic();
+
 //true: d is better, false: ref is better
-bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM, 
+bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 	shared_ptr<DNA> r1, shared_ptr<DNA> r2, shared_ptr<DNA> rM,
     float& ever_best, bool forSeed, DNAunique* merge_stats_owner = nullptr, 
     uint64_t dSiz = 2, uint64_t rSiz=2);
+
 
 bool whoIsBetter(shared_ptr<DNAunique> d1, shared_ptr<DNAunique> r1, float& ever_best, bool forSeed);
 

@@ -171,6 +171,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 
 	//***************************************
 	//read options
+	bool derepSrchLenSet(false);
 	ifstream opt;
 	opt.open(optF.c_str(), ios::in);
 	if (!opt || optF == "") {
@@ -212,11 +213,12 @@ Filters::Filters(OptContainer* cmdArgs1) :
 			else {
 				minL = (float)atof(segs2.c_str());
 			}
-		}
-		else if (strcmp(segs.c_str(), "maxSeqLength") == 0) {
+		} else if (strcmp(segs.c_str(), "maxSeqLength") == 0) {
 			maxL = atoi(segs2.c_str());
-		}
-		else if (strcmp(segs.c_str(), "minAvgQuality") == 0) {
+		} else if (strcmp(segs.c_str(), "derepSrchLen") == 0) {
+			(*cmdArgs)["-derepSrchLen"] = segs2;
+			derepSrchLenSet = true;
+		} else if (strcmp(segs.c_str(), "minAvgQuality") == 0) {
 			if (addMod) {
 				alt_min_q = (float)atof(segs2.c_str());
 				if (alt_min_q != minQual) { addModConf = true; }
@@ -418,6 +420,10 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	}
 	if (b2ndRDBcPrimCk) {
 		cerr << "Checking for switched pairs.\n";
+	}
+	if (!derepSrchLenSet && minL>0) {
+		(*cmdArgs)["-derepSrchLen"] = to_string((int)minL);
+		cout << "Setting dereplication search length to minSeqLength: " << (*cmdArgs)["-derepSrchLen"] << endl; 
 	}
 
 	opt.close();

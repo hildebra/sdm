@@ -362,7 +362,6 @@ private:
     vector<std::shared_ptr<ReadMerger>> mergers;
 	// serialize file increment (rotate) operations
 	mutex fileIncMTX;
-	mutex mergStatMTX;
 
 	Benchmark* _benchmark;
 };

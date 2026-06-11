@@ -16,8 +16,11 @@
 class ThreadPool {
 public:
     static ThreadPool& instance();
+    static ThreadPool& gzip_instance();
     static void configure(size_t threads);
+    static void configure_gzip(size_t threads);
     static size_t configured_thread_count();
+    static size_t configured_gzip_thread_count();
     static void set_gzip_mode(bool enabled);
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
@@ -29,7 +32,7 @@ public:
 
     template<class F, class... Args>
     auto submit_gzip(F&& f, Args&&... args) -> std::future<decltype(f(args...))> {
-        return submit_impl_(true, std::forward<F>(f), std::forward<Args>(args)...);
+        return gzip_instance().submit_impl_(false, std::forward<F>(f), std::forward<Args>(args)...);
     }
 
 private:
@@ -77,7 +80,9 @@ public:
 private:
     ThreadPool(size_t threads = 0);
     static std::atomic<size_t>& configured_threads_();
+    static std::atomic<size_t>& configured_gzip_threads_();
     static std::atomic<bool>& instance_created_();
+    static std::atomic<bool>& gzip_instance_created_();
 
     std::vector<std::thread> workers_;
     std::queue<std::function<void()>> tasks_;
@@ -106,17 +111,13 @@ inline std::atomic<size_t>& ThreadPool::configured_threads_() {
     return configured;
 }
 
+inline std::atomic<size_t>& ThreadPool::configured_gzip_threads_() {
+    static std::atomic<size_t> configured(0);
+    return configured;
+}
+
 inline void ThreadPool::set_gzip_mode(bool enabled) {
-    ThreadPool& pool = instance();
-    std::lock_guard<std::mutex> lock(pool.queue_mutex_);
-    pool.gzip_mode_enabled_ = enabled;
-    if (!enabled) {
-        pool.gzip_reserved_target_ = 0;
-    }
-    else if (pool.worker_count_ > 1 && pool.gzip_reserved_target_ == 0) {
-        pool.gzip_reserved_target_ = 1;
-    }
-    pool.condition_.notify_all();
+    (void)enabled;
 }
 
 inline std::atomic<bool>& ThreadPool::instance_created_() {
@@ -124,9 +125,20 @@ inline std::atomic<bool>& ThreadPool::instance_created_() {
     return created;
 }
 
+inline std::atomic<bool>& ThreadPool::gzip_instance_created_() {
+    static std::atomic<bool> created(false);
+    return created;
+}
+
 inline ThreadPool& ThreadPool::instance() {
     static ThreadPool pool(configured_threads_().load());
     instance_created_().store(true);
+    return pool;
+}
+
+inline ThreadPool& ThreadPool::gzip_instance() {
+    static ThreadPool pool(configured_gzip_thread_count());
+    gzip_instance_created_().store(true);
     return pool;
 }
 
@@ -138,6 +150,23 @@ inline void ThreadPool::configure(size_t threads) {
         return;
     }
     configured_threads_().store(threads);
+    if (!gzip_instance_created_().load() && configured_gzip_threads_().load() == 0) {
+        size_t gzipThreads = threads / 4;
+        if (gzipThreads == 0) {
+            gzipThreads = 1;
+        }
+        configured_gzip_threads_().store(gzipThreads);
+    }
+}
+
+inline void ThreadPool::configure_gzip(size_t threads) {
+    if (threads == 0) {
+        return;
+    }
+    if (gzip_instance_created_().load()) {
+        return;
+    }
+    configured_gzip_threads_().store(threads);
 }
 
 inline size_t ThreadPool::configured_thread_count() {
@@ -147,6 +176,19 @@ inline size_t ThreadPool::configured_thread_count() {
     }
     size_t hw = std::thread::hardware_concurrency();
     return hw > 0 ? hw : 2;
+}
+
+inline size_t ThreadPool::configured_gzip_thread_count() {
+    size_t configured = configured_gzip_threads_().load();
+    if (configured > 0) {
+        return configured;
+    }
+    size_t compute = configured_thread_count();
+    size_t derived = compute / 4;
+    if (derived == 0) {
+        derived = 1;
+    }
+    return derived;
 }
 
 inline ThreadPool::ThreadPool(size_t threads) : stop_(false) {
