@@ -614,7 +614,7 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 		(*cmdArgs)["-derepSrchLen"] = "150";
 	}
 	if (cmdArgs->find("-DNAseedSelectionClassic") == cmdArgs->end()) {
-		(*cmdArgs)["-DNAseedSelectionClassic"] = "1";
+		(*cmdArgs)["-DNAseedSelectionClassic"] = "0";
 	}
 
 
