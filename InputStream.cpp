@@ -199,13 +199,15 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 		}
 		//everbest is likely 100.f (ref OTUs)
 		//weakened a bit from 0.3/0.4 to 0.6/0.8, to allow for more variability in seed selection, which is not as critical as final selection
-		if (d1pid < (refpid - 0.6f) || d1pid < (ever_best - 0.8f ) ) { return false; }
+		//if (d1pid < (refpid - 0.6f) || d1pid < (ever_best - 0.8f)) { return false; }
+		//reversed
+		if (d1pid < (refpid - 0.3f) || d1pid < (ever_best - 0.5f)) { return false; }
 	}
 	double ratId = 1.;
 	if (refpid > 0.) {
 		if (forSeed) {
 			// Stronger identity discrimination for seed selection (legacy-like behavior).
-			ratId = (double(d1pid) / double(refpid)) * 30 - 29.0;
+			ratId = (double(d1pid) / double(refpid)) * 50 - 49.0;
 		}
 		else {
 			ratId = pointFiveRatio(double(d1pid), (double)refpid, 2.0);
@@ -395,7 +397,7 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 		wAccErr = 0.32;
 		wQual = 0.16;
 		wLen = 0.08;
-		wId = 0.10;
+		wId = 0.0;
 		wMergePref = 0.34;
 		wSize = 0.04;
 		wMergeLenDev = 0.38;

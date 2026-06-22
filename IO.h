@@ -29,7 +29,7 @@ typedef std::map<std::string, shared_ptr<DNA>> DNAmap;
 //void openOutFiles(string files, string fmt,string );
 //void prepareOutFiles(OptContainer& cmdArgs);
 //void read_fastq(OptContainer& cmdArgs, OutputStreamer* MD,string fileS);
-bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
+bool read_sequences(OutputStreamer* MD,
 	shared_ptr<InputStreamer>,  int Nthreads);
 //different thread management..
 bool process_DNA(vector< shared_ptr<DNA>>& tdn, bool MIDuse,
@@ -44,19 +44,19 @@ void multi_read_paired_STRget(shared_ptr<InputStreamer> IS, OutputStreamer* MD, 
 
 //bool read_tripple(OptContainer& cmdArgs, OutputStreamer* MD, InputStreamer*);
 
-void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark*);
+void separateByFile(Filters* mainFilter, Benchmark*);
 
 void threadAnalyzeDNA(shared_ptr<DNA> tdn, shared_ptr<OutputStreamer> MD,int thrCnt);
 //void trippleThreadAnalyzeDNA(shared_ptr<OutputStreamer> MD, shared_ptr<DNA> tdn,shared_ptr<DNA>dnaTemp2,shared_ptr<DNA> MIDseq,bool changePHead);//,int thrCnt=0);
 
 void read_single(OptContainer& cmdArgs, shared_ptr<OutputStreamer> MD, shared_ptr<InputStreamer> IS);
 
-bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs);
+bool readCmdArgs(int argc, char* argv[]);
 
 
 
 //specialized functions .. end sdm after execution
-void rewriteNumbers(OptContainer* cmdArgs);
+void rewriteNumbers();
 
 
 void Announce_sdm();

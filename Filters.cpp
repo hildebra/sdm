@@ -2554,6 +2554,15 @@ bool Filters::readMap() {//core routine to read map info
 		pathMode = true;//check later if mapping file contains fasta/fastq
 	}
 
+	auto stripUtf8Bom = [](std::string& s) {
+		if (s.size() >= 3 &&
+			static_cast<unsigned char>(s[0]) == 0xEF &&
+			static_cast<unsigned char>(s[1]) == 0xBB &&
+			static_cast<unsigned char>(s[2]) == 0xBF) {
+			s.erase(0, 3);
+		}
+	};
+
 	minBCLength1_ = 100000; minBCLength2_ = 1000000; maxBCLength1_ = 0; maxBCLength2_ = 0; minPrimerLength_ = 100000;
 	string line;
 	ifstream in(MapF.c_str());
@@ -2565,6 +2574,8 @@ bool Filters::readMap() {//core routine to read map info
 	//check MAP format
 	//while(getline(in,line,'\n')) {
 	while (!safeGetline(in, line).eof()) {
+		stripUtf8Bom(line);
+		trim(line);
 		if (line.substr(0, 1) == "#" || line.length() == 0) { skips++; continue; }
 		string segments;
 		int ColsPerRow = 0; // Initialize counter.
@@ -2633,11 +2644,16 @@ bool Filters::readMap() {//core routine to read map info
 	vector<int> termIdx(terms.size(), -1);
 
 	while (!safeGetline(in, line).eof()) {
+		stripUtf8Bom(line);
+		trim(line);
 		//	while(getline(in,line,'\n')) {
 		if (cnt != 0 && line.substr(0, 1) == "#") { continue; }
 		if (line.length() < 10) { continue; }
 		if (cnt == 0) {
-			line = line.substr(1);
+			if (!line.empty() && line[0] == '#') {
+				line = line.substr(1);
+			}
+			trim(line);
 		}
 
 		string segments;

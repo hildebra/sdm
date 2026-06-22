@@ -103,7 +103,6 @@ private:
 };
 
 typedef ofbufstream ostr;
-typedef std::map<std::string, std::string> OptContainer;
 
 class Filters;
 class Dereplicate;

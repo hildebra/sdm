@@ -1,5 +1,6 @@
 #include "DNA.h"
 #include "InputStream.h" // for helpers and globals (rtrim, parseInt, DNA_amb, NT_POS, DNA_IUPAC, itos, whoIsBetter)
+#include "containers.h"
 
 namespace {
 const int MAX_FASTQ_HEADER_WARNINGS = 20;
@@ -7,13 +8,28 @@ int g_fastqHeaderWarnings = 0;
 }
 
 namespace {
-	std::string buildFastqQualityString(const std::vector<qual_score>& quals, size_t len, qual_score fastqOffset) {
-		std::string out(len, static_cast<char>(fastqOffset));
-		const size_t copyLen = std::min(len, quals.size());
-		for (size_t i = 0; i < copyLen; ++i) {
-			out[i] = static_cast<char>(quals[i] + fastqOffset);
+	size_t getFastqRecordLength(size_t logicalLength, size_t sequenceSize, size_t qualitySize) {
+		return std::min(logicalLength, std::min(sequenceSize, qualitySize));
+	}
+
+	inline char sanitizeFastqQualityChar(int qWithOffset, int offset) {
+		const int minFastqChar = std::max(33, offset);
+		if (qWithOffset < minFastqChar) {
+			qWithOffset = minFastqChar;
 		}
-		return out;
+		if (qWithOffset > 126) {
+			qWithOffset = 126;
+		}
+		return static_cast<char>(qWithOffset);
+	}
+
+	void buildFastqQualityString(std::string& out, const std::vector<qual_score>& quals, size_t len, qual_score fastqOffset) {
+		out.resize(len);
+		const int offset = static_cast<int>(fastqOffset);
+		for (size_t i = 0; i < len; ++i) {
+			const int qWithOffset = static_cast<int>(quals[i]) + offset;
+			out[i] = sanitizeFastqQualityChar(qWithOffset, offset);
+		}
 	}
 }
 
@@ -282,7 +298,7 @@ int DNA::numNonCanonicalDNA(bool all) {
 		DNAl = sequence_.size();
 	}
 	for (size_t i = 0; i < DNAl; i++) {
-		DNAch += DNA_amb[sequence_[i]];
+		DNAch += DNA_amb[static_cast<unsigned char>(sequence_[i])];
 	}
 	return DNAch;
 }
@@ -290,7 +306,7 @@ int DNA::numACGT() {
 	int DNAch = 0;
 	const uint len = length();
 	for (unsigned int i = 0; i < len; i++) {
-		DNAch += DNA_amb[(int)sequence_[i]];
+		DNAch += DNA_amb[static_cast<unsigned char>(sequence_[i])];
 	}
 	return DNAch;
 }
@@ -300,10 +316,10 @@ bool DNA::scanSequenceChecks(int maxHomoNT, int& ambNTs_out) {
 	if (len == 0) { return true; }
 	char lastC = sequence_[0];
 	int rowC = 1;
-	ambNTs_out += DNA_amb[(int)lastC];
+	ambNTs_out += DNA_amb[static_cast<unsigned char>(lastC)];
 	for (unsigned int i = 1; i < len; i++) {
 		const char c = sequence_[i];
-		ambNTs_out += DNA_amb[(int)c];
+		ambNTs_out += DNA_amb[static_cast<unsigned char>(c)];
 		if (c == lastC) {
 			rowC++;
 			if (maxHomoNT != 0 && rowC >= maxHomoNT) {
@@ -319,7 +335,7 @@ bool DNA::scanSequenceChecks(int maxHomoNT, int& ambNTs_out) {
 }
 void DNA::stripLeadEndN() {
 	int i = 0;
-	while (i >= 0 && DNA_amb[(int)sequence_[i]]) {
+	while (i >= 0 && DNA_amb[static_cast<unsigned char>(sequence_[i])]) {
 		i++;
 	}
 	if (i) {
@@ -327,7 +343,7 @@ void DNA::stripLeadEndN() {
 	}
 	//cut at end N's
 	i = (int)sequence_.length();
-	while (i >= 0 && DNA_amb[(int)sequence_[i]]) {
+	while (i >= 0 && DNA_amb[static_cast<unsigned char>(sequence_[i])]) {
 		i--;
 	}
 	if (i != (int)sequence_.length()) {
@@ -976,8 +992,41 @@ string DNA::xtraHdStr() {
 	if (FtsDetected.reverse) { xtr += "R"; }
 	return xtr;
 }
-void DNA::writeSeq(ostream& wr, bool singleLine) {
- if (sequence_.size() == 0) { return; }
+
+void DNA::removeNegativeQuals() {
+	//remove negative qual_ scores from sequence
+	if (qual_.size() == 0) { return; }
+	for (unsigned int i = 0; i < qual_.size(); i++) {
+		if (qual_[i] < 0) {
+			qual_[i] = 0;
+		}
+	}
+}
+
+void DNA::removeNonCanonicalNTs() {
+	//remove non canonical NTs from sequence
+	if (sequence_.size() == 0) { return; }
+	for (unsigned int i = 0; i < sequence_.size(); i++) {
+		if (!canonicalDNA(sequence_[i])) {
+			sequence_[i] = 'A';
+			//qual_[i] = 5;// static_cast<char>(5);
+			qual_[i] =  static_cast<char>(0);
+		}
+	}
+}
+void DNA::writeSeq_derep(ostream& wr, bool singleLine) {
+	//specialized functions called from derep objects to write sequences with dereplication counts in header
+	if ( getGlobalOptContainer()->runtime().onlyCanonicalNTs){
+		this->removeNonCanonicalNTs();
+	}
+	
+	writeSeq(wr, singleLine);
+
+}
+
+
+void DNA::writeSeq(ostream & wr, bool singleLine) {
+		if (sequence_.size() == 0) { return; }
 	wr << ">" << new_id_ << "\n";
 	const size_t seqLen = length();
 	if (singleLine) {
@@ -1075,19 +1124,31 @@ void DNA::writeQual(string& str, bool singleLine) {
 		str += "\n";
 	}
 }
+void DNA::writeFastQ_derep(ostream& wr, bool newHD) {//
+	const OptContainer::RuntimeOptions& rt = globalOptContainer().runtime();
+	if (rt.onlyCanonicalNTs) {
+		this->removeNonCanonicalNTs();
+	}
+	if (rt.strictPositiveQualsOut) {
+		this->removeNegativeQuals();
+	}
 
+	writeFastQ(wr, newHD);
+}
 
-void DNA::writeFastQ(ostream& wr, bool newHD) {//, int fastQver){
+void DNA::writeFastQ(ostream& wr, bool newHD) {//
 	if (qual_.size() == 0 || sequence_.length() == 0 || length() == 0) { return; }
-	const size_t seqLen = this->length();
+	const size_t seqLen = getFastqRecordLength(this->length(), sequence_.size(), qual_.size());
+	if (seqLen == 0) { return; }
 	const string& hdr = newHD ? new_id_ : id_;
-	const std::string qual_traf = buildFastqQualityString(qual_, seqLen, fastq_write_offset_);
+	thread_local std::string qual_traf;
+	buildFastqQualityString(qual_traf, qual_, seqLen, fastq_write_offset_);
 
 	wr.put('@');
 	wr << hdr;
 	wr.put('\n');
 	wr.write(sequence_.data(), seqLen);
-	wr << "\n+\n";
+	wr.write("\n+\n", 3);
 	wr.write(qual_traf.data(), static_cast<std::streamsize>(qual_traf.size()));
 	wr.put('\n');
 }
@@ -1098,9 +1159,11 @@ string DNA::writeFastQ(bool newHD) {
 }
 void DNA::writeFastQ(string& ret, bool newHD) {
 	if (qual_.size() == 0 || sequence_.length() == 0 || length() == 0) { return; }
-	const size_t seqLen = this->length();
+	const size_t seqLen = getFastqRecordLength(this->length(), sequence_.size(), qual_.size());
+	if (seqLen == 0) { return; }
 	const string& hdr = newHD ? new_id_ : id_;
-	const std::string qual_traf = buildFastqQualityString(qual_, seqLen, fastq_write_offset_);
+	thread_local std::string qual_traf;
+	buildFastqQualityString(qual_traf, qual_, seqLen, fastq_write_offset_);
 	ret.reserve(ret.size() + hdr.size() + seqLen + qual_traf.size() + 5);
 
 	ret.push_back('@');
@@ -1546,14 +1609,31 @@ void DNAunique::attachMerge(shared_ptr<DNAunique> dnamerge) {
 }
 
 void DNAunique::promoteQualitiesToSums(bool releaseRawQualities) {
+	const size_t seqLen = static_cast<size_t>(length());
 	if (quality_sum_per_base_.empty()) {
-		quality_sum_per_base_.assign(length(), 0);
-		const size_t copyLen = std::min(static_cast<size_t>(length()), qual_.size());
+		quality_sum_per_base_.assign(seqLen, 0);
+		const size_t copyLen = std::min(seqLen, qual_.size());
 		for (size_t i = 0; i < copyLen; i++) {
 			if (qual_[i] > 0) {
 				quality_sum_per_base_[i] = static_cast<qual_accum_t>(qual_[i]);
 			}
 		}
+	}
+	else if (quality_sum_per_base_.size() != seqLen) {
+		std::vector<qual_accum_t> resized(seqLen, 0);
+		const size_t lim = std::min(seqLen, quality_sum_per_base_.size());
+		if (lim > 0) {
+			std::copy_n(quality_sum_per_base_.begin(), lim, resized.begin());
+		}
+		if (seqLen > lim && !qual_.empty()) {
+			const size_t qlim = std::min(seqLen, qual_.size());
+			for (size_t i = lim; i < qlim; ++i) {
+				if (qual_[i] > 0) {
+					resized[i] = static_cast<qual_accum_t>(qual_[i]);
+				}
+			}
+		}
+		quality_sum_per_base_.swap(resized);
 	}
 	if (releaseRawQualities && !quality_sum_per_base_.empty() && !qual_.empty()) {
 		qual_.clear();
@@ -1682,6 +1762,7 @@ void DNAunique::takeOverDNA(shared_ptr<DNA> const better_dna, shared_ptr<DNA> co
 	quality_sum_ = keepQualities ? better_dna->quality_sum_ : 0;
 	QualCtrl = better_dna->QualCtrl;
 	qual_ = keepQualities ? better_dna->qual_ : vector<qual_score>();
+	quality_sum_per_base_.clear();
 	sequence_ = better_dna->sequence_;
 	sequence_length_ = better_dna->sequence_length_;
 	sample_id_ = better_dna->sample_id_;
@@ -1729,17 +1810,18 @@ void DNAunique::writeFastQ(ostream& wr, bool newHD) {
 	const uint64_t total = std::max<uint64_t>(1, totalSum());
 	thread_local std::string qual_traf;
 	qual_traf.assign(seqLen, static_cast<char>(fastq_write_offset_));
+	const int fqOffset = static_cast<int>(fastq_write_offset_);
 	const size_t qlen = std::min(seqLen, quality_sum_per_base_.size());
 	for (size_t i = 0; i < qlen; ++i) {
-		int q = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + fastq_write_offset_;
-		qual_traf[i] = static_cast<char>(q);
+		int q = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + fqOffset;
+		qual_traf[i] = sanitizeFastqQualityChar(q, fqOffset);
 	}
 
 	wr.put('@');
 	wr << hdr;
 	wr.put('\n');
 	wr.write(sequence_.data(), seqLen);
-	wr << "\n+\n";
+	wr.write("\n+\n", 3);
 	wr.write(qual_traf.data(), static_cast<std::streamsize>(qual_traf.size()));
 	wr.put('\n');
 }
@@ -1767,10 +1849,11 @@ void DNAunique::writeFastQ(string& ret, bool newHD) {
 	const uint64_t total = std::max<uint64_t>(1, totalSum());
 	thread_local std::string qual_traf;
 	qual_traf.assign(seqLen, static_cast<char>(fastq_write_offset_));
+	const int fqOffset = static_cast<int>(fastq_write_offset_);
 	const size_t qlen = std::min(seqLen, quality_sum_per_base_.size());
 	for (size_t i = 0; i < qlen; ++i) {
-		int q = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + fastq_write_offset_;
-		qual_traf[i] = static_cast<char>(q);
+		int q = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + fqOffset;
+		qual_traf[i] = sanitizeFastqQualityChar(q, fqOffset);
 	}
 
 	ret.reserve(ret.size() + hdr.size() + seqLen + qual_traf.size() + 5);
@@ -1788,27 +1871,42 @@ void DNAunique::writeDerepFastQ(ofstream& wr, bool newHD) {
 	if ((sequence_.length() == 0 || length() == 0)) {
 		return;
 	}
-	const size_t seqLen = length();
-	thread_local std::string seqOut;
-	seqOut.resize(seqLen);
-	for (size_t i = 0; i < seqLen; ++i) {
-		const char base = sequence_[i];
-		if (!canonicalDNA(base)) {
-			seqOut[i] = 'N';
-		}
-		else {
-			seqOut[i] = base;
-		}
+	bool superStrictCanonical = false;
+	if (getGlobalOptContainer()->runtime().onlyCanonicalNTs) {
+		superStrictCanonical = true;
 	}
+
+	const size_t seqLen = length();
+
 	if (quality_sum_per_base_.empty()) {
 		prepSumQuals();
 	}
 	const uint64_t total = std::max<uint64_t>(1, totalSum());
 	thread_local std::string qualities_avg;
 	qualities_avg.assign(seqLen, static_cast<char>(derep_fastq_offset_));
-	for (size_t i = 0; i < seqLen; i++) {
-		int newbase = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + derep_fastq_offset_;
-		qualities_avg[i] = static_cast<char>(newbase);
+	const int derepOffset = static_cast<int>(derep_fastq_offset_);
+	const size_t qlen = std::min(seqLen, quality_sum_per_base_.size());
+	for (size_t i = 0; i < qlen; i++) {
+		int newbase = static_cast<int>(std::round(static_cast<double>(quality_sum_per_base_[i]) / static_cast<double>(total))) + derepOffset;
+		qualities_avg[i] = sanitizeFastqQualityChar(newbase, derepOffset);
+	}
+	thread_local std::string seqOut;
+	seqOut.resize(seqLen);
+	for (size_t i = 0; i < seqLen; ++i) {
+		const char base = sequence_[i];
+		if (!canonicalDNA(base)) {
+			if (superStrictCanonical) {
+				seqOut[i] = 'A';//default to A and set minimum legal quality
+				qualities_avg[i] = sanitizeFastqQualityChar(derepOffset, derepOffset);
+			}
+			else {
+				seqOut[i] = 'N';
+			}
+
+		}
+		else {
+			seqOut[i] = base;
+		}
 	}
 
 	wr.put('@');
@@ -1820,7 +1918,7 @@ void DNAunique::writeDerepFastQ(ofstream& wr, bool newHD) {
 	}
 	wr.put('\n');
 	wr.write(seqOut.data(), static_cast<std::streamsize>(seqLen));
-	wr << "\n+\n";
+	wr.write("\n+\n", 3);
 	wr.write(qualities_avg.data(), static_cast<std::streamsize>(seqLen));
 	wr.put('\n');
 

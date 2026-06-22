@@ -85,11 +85,12 @@ int main(int argc, char* argv[])
 	Announce_sdm();
 
 	OptContainer* cmdArgs = new OptContainer;
-	readCmdArgs(argc, argv, cmdArgs);
+	setGlobalOptContainer(cmdArgs);
+	readCmdArgs(argc, argv);
 	cdbg("CmdArgs read\n");
 
 	//rewrites header names
-	rewriteNumbers(cmdArgs);
+	rewriteNumbers();
 	cdbg("CmdArgs modified\n");
 
 	//reads the sdm_options file
@@ -111,7 +112,7 @@ int main(int argc, char* argv[])
 	//clock_t tStart = clock();
 	
 	//main function
-	separateByFile(fil, cmdArgs, sdm_benchmark);
+	separateByFile(fil, sdm_benchmark);
 	//end main function	
  
 	delete fil;
@@ -131,6 +132,7 @@ int main(int argc, char* argv[])
 	//clean up
 	delete sdm_benchmark;
 	delete cmdArgs;
+	setGlobalOptContainer(nullptr);
 
 	//report mem leaks
 #if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)

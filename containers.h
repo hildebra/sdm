@@ -30,6 +30,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#include <map>
 
 #include <shared_mutex>
 
@@ -74,7 +75,211 @@ vector<pair<K, V>> mapToVector(const unordered_map<K, V>& map) {
 //output stream for main DNA object
 typedef ofbufstream ostr;
 
-typedef std::map<std::string, std::string> OptContainer;
+class OptContainer {
+public:
+	using container_type = std::map<std::string, std::string>;
+	using iterator = container_type::iterator;
+	using const_iterator = container_type::const_iterator;
+
+	struct RuntimeOptions {
+		int iniBlockSize = 120;
+		int threads = 1;
+		bool threadIO = true;
+		std::string ignoreIOErrors = "0";
+		std::string pairedRDHDOut = "1";
+		std::string onlyPair;
+		bool onlyCanonicalNTs = false;
+		bool strictPositiveQualsOut = false;
+
+		bool noSearchWithMerge = false;
+		size_t derepReserve = 1024 * 512;
+		bool disableUsearchSizeFmt = false;
+		bool derepPerSR = false;
+		std::string minDerepCopies;
+		std::string derepFormat;
+		bool mergePairsDerep = false;
+		int derepSrchLen = 150;
+
+		bool hasDerepReserve = false;
+		bool hasDereSizeFmt = false;
+		bool hasMinDerepCopies = false;
+		bool hasDerepFormat = false;
+		bool hasMergePairsDerep = false;
+		bool hasDerepSrchLen = false;
+	};
+
+	std::string& operator[](const std::string& key) {
+		runtimeDirty_ = true;
+		return options_[key];
+	}
+	std::string& operator[](std::string&& key) {
+		runtimeDirty_ = true;
+		return options_[std::move(key)];
+	}
+
+	iterator find(const std::string& key) { return options_.find(key); }
+	const_iterator find(const std::string& key) const { return options_.find(key); }
+
+	iterator begin() { return options_.begin(); }
+	const_iterator begin() const { return options_.begin(); }
+	iterator end() { return options_.end(); }
+	const_iterator end() const { return options_.end(); }
+
+	bool contains(const std::string& key) const { return options_.find(key) != options_.end(); }
+
+	void set(const std::string& key, const std::string& value) {
+		runtimeDirty_ = true;
+		options_[key] = value;
+	}
+
+	void setDefault(const std::string& key, const std::string& defaultValue) {
+		if (!contains(key)) {
+			runtimeDirty_ = true;
+			options_[key] = defaultValue;
+		}
+	}
+
+	std::string get(const std::string& key, const std::string& fallback = "") const {
+		const_iterator it = options_.find(key);
+		if (it != options_.end()) {
+			return it->second;
+		}
+		return fallback;
+	}
+
+	container_type& data() {
+		runtimeDirty_ = true;
+		return options_;
+	}
+	const container_type& data() const { return options_; }
+
+	const RuntimeOptions& runtime() const {
+		refreshRuntimeOptions();
+		return runtime_;
+	}
+
+	void invalidateRuntime() { runtimeDirty_ = true; }
+
+private:
+	void refreshRuntimeOptions() const {
+		if (!runtimeDirty_) {
+			return;
+		}
+
+		RuntimeOptions opts;
+		auto getValue = [&](const std::string& key) -> const std::string* {
+			const_iterator it = options_.find(key);
+			if (it == options_.end()) {
+				return nullptr;
+			}
+			return &it->second;
+		};
+		auto parseInt = [](const std::string& value, int fallback) {
+			size_t parsedChars = 0;
+			try {
+				int parsed = std::stoi(value, &parsedChars);
+				if (parsedChars == value.size()) {
+					return parsed;
+				}
+			}
+			catch (...) {}
+			return fallback;
+		};
+		auto parseSizeT = [](const std::string& value, size_t fallback) {
+			size_t parsedChars = 0;
+			try {
+				size_t parsed = std::stoull(value, &parsedChars);
+				if (parsedChars == value.size()) {
+					return parsed;
+				}
+			}
+			catch (...) {}
+			return fallback;
+		};
+
+		if (const std::string* value = getValue("-iniBlockSize")) {
+			opts.iniBlockSize = parseInt(*value, opts.iniBlockSize);
+		}
+		if (opts.iniBlockSize < 1) {
+			opts.iniBlockSize = 1;
+		}
+
+		if (const std::string* value = getValue("-threads")) {
+			opts.threads = parseInt(*value, opts.threads);
+		}
+		if (opts.threads < 1) {
+			opts.threads = 1;
+		}
+
+		if (const std::string* value = getValue("-threadIO")) {
+			opts.threadIO = (*value != "0");
+		}
+
+		if (const std::string* value = getValue("-ignore_IO_errors")) {
+			opts.ignoreIOErrors = *value;
+		}
+		if (const std::string* value = getValue("-pairedRD_HD_out")) {
+			opts.pairedRDHDOut = *value;
+		}
+		if (const std::string* value = getValue("-onlyPair")) {
+			opts.onlyPair = *value;
+		}
+		if (const std::string* value = getValue("-onlyCanonicalNTs")) {
+			opts.onlyCanonicalNTs = (*value == "1");
+		}
+		if (const std::string* value = getValue("-strictPositiveQualsOut")) {
+			opts.strictPositiveQualsOut = (*value == "1");
+		}
+
+		opts.noSearchWithMerge = getValue("-noSearchWithMerge") != nullptr;
+
+		if (const std::string* value = getValue("-derep_reserve")) {
+			opts.hasDerepReserve = true;
+			opts.derepReserve = parseSizeT(*value, opts.derepReserve);
+		}
+
+		if (const std::string* value = getValue("-dere_size_fmt")) {
+			opts.hasDereSizeFmt = true;
+			opts.disableUsearchSizeFmt = (*value == "1");
+		}
+
+		if (const std::string* value = getValue("-derepPerSR")) {
+			opts.derepPerSR = (*value == "1");
+		}
+
+		if (const std::string* value = getValue("-min_derep_copies")) {
+			opts.hasMinDerepCopies = true;
+			opts.minDerepCopies = *value;
+		}
+
+		if (const std::string* value = getValue("-derep_format")) {
+			opts.hasDerepFormat = true;
+			opts.derepFormat = *value;
+		}
+
+		if (const std::string* value = getValue("-merge_pairs_derep")) {
+			opts.hasMergePairsDerep = true;
+			opts.mergePairsDerep = (*value == "1");
+		}
+
+		if (const std::string* value = getValue("-derepSrchLen")) {
+			opts.hasDerepSrchLen = true;
+			opts.derepSrchLen = parseInt(*value, opts.derepSrchLen);
+		}
+
+		runtime_ = opts;
+		runtimeDirty_ = false;
+	}
+
+	container_type options_;
+	mutable RuntimeOptions runtime_;
+	mutable bool runtimeDirty_ = true;
+};
+
+void setGlobalOptContainer(OptContainer* options);
+OptContainer* getGlobalOptContainer();
+OptContainer& globalOptContainer();
+
 typedef std::unordered_map<std::string, int> ClusterIdx;
 typedef robin_hood::unordered_map<std::string, int> BarcodeMap;//links directly to entry number in Barcode vector
 //typedef std::base_map<std::string, int, ltstr> ClusterIdx;

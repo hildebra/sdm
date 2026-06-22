@@ -24,7 +24,8 @@ short DNA_IUPAC[256 * 256];
 short NT_POS[256];
 
 bool canonicalDNA(char x) {
-	return (DNA_amb[(int)x]==0);
+    const unsigned char ux = static_cast<unsigned char>(x);
+    return (DNA_amb[ux] == 0);
 	
 	//no longer needed
 	if (x == 'A' || x == 'G' || x == 'C' || x == 'T') {

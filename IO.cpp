@@ -368,8 +368,13 @@ struct job2 {
 	//thread job;
 };
 
-bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD, 
+bool read_sequences(OutputStreamer* MD, 
 	shared_ptr<InputStreamer> IS, int Nthreads) {
+	OptContainer* cmdArgs = getGlobalOptContainer();
+	if (cmdArgs == nullptr) {
+		throw std::runtime_error("Global option container is not initialized.");
+	}
+	const OptContainer::RuntimeOptions& runtimeOpts = cmdArgs->runtime();
 	if (Nthreads < 1) {
 		Nthreads = 1;
 	}
@@ -407,10 +412,7 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 
 
  //ini blocks of empty strings for later reuse..
-	int tmpBlockSize = atoi((*cmdArgs)["-iniBlockSize"].c_str());
-	if (tmpBlockSize < 1) {
-		tmpBlockSize = 1;
-	}
+	int tmpBlockSize = runtimeOpts.iniBlockSize;
 
    qual_score fastqVer = 33;
 
@@ -578,108 +580,64 @@ bool read_sequences(OptContainer* cmdArgs, OutputStreamer* MD,
 }
 
 
-bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
+bool readCmdArgs(int argc, char* argv[]){
+	OptContainer* cmdArgs = getGlobalOptContainer();
+	if (cmdArgs == nullptr) {
+		throw std::runtime_error("Global option container is not initialized.");
+	}
 	if (argc%2!=1){
 //		cerr<<"It seems command line arguments were not passed in pairs. Aborting.\n";exit(666);
 		throw std::runtime_error("It seems command line arguments were not passed in pairs. Aborting.");
 	}
+	auto setDefault = [&](const string& key, const string& value) {
+		cmdArgs->setDefault(key, value);
+	};
 	for (int i=1; i<argc; i+=2){ //parsing of cmdline args
 		string theNxtSt = string(argv[i+1]);
-		if (theNxtSt[0] != '-'){
-			(*cmdArgs)[string(argv[i])] = theNxtSt;
+		if (theNxtSt.empty() || theNxtSt[0] != '-'){
+			cmdArgs->set(string(argv[i]), theNxtSt);
 		} else {
-			(*cmdArgs)[string(argv[i])] = "T";
+			cmdArgs->set(string(argv[i]), "T");
 		}
 	}
 	
 	
-	if (cmdArgs->find("-illuminaClip") == cmdArgs->end()) {
-		(*cmdArgs)["-illuminaClip"] = "0";
-	}
-	if (cmdArgs->find("-logLvsQ") == cmdArgs->end()) {
-		(*cmdArgs)["-logLvsQ"] = "";
-	}
-
-	if (cmdArgs->find("-GoldenAxe") == cmdArgs->end()) {
-		(*cmdArgs)["-GoldenAxe"] = "0";
-	}
-	if (cmdArgs->find("-GoldenAxeMinAmpli") == cmdArgs->end()) {
-		(*cmdArgs)["-GoldenAxeMinAmpli"] = "0";
-	}
-	if (cmdArgs->find("-GoldenAxeMaxAmpli") == cmdArgs->end()) {
-		(*cmdArgs)["-GoldenAxeMaxAmpli"] = "0";
-	}
-
-	if (cmdArgs->find("-derepSrchLen") == cmdArgs->end()) {
-		(*cmdArgs)["-derepSrchLen"] = "150";
-	}
-	if (cmdArgs->find("-DNAseedSelectionClassic") == cmdArgs->end()) {
-		(*cmdArgs)["-DNAseedSelectionClassic"] = "0";
-	}
-
-
-	if (cmdArgs->find("-i_MID_fastq") == cmdArgs->end()) {
-		(*cmdArgs)["-i_MID_fastq"] = "";
-	}
+	setDefault("-illuminaClip", "0");
+	setDefault("-logLvsQ", "");
+	setDefault("-GoldenAxe", "0");
+	setDefault("-GoldenAxeMinAmpli", "0");
+	setDefault("-GoldenAxeMaxAmpli", "0");
+	setDefault("-derepSrchLen", "150");
+	setDefault("-DNAseedSelectionClassic", "0");
+	setDefault("-i_MID_fastq", "");
 	//set to default (empty)
-	if (cmdArgs->find("-OTU_fallback") == cmdArgs->end()){
-		(*cmdArgs)["-OTU_fallback"] = "";
-	}
-	if (cmdArgs->find("-otu_matrix") == cmdArgs->end()) {
-		(*cmdArgs)["-otu_matrix"] = "";
-	}
-	if (cmdArgs->find("-derepPerSR") == cmdArgs->end()) {
-		(*cmdArgs)["-derepPerSR"] = "0";
-	}
-	if (cmdArgs->find("-ucAdditionalCounts") == cmdArgs->end()) {//.ADD
-		(*cmdArgs)["-ucAdditionalCounts"] = "";
-	}
-	if (cmdArgs->find("-ucAdditionalCounts1") == cmdArgs->end()) {//.REST
-		(*cmdArgs)["-ucAdditionalCounts1"] = "";
-	}
-	if (cmdArgs->find("-ucAdditionalCounts_refclust") == cmdArgs->end()) {//.ADDREF
-		(*cmdArgs)["-ucAdditionalCounts_refclust"] = "";
-	}
-	if (cmdArgs->find("-optimalRead2Cluster_ref") == cmdArgs->end()) {//.ADDREF
-		(*cmdArgs)["-optimalRead2Cluster_ref"] = "";
-	}
+	setDefault("-OTU_fallback", "");
+	setDefault("-otu_matrix", "");
+	setDefault("-derepPerSR", "0");
+	setDefault("-ucAdditionalCounts", "");
+	setDefault("-ucAdditionalCounts1", "");
+	setDefault("-ucAdditionalCounts_refclust", "");
+	setDefault("-optimalRead2Cluster_ref", "");
 	//just for debuggin purposes: write out all seqs, where no BC can be detected..
-	if (cmdArgs->find("-o_fastq_noBC") == cmdArgs->end()) {
-		(*cmdArgs)["-o_fastq_noBC"] = "";
-	}
-	if (cmdArgs->find("-ucAdditionalCounts_refclust1") == cmdArgs->end()) {//.RESTREF
-		(*cmdArgs)["-ucAdditionalCounts_refclust1"] = "";
-	}
-	if (cmdArgs->find("-ucAdditionalCounts_refclust1") == cmdArgs->end()) {//.RESTREF
-		(*cmdArgs)["-ucAdditionalCounts_refclust1"] = "";
-	}
+	setDefault("-o_fastq_noBC", "");
+	setDefault("-ucAdditionalCounts_refclust1", "");
 	
-	if (cmdArgs->find("-XfirstReadsWritten") == cmdArgs->end()) {
-		(*cmdArgs)["-XfirstReadsWritten"] = "";
-	}
-	if (cmdArgs->find("-XfirstReadsRead") == cmdArgs->end()) {
-		(*cmdArgs)["-XfirstReadsRead"] = "";
-	}
-	if (cmdArgs->find("-iniBlockSize") == cmdArgs->end()) {
-		(*cmdArgs)["-iniBlockSize"] = "120";
-	}
+	setDefault("-XfirstReadsWritten", "");
+	setDefault("-XfirstReadsRead", "");
+	setDefault("-iniBlockSize", "120");
 	//filter sequence file for a specific subset of sequences
 	//these arguments can only occur together
 	if (cmdArgs->find("-specificReads") == cmdArgs->end()) {
-		(*cmdArgs)["-specificReads"] = "";
+		cmdArgs->set("-specificReads", "");
 	} else if (cmdArgs->find("-excludeFile") == cmdArgs->end()) {
-		(*cmdArgs)["-excludeFile"] = "";
+		cmdArgs->set("-excludeFile", "");
 	}
-	if (cmdArgs->find("-onlyPair") == cmdArgs->end()) {
-		(*cmdArgs)["-onlyPair"] = "";
-	}
-	if (cmdArgs->find("-pairedDemulti") == cmdArgs->end()) {
-		(*cmdArgs)["-pairedDemulti"] = "0"; // by default: do not only report proper pairs
-	}
+	setDefault("-onlyPair", "");
+	setDefault("-onlyCanonicalNTs", "0");
+	setDefault("-strictPositiveQualsOut", "0");
+	setDefault("-pairedDemulti", "0"); // by default: do not only report proper pairs
 	
-	if (cmdArgs->find("-uparseVer") == cmdArgs->end()) {
-		(*cmdArgs)["-uparseVer"] = "";
-	}
+	setDefault("-uparseVer", "");
 
 
 	if (cmdArgs->find("-i_path")  == cmdArgs->end()){ //ok files are not given in mapping file
@@ -743,22 +701,16 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 	exit(2);
 	}  */
 	if (cmdArgs->find("-o_qual")  == cmdArgs->end()){
-		(*cmdArgs)["-o_qual"] = "";
+		cmdArgs->set("-o_qual", "");
 	} else {
 		if (cmdArgs->find("-o_fastq")  != cmdArgs->end()){
 			cerr<<"\"-o_qual\" was over-writen by \"-o_fastq\"\n";
 			(*cmdArgs)["-o_qual"] = "";
 		}
 	}
-	if (cmdArgs->find("-options")  == cmdArgs->end()){
-		(*cmdArgs)["-options"] = string("sdm_options.txt");
-	}
-	if (cmdArgs->find("-threads") == cmdArgs->end()) {
-		(*cmdArgs)["-threads"] = "1";
-	}
-	if (cmdArgs->find("-threadIO") == cmdArgs->end()) {
-		(*cmdArgs)["-threadIO"] = "1";
-	}
+	setDefault("-options", string("sdm_options.txt"));
+	setDefault("-threads", "1");
+	setDefault("-threadIO", "1");
 	if (cmdArgs->find("-log")  == cmdArgs->end()){
 		string ofile1 = (*cmdArgs)["-o_fna"];
 		if (ofile1==""){ofile1 = (*cmdArgs)["-o_fastq"];}
@@ -781,16 +733,16 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 		ofile1 = ofile1.substr(0,logPos);
 	}
 	if (cmdArgs->find("-length_hist")  == cmdArgs->end()){
-		(*cmdArgs)["-length_hist"]  = ofile1 + string("_lenHist.txt");
+		cmdArgs->set("-length_hist", ofile1 + string("_lenHist.txt"));
 	}
 	if (cmdArgs->find("-qual_hist") == cmdArgs->end()) {
-		(*cmdArgs)["-qual_hist"] = ofile1 + string("_qualHist.txt");
+		cmdArgs->set("-qual_hist", ofile1 + string("_qualHist.txt"));
 	}
 	if (cmdArgs->find("-merg_readpos") == cmdArgs->end()) {
-		(*cmdArgs)["-merg_readpos"] = ofile1 + string("_mergRpos.txt");
+		cmdArgs->set("-merg_readpos", ofile1 + string("_mergRpos.txt"));
 	}
 	if (cmdArgs->find("-	qual_readpos") == cmdArgs->end()) {
-		(*cmdArgs)["-qual_readpos"] = ofile1 + string("_qualRpos.txt");
+		cmdArgs->set("-qual_readpos", ofile1 + string("_qualRpos.txt"));
 	}
 
 		//-length_hist   -qual_hist
@@ -803,33 +755,21 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 	}
 
 
-	if (cmdArgs->find("-o_qual_offset") == cmdArgs->end()) {
-		(*cmdArgs)["-o_qual_offset"] = DEFAULT_output_qual_offset;
-	}
-	if (cmdArgs->find("-pairedRD_HD_out") == cmdArgs->end()) {
-		(*cmdArgs)["-pairedRD_HD_out"] = DEFAULT_pairedRD_HD_out;
-	}
-	if (cmdArgs->find("-5PR1cut") == cmdArgs->end()) {
-		(*cmdArgs)["-5PR1cut"] = DEFAULT_5PR1cut;
-	}
-	if (cmdArgs->find("-5PR2cut") == cmdArgs->end()) {
-		(*cmdArgs)["-5PR2cut"] = DEFAULT_5PR2cut;
-	}
+	setDefault("-o_qual_offset", DEFAULT_output_qual_offset);
+	setDefault("-pairedRD_HD_out", DEFAULT_pairedRD_HD_out);
+	setDefault("-5PR1cut", DEFAULT_5PR1cut);
+	setDefault("-5PR2cut", DEFAULT_5PR2cut);
 
 	
 
 	if (cmdArgs->find("-ignore_IO_errors") == cmdArgs->end()) {
-		(*cmdArgs)["-ignore_IO_errors"] = DEFAULT_ignore_IO_errors;
+		cmdArgs->set("-ignore_IO_errors", DEFAULT_ignore_IO_errors);
 	} else if ((*cmdArgs)["-ignore_IO_errors"] != "0" && (*cmdArgs)["-ignore_IO_errors"] != "1") {
 		//cerr << "Argument \"ignore_IO_errors\" can only be \"1\" or \"0\". Instead it has value: " << (*cmdArgs)["-ignore_IO_errors"] << endl;exit(323);
 		throw std::runtime_error("Argument \"ignore_IO_errors\" can only be \"1\" or \"0\". Instead it has value: " + (*cmdArgs)["-ignore_IO_errors"]);
 	}
-	if (cmdArgs->find("-o_dereplicate") == cmdArgs->end()) {
-		(*cmdArgs)["-o_dereplicate"] = "";
-	}
-	if (cmdArgs->find("-derep_map") == cmdArgs->end()) {
-		(*cmdArgs)["-derep_map"] = "";
-	}
+	setDefault("-o_dereplicate", "");
+	setDefault("-derep_map", "");
 
 	
 
@@ -844,7 +784,11 @@ bool readCmdArgs(int argc, char* argv[],OptContainer* cmdArgs){
 
 
 //manages read in of several input files and associated primers / tags to each file
-void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_benchmark){
+void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
+	OptContainer* cmdArgs = getGlobalOptContainer();
+	if (cmdArgs == nullptr) {
+		throw std::runtime_error("Global option container is not initialized.");
+	}
 #ifdef DEBUG
 	cerr << "separateByFile"<<endl;
 #endif
@@ -883,6 +827,9 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 	};
 	uint accumBPwrite(0), accumBPwriteMerg(0);
 	vector<string> lastSRblock (1,"");  //set up SequencingRun blocks to track
+	string lastProcessedSRblock = "";
+
+	const OptContainer::RuntimeOptions& runtimeOpts = cmdArgs->runtime();
 
     //---------------------------------
     // Multithreading setup
@@ -891,9 +838,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
     //ThreadPool *pool = nullptr;
     int threads = 1;
     if (multithreading) {
-        if (cmdArgs->find("-threads") != cmdArgs->end()) {
-            threads = stoi((*cmdArgs)["-threads"]);
-        }
+		threads = runtimeOpts.threads;
 		if (threads < 1) {
 			threads = 1;
 		}
@@ -946,10 +891,9 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		//main input of fastx, handles input IO
 		cdbg("Ini InputStream");
 		shared_ptr<InputStreamer> IS = make_shared<InputStreamer>(
-			!files.isFastq, mainFilter->getuserReqFastqVer(),(*cmdArgs)["-ignore_IO_errors"],
-			(*cmdArgs)["-pairedRD_HD_out"], threads);
-		if ((*cmdArgs)["-threadIO"] == "1") { IS->setTIO(true); }
-		if ((*cmdArgs)["-threadIO"] == "0") { IS->setTIO(false); }
+			!files.isFastq, mainFilter->getuserReqFastqVer(), runtimeOpts.ignoreIOErrors,
+			runtimeOpts.pairedRDHDOut, threads);
+		IS->setTIO(runtimeOpts.threadIO);
 		IS->setGlobalRdsRead(totalReadsRead); IS->setMaxRdsRead(maxReadsRd);
 
 
@@ -963,7 +907,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		string mainFileShort;
 		
 		mainFile = IS->setupInput(files.path, tarID, uFX.first, files, filter->setPaired(),
-			(*cmdArgs)["-onlyPair"], mainFileShort, false);
+			runtimeOpts.onlyPair, mainFileShort, false);
 		if (mainFile.empty() || !IS->checkInFileStatus()) {
 			cerr << "Warning: input file set is empty or unreadable; skipping " << uFX.first << "\n";
 			delete filter;
@@ -995,6 +939,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		if (currentSRblock != lastSRblock.back()) {
 			lastSRblock.push_back(currentSRblock);
 		}
+		lastProcessedSRblock = currentSRblock;
 		if (!IS->qualityPresent()) {
 			filter->deactivateQualFilter();
 			cerr << "\n*********\nWarning:: Quality file is not present.\nRecommended to abort demultiplexing.\n*********\n\n";
@@ -1062,7 +1007,7 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 		//**********************
 		//heavy reading, demultiplexing, dereplicating routine
 		//**********************
-		read_sequences(cmdArgs, OutStreamer, IS, threads);
+		read_sequences(OutStreamer, IS, threads);
 
 
 
@@ -1197,9 +1142,10 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
         cerr << "write Dereplicated DNA" << endl;
 #endif
 		
-        string deLogLocal = dereplicator->writeDereplDNA(mainFilter,lastSRblock.back());
+		const string finalSRblock = (dereplicator->DerepPerSR() && !lastProcessedSRblock.empty()) ? lastProcessedSRblock : lastSRblock.back();
+		string deLogLocal = dereplicator->writeDereplDNA(mainFilter, finalSRblock);
 		if (dereplicator->DerepPerSR()) {
-			files.deLog += "Dereplication of SamplingRun " + lastSRblock.back() + ":\n";
+			files.deLog += "Dereplication of SamplingRun " + finalSRblock + ":\n";
 		}
 		files.deLog += deLogLocal;
 		if ((*cmdArgs)["-log"] != "nolog") {
@@ -1209,8 +1155,8 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 
 		//last time merger stats to write
 
-		dereplicator->printMergeStats(subfile((*cmdArgs)["-merg_readpos"], lastSRblock.back()),
-			subfile((*cmdArgs)["-qual_readpos"], lastSRblock.back()));
+		dereplicator->printMergeStats(subfile((*cmdArgs)["-merg_readpos"], finalSRblock),
+			subfile((*cmdArgs)["-qual_readpos"], finalSRblock));
 		/*if (merger[0] != nullptr) {
 			ReadMerger* cMerg = DBG_NEW ReadMerger();
 			for (size_t x = 0; x < merger.size(); x++) {
@@ -1327,14 +1273,15 @@ void separateByFile(Filters* mainFilter, OptContainer* cmdArgs, Benchmark* sdm_b
 
 }
 
-void rewriteNumbers(OptContainer* cmdArgs){
+void rewriteNumbers(){
+	OptContainer& cmdArgs = globalOptContainer();
     //no renumbering asked for
-    if (!(cmdArgs->find("-number")  != cmdArgs->end() && (*cmdArgs)["-number"]=="T")){
+	if (!(cmdArgs.find("-number")  != cmdArgs.end() && cmdArgs["-number"]=="T")){
         return;
     }
     string prefix="";
-    if (cmdArgs->find("-prefix")  != cmdArgs->end()){
-        prefix = (*cmdArgs)["-prefix"];
+	if (cmdArgs.find("-prefix")  != cmdArgs.end()){
+		prefix = cmdArgs["-prefix"];
     }
     //read fasta & write with new headers
     int cnt=0;
@@ -1346,8 +1293,8 @@ void rewriteNumbers(OptContainer* cmdArgs){
 
     //        rerwite input fasta file
     string tname="",tseq="";
-    fna.open((*cmdArgs)["-i_fna"].c_str(),ios::in);
-    ofna.open((*cmdArgs)["-o_fna"].c_str(),ios::out);
+	fna.open(cmdArgs["-i_fna"].c_str(),ios::in);
+	ofna.open(cmdArgs["-o_fna"].c_str(),ios::out);
     while (getline(fna,line,'\n')){
 
         if (line.empty() || line[0]=='$'){ //$ marks comment

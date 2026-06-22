@@ -28,6 +28,25 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using namespace std;
 
+namespace {
+	OptContainer* g_opt_container = nullptr;
+}
+
+void setGlobalOptContainer(OptContainer* options) {
+	g_opt_container = options;
+}
+
+OptContainer* getGlobalOptContainer() {
+	return g_opt_container;
+}
+
+OptContainer& globalOptContainer() {
+	if (g_opt_container == nullptr) {
+		throw std::runtime_error("Global option container is not initialized.");
+	}
+	return *g_opt_container;
+}
+
 
 
 
@@ -324,8 +343,9 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 		mapF(""), outHQf(""), outHQf_p2(""), outRest(""),
 		mainFilter(mf), searchWithMerg(true)
 {
+	const OptContainer::RuntimeOptions& runtimeOpts = cmdArgs->runtime();
 	outfile = (*cmdArgs)["-o_dereplicate"];
-	if ((*cmdArgs).find("-noSearchWithMerge") != (*cmdArgs).end()) {
+	if (runtimeOpts.noSearchWithMerge) {
 		searchWithMerg = false;
 	}
 
@@ -340,24 +360,21 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 
 	// Reserve hash map capacity to avoid costly rehashing during heavy dereplication.
 	// Allow user to override via -derep_reserve; default to 500k slots.
-	size_t reserveSize = 1024 * 512; // 500k
-	if (cmdArgs->find("-derep_reserve") != cmdArgs->end()) {
-		reserveSize = std::stoull((*cmdArgs)["-derep_reserve"]);
-	}
+	size_t reserveSize = runtimeOpts.derepReserve;
 	tracker_.reserve(reserveSize);
 
 
-	if (cmdArgs->find("-dere_size_fmt") != cmdArgs->end() && (*cmdArgs)["-dere_size_fmt"] == "1") {
+	if (runtimeOpts.hasDereSizeFmt && runtimeOpts.disableUsearchSizeFmt) {
 		b_usearch_fmt = false;
 	}
-	if ((*cmdArgs)["-derepPerSR"] == "1") {
+	if (runtimeOpts.derepPerSR) {
 		b_derepPerSR = true;
 	}
 
-	if (cmdArgs->find("-min_derep_copies") != cmdArgs->end()) {
+	if (runtimeOpts.hasMinDerepCopies) {
 		minCopies[0] = -1;//in this case reset to -1 the first entry..
-		minCopiesStr = (*cmdArgs)["-min_derep_copies"];
-		string x = (*cmdArgs)["-min_derep_copies"];
+		minCopiesStr = runtimeOpts.minDerepCopies;
+		string x = runtimeOpts.minDerepCopies;
 
 		vector<string> xs = splitByCommas(x, ',');
 		for (size_t i = 0; i < xs.size(); i++) {
@@ -397,8 +414,8 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 		}
 	}
 	// set up output format of dereplication:
-	if (cmdArgs->find("-derep_format") != cmdArgs->end()) {
-		auto res = (*cmdArgs)["-derep_format"];
+	if (runtimeOpts.hasDerepFormat) {
+		auto res = runtimeOpts.derepFormat;
 		if (strcmp(res.c_str(), "fa") == 0) {
 			b_derep_as_fasta_ = true;
 		}
@@ -412,12 +429,11 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 	}
 
 	// Flag for merging paired end fsatq reads
-	if (cmdArgs->find("-merge_pairs_derep") != cmdArgs->end() && 
-		(*cmdArgs)["-merge_pairs_derep"] == "1") {
+	if (runtimeOpts.hasMergePairsDerep && runtimeOpts.mergePairsDerep) {
 		b_merge_pairs_derep_ = true;
 	}
 
-	if (cmdArgs->find("-derepSrchLen") != cmdArgs->end()) {
+	if (runtimeOpts.hasDerepSrchLen) {
 		const string& searchLenArg = (*cmdArgs)["-derepSrchLen"];
 		size_t parsedChars = 0;
 		long long parsedLen = 0;
@@ -673,6 +689,10 @@ void Dereplicate::finishMap() {
 	return;
 }
 string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
+	if (outfile.empty() || mapF.empty()) {
+		throw std::runtime_error("Dereplicate output paths are not initialized before writeDereplDNA().");
+	}
+
 	struct PauseForSnapshot {
 		Dereplicate* owner;
 		explicit PauseForSnapshot(Dereplicate* d) : owner(d) {
@@ -692,34 +712,65 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	ofstream of, omaps, of2, ofRest, of2p2, of_merged;
 	cerr << "\nEvaluating and writing dereplicated reads..\n";
 	int fastqVer = mf->getuserReqFastqOutVer();
+	string srBlockSafe = SRblock;
+	trim(srBlockSafe);
+	if (srBlockSafe.size() >= 3 &&
+		static_cast<unsigned char>(srBlockSafe[0]) == 0xEF &&
+		static_cast<unsigned char>(srBlockSafe[1]) == 0xBB &&
+		static_cast<unsigned char>(srBlockSafe[2]) == 0xBF) {
+		srBlockSafe.erase(0, 3);
+	}
+	srBlockSafe.erase(std::remove_if(srBlockSafe.begin(), srBlockSafe.end(), [](char c) {
+		unsigned char uc = static_cast<unsigned char>(c);
+		if (std::isspace(uc)) {
+			return true;
+		}
+		switch (c) {
+		case '/': case '\\': case ':': case '*': case '?': case '"': case '<': case '>': case '|':
+			return true;
+		default:
+			return false;
+		}
+	}), srBlockSafe.end());
 	
 	//set the correct file names for dereplication output files
 	string baseOF = outfile.substr(0, outfile.find_last_of('.'));
 	string baseOF2 = baseOF;	
-	if (b_derepPerSR && SRblock != "") {//if writing out per SRblock, needs different filename for map and 
-		baseOF2 += "." + SRblock;
+	if (b_derepPerSR && srBlockSafe != "") {//if writing out per SRblock, needs different filename for map and 
+		baseOF2 += "." + srBlockSafe;
 	}	
 	string fileSuff = outfile.substr(outfile.find_last_of('.'));
 	string outfile2 = baseOF2 + fileSuff;
     string outfile_merged = baseOF2 + ".merg" + fileSuff;
+	auto ensureOpen = [](const std::ofstream& stream, const std::string& path, const char* label) {
+		if (!stream.is_open() || stream.fail()) {
+			throw std::runtime_error(std::string("Failed to open ") + label + " file: " + path);
+		}
+	};
 
 	// OPEN OUTPUT FILE STREAMS
 	omaps.open(mapF.c_str(), ios::app);//| ios::binary
+	ensureOpen(omaps, mapF, "derep map");
 	//actual dereplicated reads as required by clustering algo (uparse, cdhit, dada2,...)
 	of.open(outfile2.c_str(), ios::out);
+	ensureOpen(of, outfile2, "dereplicated output");
 	//reads that did not pass dereplication min number
 	ofRest.open(outRest.c_str(), ios::app);
+	ensureOpen(ofRest, outRest, "dereplicated rest");
 	//copy of high quality read pairs -> needed for Seed extension step
 	of2.open(outHQf.c_str(), ios::app);
+	ensureOpen(of2, outHQf, "high-quality output");
 	const bool can_merge_derep = b_merge_pairs_derep_ && (merger != nullptr);
 	if (b_merge_pairs_derep_ && merger == nullptr) {
 		cerr << "Warning: -merge_pairs_derep enabled but merger not initialized; continuing without merge for derep output.\n";
 	}
 	if (can_merge_derep) {
         of_merged.open(outfile_merged.c_str(), ios::out);
+		ensureOpen(of_merged, outfile_merged, "merged dereplicated output");
     }
 	if (b_pairedInput) {
 		of2p2.open(outHQf_p2, ios::app);
+		ensureOpen(of2p2, outHQf_p2, "high-quality output read2");
 	}
 
 
@@ -829,14 +880,14 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 
 		if (b_derep_as_fasta_)
 			if (dna_merged) {//either or mechanic
-				dna_merged->writeSeq(of_merged, b_singleLine);
+				dna_merged->writeSeq_derep(of_merged, b_singleLine);
 			} else {
-				dna->writeSeq((*derepNowOut), b_singleLine);
+				dna->writeSeq_derep((*derepNowOut), b_singleLine);
 			}
 		else {
 			if (dna_merged) {
 				dna_merged->prepareWrite(fastqVer);
-				dna_merged->writeFastQ(of_merged);
+				dna_merged->writeFastQ_derep(of_merged);
 			} else {
 				dna->prepareDerepQualities(fastqVer);
 				dna->writeDerepFastQ((*derepNowOut));
@@ -868,6 +919,9 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 			}
 		}
 		
+	}
+	if (of.fail() || omaps.fail() || ofRest.fail() || of2.fail() || (b_pairedInput && of2p2.fail()) || (can_merge_derep && of_merged.fail())) {
+		throw std::runtime_error("I/O failure while writing dereplicated outputs.");
 	}
 //	if (tmpCnt != passedSize) {
 //		cerr << "Counting failed\n" << tmpCnt << " " << passedSize<<endl;

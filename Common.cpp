@@ -19,19 +19,26 @@ void rtrim(std::string& s) {
 
 // trim leading and trailing whitespace
 void trim(std::string& str){
-    // trim trailing spaces
-    size_t endpos = str.find_last_not_of(" \t");
-    if( string::npos != endpos )
-    {
-        str = str.substr( 0, endpos+1 );
+    auto is_ws = [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    };
+
+    size_t startpos = 0;
+    while (startpos < str.size() && is_ws(static_cast<unsigned char>(str[startpos]))) {
+        ++startpos;
     }
 
-    // trim leading spaces
-    size_t startpos = str.find_first_not_of(" \t");
-    if( string::npos != startpos )
-    {
-        str = str.substr( startpos );
+    if (startpos == str.size()) {
+        str.clear();
+        return;
     }
+
+    size_t endpos = str.size();
+    while (endpos > startpos && is_ws(static_cast<unsigned char>(str[endpos - 1]))) {
+        --endpos;
+    }
+
+    str = str.substr(startpos, endpos - startpos);
 }
 
 //from http://stackoverflow.com/questions/8888748/how-to-check-if-given-c-string-or-char-contains-only-digits

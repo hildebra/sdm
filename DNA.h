@@ -213,12 +213,14 @@ public:
     int matchSeqRev(const string&, int Err, int searchSpace, int start = 0, bool = false);
     int matchSeq_tot(const string&, int, int, int&);
     void writeSeq(ostream&, bool singleLine = false);
+    void writeSeq_derep(ostream&, bool singleLine = false);
     string writeSeq(bool singleLine = false);
     void writeSeq(string& seq, bool singleLine = false);
     void writeQual(ostream&, bool singleLine = false);
     string writeQual(bool singleLine = false);
     void writeQual(string&, bool singleLine = false);
     void writeFastQ(ostream&, bool = true);
+    void writeFastQ_derep(ostream&, bool = true);
     string writeFastQ(bool = true);
     void writeFastQ(string&, bool = true);
     //void writeFastQ(ofbufstream&, bool = true);
@@ -359,6 +361,8 @@ protected:
     size_t getShorterHeadPos(const string& x, int fastQheadVer = -1);
     //mainly used to mark if rev/Fwd primer was detected
     string xtraHdStr();
+    void removeNonCanonicalNTs();
+    void removeNegativeQuals();
     size_t getSpaceHeadPos(const string& x);
     //binomial accumulated error calc
     inline float interpolate(int errors1, float prob1, int errors2, float prob2, float alpha);

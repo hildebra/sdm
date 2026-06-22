@@ -160,7 +160,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.34: 29.5.26: added derepSrchLen parameter
 //3.35: whoIsBetter scoring rework
 //3.36: potential fix for missing writing out a derep file, tuned whoisBetter() weights
-static const char* sdm_version = "3.36";
+//3.37: 13.6.26: new optContainer class, which allows for more flexible command line argument parsing and option file handling. Also added support for additional output formats and improved error handling.
+static const char* sdm_version = "3.37";
 static const char* sdm_status = "beta";
 
 
