@@ -1,5 +1,9 @@
 # sdm — simple demultiplexer
 
+[![Anaconda-Server Badge](https://anaconda.org/bioconda/sdm/badges/downloads.svg)](https://anaconda.org/bioconda/sdm)
+[![Anaconda-Server Badge](https://anaconda.org/bioconda/sdm/badges/latest_release_relative_date.svg)](https://anaconda.org/bioconda/sdm)
+
+
 **sdm** is a fast, memory-efficient command-line program for demultiplexing and quality-filtering DNA sequencing reads. It supports FASTA, FASTQ, and FASTA-plus-quality input; single-end and paired-end runs; barcode/MID-aware workflows; read merging; and dereplication.
 
 It is intended for reproducible sequencing-data preprocessing pipelines where a compact command-line interface and detailed output control are needed.
