@@ -696,8 +696,8 @@ bool readCmdArgs(int argc, char* argv[]){
 		}
 	}
 
-	/*	if (cmdArgs->find("-base_map")  == cmdArgs->end()){
-	cerr<<"You did not supply a mapping file. \nPlease give the path to your mapping file as command line argument:\n  -base_map <PathToMappingFile>\n";
+	/*	if (cmdArgs->find("-map")  == cmdArgs->end()){
+	cerr<<"You did not supply a mapping file. \nPlease give the path to your mapping file as command line argument:\n  -map <PathToMappingFile>\n";
 	exit(2);
 	}  */
 	if (cmdArgs->find("-o_qual")  == cmdArgs->end()){
@@ -1355,70 +1355,193 @@ void general_help(){
 void printCmdsHelp(){//actually these are flags
     help_head();
     string def_sep = DEFAULT_BarcodeNameSep;
-    cout << "Usage:\n./sdm\n  -i_path <path to several fastq / fasta files>\n------OR------\n -i <input sequence file, will autodetect fna/fastq>\n------OR------\n -i_fastq <fastQ file>\n------OR------\n -i_fna <your fasta input file> (required)\n -i_qual <corresponding quality file> (required, unless quality file is \"xx1.qual_\" and fasta is \"xx1.yy\")\n\n -base_map <mapping file in Qiime format> (optional)\n -o_fna <file to write output fasta> (optional)\n -o_qual <file to write corresponding quality values> (optional)\n -o_fastq <fastQ output file (overrides -o_qual & -o_fna)\n";
-    cout << " -options <sdm option file>(optional)\n -log <file to save demultiplex log in>(optional). Set to \"nolog\" to deactivate alltogether.\n \n-sample_sep \"X\" string X is used to delimit samples and id_ (optional, default:\"" << def_sep << "\")\n -paired 1/2/3 (input is paired end sequenced(2), assumes two input files delimited by \',\'. 1=singleton (default); 3=paired end (R1,R3) + one file with MID (R2))\n";
-    cout << " -o_demultiplex [path] write input into single, demultiplexed files\n";
-    cout << " -onlyPair [1/2] consider only read pair_ 1 or 2. Useful when streamlining inputs (LotuS) or considering double barcoding.\n -i_MID_fastq fastq file with only MID sequences; if paired reads are supplied with -i_fna/-i_fastq and the MID identifier via -i_MID_fastq, paired has to be set to 2. If e.g. merged reads are supplied + mids, paired has to be set to 1.\n";
-    cout << " -pairedDemulti [0/1] Only write complete pairs in demultiplexing paired input.\n";
-    cout << " -oneLineFastaFormat [0/1] write Fasta and Quality file sequence string in one line, opposed to default 80 characters per line.\n -o_dereplicate <output fasta file> of dereplicated DNA reads (with size in header)\n -dere_size_fmt [0/1] either (0) usearch format \"size=X;\" or (1) \"_X\"\n -min_derep_copies only print seq if at least X copies present. Can be complex terms like \"10:1,3:3\" -> meaning at least 10x in 1 sample or 3x in 3 different samples.\n";
-    cout << " -SyncReadPairs [T/F] sdm can check, if read pairs occur in the same (correct) order in the input files, and correct this in case not (T).\n";
-    cout << " -maxReadsPerOutput number of filtered reads in output files. If more reads, a new file is created. Only works with -o_fna\n -mergedPairs <1/0> 1: paired sequences were merged externally, important for assumption that read quality is detoriating.\n -OTU_fallback <file>: Fallback fasta sequences for OTU's, only used in SEED extension mode\n";
-    cout << " -i_qual_offset [0-64] fastq offset for quality values. Set this to \'0\' or \'auto\' if you are unsure which fastq version is being used (default: read from sdm option file)\n -o_qual_offset [0-64] set quality offset for fastq outfile. Default: 33\n";
-    cout << " -ignore_IO_errors [0/1]: 1=Errors in fastq reads are ignored, with sdm trying to sync reads pairs after corrupted single reads (default: 0)\n";
-	cout << " -5PR1cut [I]: remove I first nts from read 1\n"; cout << " -5PR2cut [I]: remove I first nts from read 2\n";
-	cout << " -GoldenAxe [0/1]: use GoldenAxe mode for PacBio concatenated reads (needs special sequencing library prep).\n";
-	cout << " -GoldenAxeMinAmpli [-1]: minNumAmplicons on GoldenAxe reads to accept at all (Default: -1).\n";
-	cout << " -XfirstReadsWritten [#]: only print the X first reads across all input file(s), useful for downsampling. Read pairs count as two reads.\n";
-	cout << " -XfirstReadsRead [#]: only reads the X first reads across all input file(s), useful for downsampling. Read pairs count as two reads.\n";
-	
-	//-binomialFilterBothPairs [1/0]
-    //-count_chimeras [T/F]
-    // ucAdditionalCounts_refclust -OTU_fallback_refclust -optimalRead2Cluster_ref
-    cout<<"\nMinimal Example:\n./sdm -i test.fna -base_map mapping.txt (assuming quality file is \"test.qual_\")\n";
-    // further options (undocumented) :
-    //-length_hist   -qual_hist
-    //-suppressOutput[0/1]
-    //
+	cout << "Usage: ./sdm <option> <value> ...\n\n";
+	cout << "Input (choose -i_path, -i, -i_fastq, or -i_fna):\n"
+		 << " -i_path <path>                 Directory or path containing input files\n"
+		 << " -i <file>                      Input sequence file; format is autodetected\n"
+		 << " -i_fastq <file>                FASTQ input\n"
+		 << " -i_fna <file>                  FASTA input\n"
+		 << " -i_qual <file>                 Quality input for FASTA; defaults to <fasta>.qual_\n"
+		 << " -i_MID_fastq <file>            FASTQ file containing MID sequences\n"
+		 << " -i_qual_offset <0|auto|n>      Input FASTQ quality offset\n"
+		 << " -paired <1|2|3>                1: singleton; 2: paired; 3: R1/R3 plus MID R2\n"
+		 << " -onlyPair <1|2>                Process only the selected read of a pair\n"
+		 << " -mergedPairs <0|1>             Input pairs were merged externally\n"
+		 << " -SyncReadPairs <T|F>           Synchronize paired input reads\n"
+		 << " -ignore_IO_errors <0|1>        Continue after corrupt FASTQ reads (default: 0)\n\n";
+	cout << "Mapping and output:\n"
+		 << " -map <file>                    Tab-delimited sample mapping file\n"
+		 << " -options <file>                sdm option file (default: sdm_options.txt)\n"
+		 << " -o_fna <file> [-o_qual <file>] FASTA and optional quality output\n"
+		 << " -o_fastq <file>                FASTQ output; overrides -o_fna and -o_qual\n"
+		 << " -o_fna2/-o_qual2/-o_fastq2     Output files for a second read\n"
+		 << " -o_demultiplex <path>          Write individual demultiplexed files\n"
+		 << " -o_demultiplex_gz <0|1>        Gzip demultiplexed output\n"
+		 << " -o_fastq_noBC <file>           Write reads for which no barcode was detected\n"
+		 << " -o_qual_offset <n>             Output FASTQ quality offset (default: 33)\n"
+		 << " -oneLineFastaFormat <0|1>      Write FASTA/quality sequences on one line\n"
+		 << " -sample_sep <text>             Sample/ID delimiter (default: \"" << def_sep << "\")\n"
+		 << " -log <file|nolog>              Demultiplex log destination\n"
+		 << " -maxReadsPerOutput <n>         Split FASTA output after n filtered reads\n"
+		 << " -pairedDemulti <0|1>           Write only complete pairs when demultiplexing\n"
+		 << " -pairedRD_HD_out <0|1>         Include paired-read identifiers in output headers\n\n";
+	cout << "Filtering, selection, and diagnostics:\n"
+		 << " -5PR1cut/-5PR2cut <n>          Remove the first n nucleotides from read 1/read 2\n"
+		 << " -onlyCanonicalNTs <0|1>        Retain only canonical nucleotides\n"
+		 << " -strictPositiveQualsOut <0|1>  Require positive output quality values\n"
+		 << " -specificReads <file>          Include named reads; combine with -excludeFile <file>\n"
+		 << " -number <T> [-prefix <text>]   Renumber FASTA headers and exit\n"
+		 << " -XfirstReadsRead <n>           Read only the first n reads\n"
+		 << " -XfirstReadsWritten <n>        Write only the first n reads\n"
+		 << " -length_hist/-qual_hist <file> Write length/quality histograms\n"
+		 << " -merg_readpos/-qual_readpos <file> Write merge/quality position reports\n"
+		 << " -logLvsQ <file|1>              Write length-versus-quality data\n"
+		 << " -suppressOutput <0|1>          Suppress sequence output\n"
+		 << " -iniBlockSize <n>              Initial read block size (default: 120)\n"
+		 << " -threads <n>                   Worker thread count (default: 1)\n"
+		 << " -threadIO <0|1>                Enable threaded I/O (default: 1)\n\n";
+	cout << "Dereplication, merging, and OTU support:\n"
+		 << " -o_dereplicate <file>          Write dereplicated FASTA reads\n"
+		 << " -dere_size_fmt <0|1>           0: size=X; format; 1: _X format\n"
+		 << " -min_derep_copies <rule>       Minimum copies, e.g. 10:1,3:3\n"
+		 << " -derep_map <file>              Dereplication mapping output\n"
+		 << " -derep_reserve <n>             Reserve capacity for dereplication\n"
+		 << " -derepPerSR <0|1>              Dereplicate per sample/read\n"
+		 << " -derep_format <text>           Dereplication output format\n"
+		 << " -derepSrchLen <n>              Dereplication search length (default: 150)\n"
+		 << " -merge_pairs_filter/-merge_pairs_seed/-merge_pairs_demulti <0|1> Enable pair merging\n"
+		 << " -merge_pairs_derep <0|1>       Merge pairs during dereplication\n"
+		 << " -noSearchWithMerge <value>     Disable search when pair merging is enabled\n"
+		 << " -OTU_fallback/-OTU_fallback_refclust <file> Fallback OTU FASTA sequences\n"
+		 << " -otu_matrix <file>             OTU matrix output\n"
+		 << " -ucAdditionalCounts/-ucAdditionalCounts1/-ucAdditionalCounts_refclust/-ucAdditionalCounts_refclust1 <file> Additional UC counts\n"
+		 << " -optimalRead2Cluster/-optimalRead2Cluster_ref <file> Read-to-cluster assignments\n\n";
+	cout << "Technology and advanced options:\n"
+		 << " -GoldenAxe <0|1>               Process PacBio concatenated reads\n"
+		 << " -GoldenAxeMinAmpli <n>         Minimum accepted GoldenAxe amplicons (default: 0)\n"
+		 << " -GoldenAxeMaxAmpli <n>         Maximum accepted GoldenAxe amplicons\n"
+		 << " -illuminaClip <0|1>            Enable Illumina adapter clipping\n"
+		 << " -DNAseedSelectionClassic <0|1> Use classic DNA seed selection\n"
+		 << " -uparseVer <text>              UPARSE compatibility version\n"
+		 << " -normRdsToFiveNTs <0|1>        Normalize reads to five nucleotides\n"
+		 << " -mocatFix <0|1>                Enable MOCAT compatibility handling\n"
+		 << " -minQueryCov <n>               Minimum query coverage\n"
+		 << " -DemultiBPperSR <n>            Demultiplex base pairs per sample/read\n"
+		 << " -binomialFilterBothPairs <0|1> Apply binomial filtering to both pairs\n"
+		 << " -count_chimeras <T|F>          Count chimeric reads\n";
+	cout<<"\nMinimal Example:\n./sdm -i test.fna -map mapping.txt (assuming quality file is \"test.qual_\")\n";
 }
 void printOptionHelp(){
     help_head();
-    cout<<"The option file, specified via the \"-options\" argument, provides more specific control over filtering, barcode handling, and sequencing technologies, among others. A reference option file is printed below.\n\n";
-    string helpOptionFile="";
-    /*helpOptionFile += "minSeqLength - minimal accepted Sequence Length\nmaxSeqLength - maximal Length of Sequence\nminAvgQuality - minimal average Quality\nmaxAmbiguousNT - max number of Ambigous nt's in sequence\nQualWindowThreshhold - Q threshold where seq is rejected\nQualWindowWidth - average quality in this windows is used for QualWindowThreshhold\n";
-    helpOptionFile += string("TrimWindowThreshhold - Q value below which sequence is 3' trimmed\nTrimWindowWidth - window size used for TrimWindowThreshhold\nmaxBarcodeErrs - max accepted barcode errors\nmaxPrimerErrs - max accepted Primer errors\nkeepBarcodeSeq - leave Barcode sequence_ on read? (0/1)\n");
-    helpOptionFile += "keepPrimerSeq - keep Primer attached to seq? (0/1)\nmaxHomonucleotide - sequences with a homonucleotide run longer will be rejected\nmaxAccumulatedError - if P is surpassed, sequence is trimmed at that point\nTechnicalAdapter - sequence of the technical adapter (will be removed, if found 5')\nPEheaderPairFmt - ?\nTrimStartNTs - trim X nucleotides from the start of the sequence ";
-    helpOptionFile += "fastqVersion - 1 = ";*/
-
-    helpOptionFile += "#--- Example ---\n#copy into new file\n#sequence length refers to sequence length AFTER removal of Primers, Barcodes and trimming. this ensures that downstream analyis tools will have appropiate sequence information\nminSeqLength	250\nmaxSeqLength	1000\nminAvgQuality	25\n\n";
-    helpOptionFile += "#Ambiguous bases in Sequence - uclust only supports 0 ambiguous nucleotides\nmaxAmbiguousNT	0\n\n#Homonucleotide Runs.. this should normally be filtered by sequencer software\nmaxHomonucleotide	8\ntrimHomonucleotide	8\n\n";
-    helpOptionFile += "#Filter whole sequence if one window of quality scores is below average\nQualWindowWidth	50\nQualWindowThreshhold	25\n\n#Trim the end of a sequence if a window falls below quality threshhold. Useful for removing low qulaity trailing ends of sequence\n\nTrimWindowWidth	20\nTrimWindowThreshhold	25\n\n#Max number of accumulated P for a mismatch. After this length, the rest of the sequence will be deleted. Complimentary to TrimWindowThreshhold. (-1) deactivates this option.\nmaxAccumulatedError	1\n\n";
-    helpOptionFile += "#Barcode Errors - currently this can only be 0; \nmaxBarcodeErrs	0\nmaxPrimerErrs	0\n\n#keep Barcode / Primer Sequence in the output fasta file - in a normal 16S analysis this should be deactivated (0) for Barcode and de-activated (0) for primer\nkeepBarcodeSeq	0\nkeepPrimerSeq	0\n\n";
-    helpOptionFile += "#set fastqVersion to 1 if you use Sanger, Illumina 1.8+ or NCBI SRA files. Set fastqVersion to 2, if you use Illumina 1.3+ - 1.7+ or Solexa fastq files.\n\nfastqVersion	1\n\n#if one or more files have a technical adapter still included (e.g. TCAG 454) this can be removed by setting this option\n\nTechnicalAdapter	TCAG\n\n#delete X NTs (e.g. if the first 5 bases are known to have strange biases)\n\nTrimStartNTs	0\n";
-    helpOptionFile += "#truncate total Sequence length to X (length after Barcode, Adapter and Primer removals)\nTruncateSequenceLength	200\n";
-    helpOptionFile += "#correct PE header format (1/2) this is to accomodate the illumina miSeq paired end annotations 2=\"@XXX 1:0:4\" instead of 1=\"@XXX/1\". Note that the format will be automatically detected\nPEheaderPairFmt	1\n\n#sets if sequences without match to reverse primer will be accepted (T=reject ; F=accept all); default=F\nRejectSeqWithoutRevPrim	F\n";
-    helpOptionFile += "#sets if sequences without a forward (LinkerPrimerSequence) primer will be accepted (T=reject ; F=accept all); default=T\nRejectSeqWithoutFwdPrim	T\n\n";
-    helpOptionFile += "#checks if the whole amplicon was reverse-transcribed sequenced (Default = F)\nCheckForReversedSeqs	F\n\n";
-    helpOptionFile += "#this option should be \"T\" if your amplicons are possibly shorter than a read in a paired end sequencing run (e.g. amplicon of 300 in 250x2 miSeq is \"T\")\nAmpliconShortPE	T\n\n";
-    //CheckForMixedPairs CheckForReversedSeqs
-    cout<<helpOptionFile<<endl;
+	cout << "The option file specified by -options controls filtering, barcode and primer handling, paired-read checks, and adapter sequences. "
+			"Each non-comment line must contain an option name and value separated by a tab. Lines beginning with # are comments.\n\n";
+	string helpOptionFile = "";
+	helpOptionFile += "# A leading * enables an alternate setting for the modified output stream.\n";
+	helpOptionFile += "# Supported for: minSeqLength, minAvgQuality, maxAmbiguousNT,\n";
+	helpOptionFile += "# QualWindowThreshhold, TrimWindowThreshhold, maxPrimerErrs,\n";
+	helpOptionFile += "# keepPrimerSeq, maxAccumulatedError, RejectSeqWithoutRevPrim, and\n";
+	helpOptionFile += "# RejectSeqWithoutFwdPrim.\n\n";
+	helpOptionFile += "# Length and whole-read quality filtering. Length is evaluated after\n";
+	helpOptionFile += "# barcode, primer, adapter removal, and quality trimming.\n";
+	helpOptionFile += "minSeqLength\t250\n";
+	helpOptionFile += "maxSeqLength\t1000\n";
+	helpOptionFile += "minAvgQuality\t25\n";
+	helpOptionFile += "maxAmbiguousNT\t0\n";
+	helpOptionFile += "maxHomonucleotide\t12\n";
+	helpOptionFile += "trimHomonucleotide\t12\n\n";
+	helpOptionFile += "# Reject a read when a quality window falls below this average. A threshold\n";
+	helpOptionFile += "# of 0 disables this check.\n";
+	helpOptionFile += "QualWindowWidth\t50\n";
+	helpOptionFile += "QualWindowThreshhold\t0\n\n";
+	helpOptionFile += "# Trim a low-quality 3' end using this window and threshold.\n";
+	helpOptionFile += "TrimWindowWidth\t15\n";
+	helpOptionFile += "TrimWindowThreshhold\t20\n\n";
+	helpOptionFile += "# Maximum accumulated expected error; use -1 to disable this trimming.\n";
+	helpOptionFile += "maxAccumulatedError\t-1\n\n";
+	helpOptionFile += "# Binomial error model. Alpha must be -1 (disabled) or between 0 and 1.\n";
+	helpOptionFile += "BinErrorModelMaxExpError\t2.5\n";
+	helpOptionFile += "BinErrorModelAlpha\t-1\n\n";
+	helpOptionFile += "# Barcode and primer handling. Set keep*Seq to 1 to retain the matched\n";
+	helpOptionFile += "# sequence in output, or 0 to remove it.\n";
+	helpOptionFile += "maxBarcodeErrs\t0\n";
+	helpOptionFile += "maxPrimerErrs\t1\n";
+	helpOptionFile += "keepBarcodeSeq\t0\n";
+	helpOptionFile += "keepPrimerSeq\t0\n";
+	helpOptionFile += "ExtensivePrimerChecks\tF\n";
+	helpOptionFile += "RejectSeqWithoutFwdPrim\tT\n";
+	helpOptionFile += "RejectSeqWithoutRevPrim\tF\n\n";
+	helpOptionFile += "# Read formatting and trimming.\n";
+	helpOptionFile += "# fastqVersion accepts auto or a numeric FASTQ version understood by sdm.\n";
+	helpOptionFile += "fastqVersion\tauto\n";
+	helpOptionFile += "PEheaderPairFmt\t0\n";
+	helpOptionFile += "TrimStartNTs\t0\n";
+	helpOptionFile += "TruncateSequenceLength\t-1\n\n";
+	helpOptionFile += "# Paired-read processing. Use T to enable and F to disable.\n";
+	helpOptionFile += "AmpliconShortPE\tF\n";
+	helpOptionFile += "CheckForMixedPairs\tF\n";
+	helpOptionFile += "CheckForReversedSeqs\tF\n";
+	helpOptionFile += "SyncReadPairs\tT\n\n";
+	helpOptionFile += "# Dereplication. If omitted, derepSrchLen defaults to minSeqLength.\n";
+	helpOptionFile += "derepSrchLen\t250\n\n";
+	helpOptionFile += "# Set TechnicalAdapter to an adapter sequence to remove it. Do not include\n";
+	helpOptionFile += "# this line when no technical adapter should be removed.\n";
+	helpOptionFile += "# TechnicalAdapter\tTCAG\n\n";
+	helpOptionFile += "# Adapter sequences used when -illuminaClip 1 is supplied. Do not include\n";
+	helpOptionFile += "# unused adapter lines.\n";
+	helpOptionFile += "# illuminaFwd\t<forward paired-end adapter>\n";
+	helpOptionFile += "# illuminaRev\t<reverse paired-end adapter>\n";
+	helpOptionFile += "# illuminaSngUni\t<single-end universal adapter>\n";
+	helpOptionFile += "# illuminaSngIdx\t<single-end indexed adapter>\n";
+	cout << helpOptionFile << endl;
 }
 void printMapHelp(){
     help_head();
-    cout<<"The mapping file, specified via the \"-base_map\" argument, contains all information neccessary to demultiplex a sequencer fasta or fastq output file. If left out, the sequences are only quality checked.\n";
-    cout<<"The Mapping file can contain comments, specified by \"#\" at the start of the comment line. Similarly, the header (required) has to start with \"#\"\n. Processed header fields are:\n";
-    cout << "SampleID - sample_id_ Identifier, has to be unique for each Barcode\n";
-    cout << "CombineSamples - combines sample_id_ Identifiers into one sample\n";
-    cout << "BarcodeSequence - The Barcode (MID) tag assigned to each sample. Can contain IUPAC redundant nucleotides\n";
-    cout << "Barcode2ndPair - in case of dual indexed reads, use this column to specify the BC on the 2nd read pair_\n";
-    cout<<"ForwardPrimer (previously LinkerPrimerSequence) - Sequence used for 16S amplification, usually (unless paired end mode) is after the Barcode\n";
-    cout<< "ReversePrimer - Reverse Primer Sequence (IUPAC code).\n";
-    cout<< "fastqFile - if used in -i_path mode, gives relative location of fastq file, such that [-i_path][fastqFile] gives the absolute path to fastq file.\n";
-    cout<<"fnaFile - see fastqFile. However, fasta formated file instead of fastq format.\n";
-    cout<< "qualFile - see fastqFile. However, quality file corresponding to fasta file instead of fastq format.\n";
-    cout<< "MIDfqFile - fastq file containing ONLY the MID sequence, corresponding fastq input file(s)\n";
-    cout<< "SampleIDinHead - id_ in header of fasta/fastq file, that identifies sample_id_ - replaces Barcode (MID) scanning.\n";
-    cout << "derepMin - this column can contain a single number X, only accepting reads in specific sample that have more than X dereplicated copies. Useful if a subset of samples was e.g. sampled 100x as deep as other samples.\nCombined sample_id_ WILL NOT be taken into account.\n";
-    cout<<"\n";
+	cout << "A mapping file, supplied with -map <file>, assigns input reads or files to samples. Without -map, sdm only performs quality filtering.\n\n";
+	cout << "Format rules:\n"
+		 << " - The file is tab-delimited. Every data row must contain the same number of columns.\n"
+		 << " - The first row is the header; it may begin with #. Lines beginning with # after the header are comments.\n"
+		 << " - Header names are case-sensitive and may appear in any order. Unrecognized columns are ignored.\n"
+		 << " - SampleID values must be unique. Barcode values, or dual-barcode pairs, must be unique.\n\n";
+	cout << "Sample identification modes:\n"
+		 << " - BarcodeSequence: identify samples from a read barcode (IUPAC bases are supported).\n"
+		 << " - BarcodeSequence plus Barcode2ndPair: identify samples using dual indexes.\n"
+		 << " - SampleIDinHead: identify samples from a matching string in the FASTA/FASTQ header.\n"
+		 << " - In -i_path mode, unique fastqFile or fnaFile entries can identify one sample per file.\n"
+		 << " Use one identification mode consistently across the mapping file.\n\n";
+	cout << "Recognized columns:\n"
+		 << " Sample identity\n"
+		 << "  SampleID             Unique output sample identifier.\n"
+		 << "  CombineSamples       Combine this sample into the specified sample identifier.\n"
+		 << "  SampleIDinHead       Header string that identifies the sample instead of barcode scanning.\n"
+		 << "  SequencingRun        Sequencing-run identifier for the sample.\n"
+		 << " Barcode assignment\n"
+		 << "  BarcodeSequence      Primary barcode/MID sequence; IUPAC bases are supported.\n"
+		 << "  Barcode2ndPair       Barcode sequence on the second read for dual-indexed input.\n"
+		 << " Primers and spacers\n"
+		 << "  ForwardPrimer        Forward amplification primer sequence.\n"
+		 << "  LinkerPrimerSequence Legacy alias for ForwardPrimer.\n"
+		 << "  ReversePrimer        Reverse amplification primer sequence.\n"
+		 << "  HetSpacerFwd         Forward heterogeneity spacer sequence.\n"
+		 << "  HetSpacerRev         Reverse heterogeneity spacer sequence. Both HetSpacer columns are required to enable explicit spacer handling.\n"
+		 << " Input files (used with -i_path)\n"
+		 << "  fastqFile            Relative FASTQ path.\n"
+		 << "  fnaFile              Relative FASTA path.\n"
+		 << "  qualFile             Relative FASTA-quality path; if absent, sdm derives <fasta-base>.qual_.\n"
+		 << "  MIDfqFile            Relative FASTQ path containing MID sequences.\n"
+		 << " Dereplication\n"
+		 << "  derepMin             Empty or a non-negative minimum copy count for this sample.\n\n";
+	cout << "When using -i_path, the mapping file must contain either fastqFile or fnaFile. File paths are resolved relative to -i_path.\n\n";
+	cout << "Examples (tabs are shown as spaces for readability; use real tab characters in the file):\n"
+		 << "# Single barcode\n"
+		 << "#SampleID    BarcodeSequence    ForwardPrimer\n"
+		 << "sample_1     ACGTACGT           CCTACGGG\n"
+		 << "sample_2     TGCATGCA           CCTACGGG\n\n"
+		 << "# Dual-indexed paired reads\n"
+		 << "#SampleID    BarcodeSequence    Barcode2ndPair\n"
+		 << "sample_1     ACGTACGT           GATCAAGT\n\n"
+		 << "# One sample per FASTQ file with -i_path reads\n"
+		 << "#SampleID    fastqFile\n"
+		 << "sample_1     sample_1.fastq.gz\n";
 
 }
 void printVersion(){

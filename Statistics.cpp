@@ -3,6 +3,8 @@
 //
 
 #include "Statistics.h"
+#include <algorithm>
+#include <tuple>
 
 const vector<unsigned int>& Statistics::get_rstat_Vmed(int x) {
     if (x == 1) { return rstat_VQmed; }
@@ -275,8 +277,19 @@ void ReportStats::printLvsQ(ostream& give) {
     std::list<float>::iterator it3(listOfQualMeds.begin());
     give << "Length\tAvgQual\tMedianQual\n";
 
+    std::vector<std::tuple<int, float, float>> rows;
+    rows.reserve(listOfLengths.size());
+
     for (; it1 != listOfLengths.end() && it2 != listOfQuals.end() && it3 != listOfQualMeds.end(); ++it1, ++it2, ++it3) {
-        give << *it1 << "\t" << *it2 << "\t" << *it3 << "\n";
+        rows.emplace_back(*it1, *it2, *it3);
+    }
+
+    std::sort(rows.begin(), rows.end(), [](const std::tuple<int, float, float>& a, const std::tuple<int, float, float>& b) {
+        return std::get<0>(a) > std::get<0>(b);
+    });
+
+    for (const auto& row : rows) {
+        give << std::get<0>(row) << "\t" << std::get<1>(row) << "\t" << std::get<2>(row) << "\n";
     }
 
 }
