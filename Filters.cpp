@@ -1,5 +1,6 @@
 #include "Filters.h"
 #include "OutputStreamer.h"
+#include <numeric>
 
 
 
@@ -7,6 +8,78 @@
 //*        FILTERS OBJECT
 //*******************************************
 
+bool PrimerVariantTracker::record(const std::string& readIdentity, int start, PrimerDirection direction,
+	const std::string& expected, const std::string& observed, bool isVariant) {
+	std::lock_guard<std::mutex> lock(mutex);
+	const auto match = std::make_pair(readIdentity, direction);
+	if (!recordedMatches.insert(match).second) {
+		return false;
+	}
+	if (direction == PrimerDirection::Reverse) {
+		++totalReverseMatches;
+	}
+	else {
+		++totalForwardMatches;
+	}
+	if (isVariant) {
+		if (direction == PrimerDirection::Reverse) {
+			++reverseVariants[std::make_pair(expected, observed)];
+		}
+		else {
+			++forwardVariants[std::make_pair(expected, observed)];
+		}
+	}
+	return true;
+}
+
+namespace {
+	enum class FailureReasonBit : uint32_t {
+		PrimerFwd = 1u << 0,
+		PrimerRev = 1u << 1,
+		MinLength = 1u << 2,
+		MaxLength = 1u << 3,
+		MinLengthAfterTrim = 1u << 4,
+		AvgQuality = 1u << 5,
+		QualityWindow = 1u << 6,
+		MaxAmbiguousBases = 1u << 7,
+		Homonucleotide = 1u << 8,
+		BinomialError = 1u << 9,
+		Tag = 1u << 10
+	};
+
+	inline void addFailureReason(uint32_t& mask, FailureReasonBit reason) {
+		mask |= static_cast<uint32_t>(reason);
+	}
+
+	inline unsigned int failureReasonCount(uint32_t mask) {
+		unsigned int count = 0;
+		for (; mask != 0; mask &= (mask - 1)) {
+			++count;
+		}
+		return count;
+	}
+
+	struct PrimaryAltThresholdResult {
+		bool primaryFailed = false;
+		bool rescuedByAlternate = false;
+		bool alternateFailed = false;
+
+		bool shouldFail() const {
+			return primaryFailed && alternateFailed;
+		}
+	};
+
+	inline PrimaryAltThresholdResult evaluatePrimaryAlt(bool primaryFailed, bool alternateConfigured, bool alternateFailed) {
+		PrimaryAltThresholdResult result;
+		result.primaryFailed = primaryFailed;
+		if (!primaryFailed) {
+			return result;
+		}
+		result.alternateFailed = !alternateConfigured || alternateFailed;
+		result.rescuedByAlternate = alternateConfigured && !alternateFailed;
+		return result;
+	}
+}
 
 Filters::Filters(OptContainer* cmdArgs1) :
 	PrimerL(0), PrimerR(0), PrimerL_RC(0), PrimerR_RC(0), PrimerIdx(0),
@@ -36,6 +109,9 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	minBCLength1_(0), minBCLength2_(0), maxBCLength1_(0), maxBCLength2_(0), minPrimerLength_(0), maxHomonucleotide_(0), trimHomonucleotide_(0),
 	cut5PR1(0), cut5PR2(0),
 	PrimerErrs(0), alt_PrimerErrs(0), barcodeErrors_(0),
+	primerVariantMaxMismatches_(3), primerVariantMinCount_(0), primerVariantMinFraction_(0.f),
+	primerVariantWarningFraction_(0.5f),
+	primerVariantTracker_(make_shared<PrimerVariantTracker>()),
 	MaxAmb(-1), alt_MaxAmb(-1),
 	FQWwidth(0), EWwidth(0),
 	RevPrimSeedL(5),
@@ -288,6 +364,35 @@ Filters::Filters(OptContainer* cmdArgs1) :
 				PrimerErrs = atoi(segs2.c_str());
 			}
 		}
+		else if (segs == "PrimerVariantMaxMismatches") {
+			primerVariantMaxMismatches_ = atoi(segs2.c_str());
+			if (primerVariantMaxMismatches_ < 1 || primerVariantMaxMismatches_ > 3) {
+				cerr << "PrimerVariantMaxMismatches must be between 1 and 3. Aborting.\n";
+				exit(543);
+			}
+		}
+		else if (segs == "PrimerVariantMinCount") {
+			int minCount = atoi(segs2.c_str());
+			if (minCount < 0) {
+				cerr << "PrimerVariantMinCount must not be negative. Aborting.\n";
+				exit(545);
+			}
+			primerVariantMinCount_ = static_cast<uint>(minCount);
+		}
+		else if (segs == "PrimerVariantMinPercent") {
+			primerVariantMinFraction_ = static_cast<float>(atof(segs2.c_str())) / 100.f;
+			if (primerVariantMinFraction_ < 0.f || primerVariantMinFraction_ > 1.f) {
+				cerr << "PrimerVariantMinPercent must be between 0 and 100. Aborting.\n";
+				exit(544);
+			}
+		}
+		else if (segs == "PrimerVariantWarningPercent") {
+			primerVariantWarningFraction_ = static_cast<float>(atof(segs2.c_str())) / 100.f;
+			if (primerVariantWarningFraction_ < 0.f || primerVariantWarningFraction_ > 1.f) {
+				cerr << "PrimerVariantWarningPercent must be between 0 and 100. Aborting.\n";
+				exit(546);
+			}
+		}
 		else if (strcmp(segs.c_str(), "keepBarcodeSeq") == 0) {
 			atoi(segs2.c_str()) == 0 ? keepTag = false : keepTag = true;
 		}
@@ -503,6 +608,12 @@ void Filters::addDNAtoCStats(const shared_ptr<DNA>& d, int Pair) {
 	if (d->QualCtrl.QWinTrimmed || d->QualCtrl.AccErrTrimmed) {
 		collectStatistics[easyPair]->Trimmed++;
 	}
+	if (d->QualCtrl.QWinTrimmed) {
+		collectStatistics[easyPair]->QWinTrimmed++;
+	}
+	if (d->QualCtrl.AccErrTrimmed) {
+		collectStatistics[easyPair]->AccErrTrimmed++;
+	}
 	if (d->getTA_cut()) {
 		collectStatistics[easyPair]->adapterRem++;
 	}
@@ -590,6 +701,9 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	minBCLength1_(of->minBCLength1_), minBCLength2_(of->minBCLength2_), maxBCLength1_(of->maxBCLength1_), maxBCLength2_(of->maxBCLength2_), minPrimerLength_(of->minPrimerLength_), maxHomonucleotide_(of->maxHomonucleotide_), trimHomonucleotide_(of->trimHomonucleotide_),
 	cut5PR1(of->cut5PR1), cut5PR2(of->cut5PR2),
 	PrimerErrs(of->PrimerErrs), alt_PrimerErrs(of->alt_PrimerErrs), barcodeErrors_(of->barcodeErrors_),
+	primerVariantMaxMismatches_(of->primerVariantMaxMismatches_), primerVariantMinCount_(of->primerVariantMinCount_),
+	primerVariantMinFraction_(of->primerVariantMinFraction_), primerVariantWarningFraction_(of->primerVariantWarningFraction_),
+	primerVariantTracker_(of->primerVariantTracker_),
 	MaxAmb(of->MaxAmb), alt_MaxAmb(of->alt_MaxAmb),
 	FQWwidth(of->FQWwidth), EWwidth(of->EWwidth),
 	RevPrimSeedL(of->RevPrimSeedL),
@@ -1261,11 +1375,11 @@ bool Filters::betterSeed(shared_ptr<DNAunique> d1,
 
 	//*** DNA1
 	//needs to quality filter first
-	if (!checkYellowAndGreen(d1, usePair, TagIdx, true)) {
+	if (!checkYellowAndGreen(d1, usePair, TagIdx, true, FilteringContext::Seeding)) {
 		return false;
 	}
 	if (d1->getPair() != nullptr) {
-		checkYellowAndGreen(d1->getPair(), 1, TagIdx, true);
+		checkYellowAndGreen(d1->getPair(), 1, TagIdx, true, FilteringContext::Seeding);
 	}
 	/*float d1pid(d1->getTempFloat()), refpid(ref->getTempFloat());
 	if (d1pid<refpid - 0.4f || d1pid < ever_best - 1){ return false; }
@@ -1314,8 +1428,35 @@ bool Filters::betterSeed(shared_ptr<DNAunique> d1,
 //DNA qual_ check, and some extra parameters
 //should be safe to call from different threads
 bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
-	int& tagIdx, bool doSeeding) {
+	int& tagIdx, bool doSeeding, FilteringContext filteringContext) {
 	int pair = max(0, pairPre);//corrects for -1 (undefined pair_) to set to 0
+	const int statsPair = std::min(std::max(pair, 0), (int)collectStatistics.size() - 1);
+	auto& stats = *collectStatistics[statsPair];
+	const bool shouldCommitDiagnostics = filteringContext == FilteringContext::FinalFiltering;
+	bool success = true;
+	bool canUsePrimerIdx = true;
+	bool forwardSearchAttempted = false;
+	bool reverseSearchAttempted = false;
+	bool forwardSearchSucceeded = false;
+	bool reverseSearchSucceeded = false;
+	bool rescuedAccumError = false;
+	bool rescuedQuality = false;
+	bool rescuedAmbiguousBases = false;
+	uint32_t failureMask = 0;
+	auto markFailed = [&](FailureReasonBit reason) {
+		addFailureReason(failureMask, reason);
+		d->failed();
+		success = false;
+	};
+	auto markRejected = [&](FailureReasonBit reason) {
+		addFailureReason(failureMask, reason);
+		success = false;
+	};
+	auto setYellowIfNotFailed = [&]() {
+		if (!d->isFailed()) {
+			d->setYellowQual(true);
+		}
+	};
 
 	// We trim for poly-G / homonucleotide tail here, before filtering for length, and before trimming adapter sequences etc. 
 	if (trimHomonucleotide_ != 0) {
@@ -1345,46 +1486,55 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 	}
 	if ((bDoBarcode || bDoBarcode2) && tagIdx < 0) {
 		d->QualCtrl.TagFail = true;
-		return false;
+		markRejected(FailureReasonBit::Tag);
+		canUsePrimerIdx = false;
 	}
 
 	if ((BextensivePrimerChecks || BcutPrimer || Bcheck4illuAdapts) &&
 		(tagIdx < 0 || (size_t)tagIdx >= PrimerIdx.size() || (size_t)tagIdx >= PrimerIdxRev.size())) {
 		d->QualCtrl.TagFail = true;
-		d->failed();
-		return false;
+		markFailed(FailureReasonBit::Tag);
+		canUsePrimerIdx = false;
 	}
 
-	if (BextensivePrimerChecks) {
+	if (canUsePrimerIdx && BextensivePrimerChecks) {
 		if (checkIfRevPrimerHits(d, PrimerIdx[tagIdx], 0, bShortAmplicons)) {
 			d->reverse_compliment(false);
 		}
 	}
 	//bShortAmplicons checks for reverse primer on 1st read
-	if (BcutPrimer || Bcheck4illuAdapts) {
+	if (canUsePrimerIdx && (BcutPrimer || Bcheck4illuAdapts)) {
        if (pair == 1) {//pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
 			bool revCheck = false;
+			reverseSearchAttempted = true;
 			cutPrimerRev(d, PrimerIdxRev[tagIdx], revCheck, false);
 			if (bShortAmplicons) {//also check other end of primer..
+				forwardSearchAttempted = true;
 				cutPrimer(d, PrimerIdx[tagIdx], revCheck, pair);
 			}
 		}
 		else {//pair 0 or -1
 			bool fwdRC = false;
+			forwardSearchAttempted = true;
 			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, BextensivePrimerChecks);
 			if (bShortAmplicons) {//also check other end of primer.. also use for PacBio amplicons
                bool revRC = true;
+				reverseSearchAttempted = true;
 				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, BextensivePrimerChecks);
 				//case for 1) long read 2) look for both primers 3) rev required
 			}
 		}
+		forwardSearchSucceeded = forwardSearchAttempted && d->getFwdPrimDetect();
+		reverseSearchSucceeded = reverseSearchAttempted && d->getRevPrimDetect();
 		//conditions for failing read on not finding fwd primer
 		if (pair != 1 && !d->getFwdPrimDetect() && bRequireFwdPrim) {
 			if (alt_bRequireFwdPrim) {
 				d->QualCtrl.PrimerFwdFail = true;
-				d->failed(); return false;
+				markFailed(FailureReasonBit::PrimerFwd);
 			}
-			d->setYellowQual(true);
+			else {
+				setYellowIfNotFailed();
+			}
 		}
 		//conditions for failing read on not finding rev primer
 		if (bRequireRevPrim && !d->getRevPrimDetect()
@@ -1392,10 +1542,10 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 			) {//failed to find reverse primer
 			if (alt_bRequireRevPrim) {
 				d->QualCtrl.PrimerRevFail = true;
-				d->failed(); return false;
+				markFailed(FailureReasonBit::PrimerRev);
 			}
 			else {
-				d->setYellowQual(true);
+				setYellowIfNotFailed();
 			}
 		}
 
@@ -1405,7 +1555,7 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 	if (doSeeding) {
 		//cut off low qual, hard limits
 		d->qualWinPos(EWwidth, EWthr);
-		return true;
+		return success && !d->isFailed();
 	}
 
 	//if seq needs to be cut, than here
@@ -1414,7 +1564,7 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 	}
 
 	if (check_lengthXtra(d)) {
-		d->failed(); return false;
+		markFailed(d->QualCtrl.maxL ? FailureReasonBit::MaxLength : FailureReasonBit::MinLength);
 	}
 
 	if (b_doQualFilter) {
@@ -1423,12 +1573,26 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		//cut off accumulation error larger than maxAccumQP
 		if (maxAccumQP > 0.0) {
 			int cP = d->qualAccumulate(maxAccumQP);
-            if (check_lengthXtra(d, 0, cP)) {
+			const PrimaryAltThresholdResult accumLengthResult = evaluatePrimaryAlt(
+				check_lengthXtra(d, 0, cP),
+				alt_maxAccumQP > 0.0,
+				true);
+			if (accumLengthResult.primaryFailed) {
 				// Mark as mid-quality (yellow) when trimming due to accumulated error
-				d->setYellowQual(true);  d->QualCtrl.minLqualTrim = true;//sMinQTrim(pair_);
-				cP = d->qualAccumulate(alt_maxAccumQP);
-				if (check_lengthXtra(d, 0, cP)) {//check if passes alt
-					d->failed(); return false;
+				setYellowIfNotFailed();  d->QualCtrl.minLqualTrim = true;//sMinQTrim(pair_);
+				bool altLengthFails = true;
+				if (alt_maxAccumQP > 0.0) {
+					cP = d->qualAccumulate(alt_maxAccumQP);
+					altLengthFails = check_lengthXtra(d, 0, cP);
+				}
+				const PrimaryAltThresholdResult altAccumResult = evaluatePrimaryAlt(true, alt_maxAccumQP > 0.0, altLengthFails);
+				if (altAccumResult.shouldFail()) {//check if passes alt
+					markFailed(FailureReasonBit::MinLengthAfterTrim);
+				}
+				else if (cP >= 0 && cP < (int)d->length()) {
+					d->cutSeqPseudo(cP);
+					d->QualCtrl.AccErrTrimmed = true;
+					rescuedAccumError = true;
 				}
 			}
 			else {
@@ -1448,28 +1612,31 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		if ((avgQ < min_q || rea == 1) && useAltQualWin) {
 			avgQalt = d->qualWinfloat(FQWwidth, alt_FQWthr, rea2);
 		}
-		if (avgQ < min_q) {
+		const PrimaryAltThresholdResult avgQualResult = evaluatePrimaryAlt(avgQ < min_q, useAltQualWin, avgQalt < alt_min_q);
+		if (avgQualResult.primaryFailed) {
 			d->QualCtrl.AvgQual = true; //sAvgQual(pair_);
-			if (avgQalt < alt_min_q) {
+			if (avgQualResult.shouldFail()) {
 				d->QualCtrl.AvgQual = true; //statAddition.AvgQual++;
-				d->failed(); return false;
+				markFailed(FailureReasonBit::AvgQuality);
 			}
 			else {
 				d->QualCtrl.AvgQual = false;
-				d->setYellowQual(true);
+				rescuedQuality = true;
+				setYellowIfNotFailed();
 			}
 		}
-		if (rea == 1) {
+		const PrimaryAltThresholdResult qualityWindowResult = evaluatePrimaryAlt(rea == 1, useAltQualWin, rea2 == 1);
+		if (qualityWindowResult.primaryFailed) {
 			d->QualCtrl.QualWin = true; //sQualWin(pair_);
-			if (rea2 == 1) {
-				d->failed(); return false;
+			if (qualityWindowResult.shouldFail()) {
+				markFailed(FailureReasonBit::QualityWindow);
 			}
 		}
 		if (b_BinFilBothPairs || pair == 0) {
 			float ExpErr = d->binomialFilter((int)BinFilErr, BinFilP);
 			if (ExpErr > BinFilErr) {
 				d->QualCtrl.BinomialErr = true;
-				d->failed(); return false;
+				markFailed(FailureReasonBit::BinomialError);
 			}
 		}
 	}
@@ -1479,19 +1646,53 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		bool homoOK = d->scanSequenceChecks(maxHomonucleotide_, ambNTs);
 		if (!homoOK) {
 			d->QualCtrl.HomoNT = true;
-			d->failed(); return false;
+			markFailed(FailureReasonBit::Homonucleotide);
 		}
-		if (MaxAmb >= 0 && ambNTs > MaxAmb) {
+		const PrimaryAltThresholdResult maxAmbResult = evaluatePrimaryAlt(MaxAmb >= 0 && ambNTs > MaxAmb, alt_MaxAmb != -1, ambNTs >= alt_MaxAmb);
+		if (maxAmbResult.primaryFailed) {
 			d->QualCtrl.MaxAmb = true;
-			if (alt_MaxAmb != -1 && ambNTs >= alt_MaxAmb) {
+			if (maxAmbResult.shouldFail()) {
 				d->QualCtrl.MaxAmb = true;
-				d->failed(); return false;
+				markFailed(FailureReasonBit::MaxAmbiguousBases);
 			}
 			else {
-				d->setYellowQual(true);
+				rescuedAmbiguousBases = true;
+				setYellowIfNotFailed();
 			}
 		}
 	}
+
+	auto commitDiagnostics = [&]() {
+		if (!shouldCommitDiagnostics) {
+			return;
+		}
+		auto incrementByMate = [pair](unsigned int& read1Counter, unsigned int& read2Counter) {
+			if (pair == 1) {
+				read2Counter++;
+			}
+			else {
+				read1Counter++;
+			}
+		};
+		if (forwardSearchSucceeded) {
+			incrementByMate(stats.primerSearchSucceededFwdRead1, stats.primerSearchSucceededFwdRead2);
+		}
+		if (reverseSearchSucceeded) {
+			incrementByMate(stats.primerSearchSucceededRevRead1, stats.primerSearchSucceededRevRead2);
+		}
+		if (rescuedAccumError) {
+			stats.altRescueAccumError++;
+		}
+		if (rescuedQuality) {
+			stats.altRescueQuality++;
+		}
+		if (rescuedAmbiguousBases) {
+			stats.altRescueAmbiguousBases++;
+		}
+		if (d->isFailed() && failureReasonCount(failureMask) > 1) {
+			stats.multiFailReads++;
+		}
+	};
 
 	//adapter removed, quality filtering done. If no map is provided, that is all that is needed
 	if (!bDoMultiplexing) {
@@ -1499,27 +1700,31 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
            const size_t readLen = d->length();
 			if (readLen <= (unsigned int)TrimStartNTs) {
 				d->QualCtrl.minL = true;
-				d->failed();
-				return false;
+				markFailed(FailureReasonBit::MinLength);
 			}
-         if (readLen - TrimStartNTs > max_l) {//length check
+			else if (readLen - TrimStartNTs > max_l) {//length check
 				d->QualCtrl.maxL = true; //sMaxLength(pair_);
-				d->failed();
-				return false;
+				markFailed(FailureReasonBit::MaxLength);
 			}
 			//remove start NTs
-			d->cutSeq(0, TrimStartNTs);
+			if (!d->isFailed()) {
+				d->cutSeq(0, TrimStartNTs);
+			}
 
 		}
-		d->setPassed(true);
-		return true;
+		if (!d->isYellowQual() && !d->isFailed() && success) {
+			d->setPassed(true);
+		}
+		commitDiagnostics();
+		return success && !d->isFailed();
 	}
 
-	if (!d->isYellowQual()) {
+	if (!d->isYellowQual() && !d->isFailed() && success) {
 		d->setPassed(true);
 	}
 
-	return true;
+	commitDiagnostics();
+	return success && !d->isFailed();
 }
 void Filters::noMapMode() {
 	string noMapTxt = "sdm run in No Map Mode.";
@@ -2439,6 +2644,14 @@ bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, boo
 			}
 		}
 		if (start < 0) {
+			int variantStart = -1;
+			if (!RC) {
+				variantStart = d->matchSeq(PrimerL[primerID], primerVariantMaxMismatches_, limit, startSearch);
+			}
+			else {
+				variantStart = d->matchSeqRev(PrimerL_RC[primerID], primerVariantMaxMismatches_, limit2, startSearch);
+			}
+			recordPrimerVariant(d, PrimerL[primerID], variantStart, RC, PrimerVariantTracker::PrimerDirection::Forward);
 			//statAddition.PrimerFail++;
 			return false;
 		}
@@ -2446,6 +2659,7 @@ bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, boo
 			d->setYellowQual(true);
 		}
 	}
+	recordPrimerVariant(d, PrimerL[primerID], start, RC, PrimerVariantTracker::PrimerDirection::Forward);
 	//remove everything before/after primer cut
 	if (!BcutPrimer) {
 		if (!RC) { d->cutSeq(0, start); }
@@ -2459,6 +2673,20 @@ bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, boo
 	}
 	d->setFwdPrimCut();
 	return true;
+}
+
+void Filters::recordPrimerVariant(const shared_ptr<DNA>& d, const string& primer, int start, bool reverseComplement,
+	PrimerVariantTracker::PrimerDirection direction) {
+	const string matchingPrimer = reverseComplement ? reverseTS2(primer) : primer;
+	auto details = d->getPrimerMatchDetails(matchingPrimer, start);
+	if (!details.fullLength || details.mismatches > primerVariantMaxMismatches_) {
+		return;
+	}
+	if (reverseComplement) {
+		reverseTS(details.observed);
+	}
+		primerVariantTracker_->record(d->getPositionFreeId(), start, direction,
+			primer, details.observed, details.mismatches > 0);
 }
 bool Filters::findPrimer(shared_ptr<DNA> d, int primerID, bool RC, int pair) {
 	//only adapted to singular BC
@@ -2513,9 +2741,19 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extra
 	}
 
 	if (start < 0) {//failed to match primer
+		int variantStart = -1;
+		if (RC) {
+			variantStart = d->matchSeqRev(PrimerR_RC[primerID], primerVariantMaxMismatches_, limit, extraCheck);
+		}
+		else {
+			variantStart = d->matchSeq(PrimerR[primerID], primerVariantMaxMismatches_, limit2, 0, extraCheck);
+		}
+		recordPrimerVariant(d, PrimerR[primerID], variantStart, RC, PrimerVariantTracker::PrimerDirection::Reverse);
 		//d->QualCtrl.PrimerRevFail = true;
 		return false;
 	}
+
+	recordPrimerVariant(d, PrimerR[primerID], start, RC, PrimerVariantTracker::PrimerDirection::Reverse);
 
 	if (!BcutPrimer) { //found it, but no cut
 		if (!RC) { d->cutSeq(0, start); }
@@ -3424,8 +3662,522 @@ void Filters::printGC(ostream& os, int Npair) {
 	}
 }
 
+void Filters::writePrimerVariantReport(const string& filename) const {
+	uint64_t totalForwardMatches = 0;
+	uint64_t totalReverseMatches = 0;
+	map<pair<string, string>, uint64_t> forwardVariants;
+	map<pair<string, string>, uint64_t> reverseVariants;
+	{
+		lock_guard<mutex> lock(primerVariantTracker_->mutex);
+		totalForwardMatches = primerVariantTracker_->totalForwardMatches;
+		totalReverseMatches = primerVariantTracker_->totalReverseMatches;
+		forwardVariants = primerVariantTracker_->forwardVariants;
+		reverseVariants = primerVariantTracker_->reverseVariants;
+	}
+
+	#ifdef _gzipread
+	std::unique_ptr<std::ostream> reportHolder = std::make_unique<zstr::ofstream>(filename, ios_base::out | ios_base::binary);
+	#else
+	std::unique_ptr<std::ostream> reportHolder = std::make_unique<ofstream>(filename.c_str(), ios_base::out);
+	#endif
+	std::ostream& report = *reportHolder;
+	if (!report) {
+		cerr << "Could not write primer-variant report " << filename << "\n";
+		return;
+	}
+	report << "# Primer variant report (full-length primer matches only; orientations separated)\n";
+	report << "# Minimum occurrences threshold: " << primerVariantMinCount_ << "\n";
+	report << "# Minimum percentage threshold: " << primerVariantMinFraction_ * 100.f << "%\n";
+
+	auto writeSection = [this, &report](const string& label, uint64_t totalMatches,
+		const map<pair<string, string>, uint64_t>& variants) {
+		report << "\n[" << label << "]\n";
+		report << "# Full-length " << label << " primer matches observed: " << totalMatches << "\n";
+		report << "ExpectedPrimer\tObservedPrimer\tOccurrences\tPercentOfOrientationMatches\tMeetsMinCount\tMeetsMinPercent\tMeetsReportThreshold\n";
+	vector<pair<pair<string, string>, uint64_t>> allVariants(variants.begin(), variants.end());
+		sort(allVariants.begin(), allVariants.end(), [](const auto& left, const auto& right) {
+			if (left.second != right.second) {
+				return left.second > right.second;
+			}
+			return left.first < right.first;
+		});
+		for (const auto& variant : allVariants) {
+			float fraction = totalMatches == 0 ? 0.f : static_cast<float>(variant.second) / static_cast<float>(totalMatches);
+			const bool meetsMinCount = primerVariantMinCount_ == 0 || variant.second >= primerVariantMinCount_;
+			const bool meetsMinPercent = primerVariantMinFraction_ <= 0.f || fraction >= primerVariantMinFraction_;
+			report << variant.first.first << '\t' << variant.first.second << '\t' << variant.second << '\t' << fraction * 100.f
+				<< '\t' << (meetsMinCount ? "yes" : "no")
+				<< '\t' << (meetsMinPercent ? "yes" : "no")
+				<< '\t' << ((meetsMinCount && meetsMinPercent) ? "yes" : "no")
+				<< '\n';
+		}
+	};
+	writeSection("Forward", totalForwardMatches, forwardVariants);
+	writeSection("Reverse", totalReverseMatches, reverseVariants);
+}
+
 void Filters::printStats(ostream& give, string file, string outf, bool greenQualStats) {
     debugVerifyStats("printStats");
+	//TODO switch min_l to min_l_add
+	shared_ptr<collectstats> cst = collectStatistics[0];
+	shared_ptr<collectstats> cst2 = collectStatistics[1];
+	if (cst2->total != cst->total) {
+		//cerr << "Unequal read numbers recorded " << cst->total << "," << cst2->total << endl;
+	}
+	if (!greenQualStats) {
+		cst = statAddition[0];
+	}
+	bool p2stat = pairedSeq > 1 && greenQualStats;
+	constexpr int metricColumnWidth = 50;
+	constexpr int countColumnWidth = 20;
+	auto printSection = [&give, p2stat, metricColumnWidth, countColumnWidth](const string& title) {
+		give << "\n";
+		if (p2stat) {
+			give << left << setw(metricColumnWidth + 2) << (title + ":")
+				<< right << setw(countColumnWidth) << "Read 1"
+				<< setw(countColumnWidth) << "Read 2\n";
+		}
+		else {
+			give << title << ":\n";
+		}
+	};
+	auto printCountRow = [&give, p2stat, metricColumnWidth, countColumnWidth](const string& label, unsigned int read1, unsigned int read2 = 0) {
+		give << "  " << left << setw(metricColumnWidth) << (label + ":")
+			<< right << setw(countColumnWidth) << intwithcommas((int)read1);
+		if (p2stat) {
+			give << setw(countColumnWidth) << intwithcommas((int)read2);
+		}
+		give << '\n';
+	};
+	auto formatCountPct = [](unsigned int value, unsigned int total) {
+		ostringstream formatted;
+		formatted << intwithcommas((int)value);
+		const double pct = total == 0 ? 0.0 : (100.0 * static_cast<double>(value) / static_cast<double>(total));
+		formatted << " (" << fixed << setprecision(1) << pct << "%)";
+		return formatted.str();
+	};
+	auto formatLengthImpact = [](double preLength, double postLength, unsigned long preCount, unsigned long postCount) {
+		if (preCount == 0 || postCount == 0) {
+			return string("n/a");
+		}
+		ostringstream formatted;
+		formatted << fixed << setprecision(1) << preLength << "->" << postLength << " (";
+		const double delta = postLength - preLength;
+		if (delta >= 0.0) {
+			formatted << "+";
+		}
+		formatted << delta << " bp)";
+		return formatted.str();
+	};
+	auto printPercentRow = [&give, p2stat, metricColumnWidth, countColumnWidth, &formatCountPct](
+		const string& label,
+		unsigned int read1, unsigned int total1,
+		unsigned int read2 = 0, unsigned int total2 = 0) {
+		give << "  " << left << setw(metricColumnWidth) << (label + ":")
+			<< right << setw(countColumnWidth) << formatCountPct(read1, total1);
+		if (p2stat) {
+			give << setw(countColumnWidth) << formatCountPct(read2, total2);
+		}
+		give << '\n';
+	};
+	auto printInfoRow = [&give, metricColumnWidth](const string& label) {
+		give << "  " << left << setw(metricColumnWidth) << label << '\n';
+	};
+	auto printValueRow = [&give, p2stat, metricColumnWidth, countColumnWidth](const string& label, const string& read1, const string& read2 = string()) {
+		give << "  " << left << setw(metricColumnWidth) << (label + ":")
+			<< right << setw(countColumnWidth) << read1;
+		if (p2stat) {
+			give << setw(countColumnWidth) << (read2.empty() ? "-" : read2);
+		}
+		give << '\n';
+	};
+	auto formatDecimal = [](float value) {
+		ostringstream formatted;
+		formatted << fixed << setprecision(2) << value;
+		return formatted.str();
+	};
+	auto sharedPrimerSequence = [](const vector<string>& primers) {
+		if (primers.empty() || primers.front().empty() || primers.front().front() == ' ') {
+			return string();
+		}
+		const string& sequence = primers.front();
+		for (const string& primer : primers) {
+			if (primer != sequence) {
+				return string();
+			}
+		}
+		return sequence;
+	};
+	const bool searchesPrimers = BcutPrimer || Bcheck4illuAdapts;
+	const bool searchesForwardPrimer = searchesPrimers && !PrimerL.empty() && !PrimerL.front().empty() && PrimerL.front().front() != ' ';
+	const bool searchesReversePrimer = searchesPrimers && bPrimerR && !PrimerR.empty() && !PrimerR.front().empty() && PrimerR.front().front() != ' ';
+	const string sharedForwardPrimer = searchesForwardPrimer ? sharedPrimerSequence(PrimerL) : string();
+	const string sharedReversePrimer = searchesReversePrimer ? sharedPrimerSequence(PrimerR) : string();
+	uint64_t fullLengthForwardPrimerMatches = 0;
+	uint64_t fullLengthReversePrimerMatches = 0;
+	{
+		lock_guard<mutex> lock(primerVariantTracker_->mutex);
+		fullLengthForwardPrimerMatches = primerVariantTracker_->totalForwardMatches;
+		fullLengthReversePrimerMatches = primerVariantTracker_->totalReverseMatches;
+	}
+	const unsigned int totalReads1 = cst->total;
+	const unsigned int totalReads2 = p2stat ? static_cast<unsigned int>(cst2->total) : 0;
+	give << "sdm " << sdm_version << " " << sdm_status << endl;
+	if (file.length() > 0) {
+		give << "Input File:  " << file << endl;
+	}
+	if (outf == "-") {
+		give << "Output File: stdout\n";
+	}
+	else if (outf.length() > 0) {
+		give << "Output File: " << outf << endl;
+	}
+	if (!b_doFilter) {
+		give << "No valid Filter file provided; no filtering done on files\n";
+		return;
+	}
+	/*if (!greenQualStats) {
+		give << "Statistics of reads that passed the mid qual filter\n";
+	} else {
+		give << "Statistics of high quality reads\n";
+	}*/
+	float remSeqs = float(cst->total - cst->totalRejected);
+	string ReadTag = "Reads";
+	if (isGoldAxe()) { ReadTag = "(Sub)Reads"; }
+
+	printSection("Processing summary");
+	if (!greenQualStats) {
+		printCountRow(ReadTag + " not meeting high-quality criteria", cst->totalRejected);
+	}
+	else {
+		printCountRow("Reads processed", cst->total, cst2->total);
+	}
+	if (cst->reversedRds > 0 || cst->swappedRds > 0) {
+		if (cst->reversedRds > 0) {
+			printCountRow("Reads reverse-complemented", cst->reversedRds, cst2->reversedRds);
+		}
+		if (cst->swappedRds > 0) {
+			printCountRow("Read pairs swapped", cst->swappedRds);
+		}
+	}
+
+	//int numAccept = (int)(cst->total - cst->totalRejected);
+	int numAccept = (int)(cst->totalSuccess - cst->totalMid);
+	int numMid = (int)cst->totalMid;
+	if (!greenQualStats) {
+		printPercentRow("Rejected", cst->totalRejected, totalReads1);
+		printPercentRow("Accepted (high quality)", numAccept, totalReads1);
+		printPercentRow("Accepted (mid quality)", numMid, totalReads1);
+		printPercentRow("Reads trimmed at the end", cst->Trimmed, totalReads1);
+	}
+	else {
+		int numMid2 = (int)cst2->totalMid;
+		int numAccept2 = int(cst2->totalSuccess - cst2->totalMid);
+		printPercentRow("Rejected", cst->totalRejected, totalReads1, cst2->totalRejected, totalReads2);
+		printPercentRow("Accepted (high quality)", numAccept, totalReads1, numAccept2, totalReads2);
+		printPercentRow("Accepted (mid quality)", numMid, totalReads1, numMid2, totalReads2);
+		printPercentRow("Reads trimmed at the end", cst->Trimmed, totalReads1, cst2->Trimmed, totalReads2);
+	}
+
+
+	if (false && bPrimerR) { //confusing collectStatistics
+		give << ", with rev. primer: " << intwithcommas((int)cst->RevPrimFound); if (p2stat) { give << "; " << intwithcommas((int)cst2->RevPrimFound); }
+	}
+
+	if (pairedSeq > 1) {
+		printCountRow("Recovered singleton reads", cst->singleton, cst2->singleton);
+	}
+	printCountRow("Low-quality reads recovered (dereplication)", cst->DerepAddBadSeq);
+/*	printSection("Filter diagnostics");
+	printPercentRow("Alt-threshold rescue: accum. error", cst->altRescueAccumError, totalReads1, cst2->altRescueAccumError, totalReads2);
+	printPercentRow("Alt-threshold rescue: avg quality", cst->altRescueQuality, totalReads1, cst2->altRescueQuality, totalReads2);
+	printPercentRow("Alt-threshold rescue: ambiguous bases", cst->altRescueAmbiguousBases, totalReads1, cst2->altRescueAmbiguousBases, totalReads2);
+	printPercentRow("Reads with multiple fail reasons", cst->multiFailReads, totalReads1, cst2->multiFailReads, totalReads2);
+	if (p2stat) {
+		printPercentRow("Primer search succeeded (forward)", cst->primerSearchSucceededFwdRead1, totalReads1, cst2->primerSearchSucceededFwdRead2, totalReads2);
+		printPercentRow("Primer search succeeded (reverse)", cst->primerSearchSucceededRevRead1, totalReads1, cst2->primerSearchSucceededRevRead2, totalReads2);
+	}
+	else {
+		printPercentRow("Primer search succeeded (forward)", cst->primerSearchSucceededFwdRead1, totalReads1);
+		printPercentRow("Primer search succeeded (reverse)", cst->primerSearchSucceededRevRead1, totalReads1);
+	}
+	*/
+	if (p2stat) {
+		const unsigned int totalPairs = std::min(totalReads1, totalReads2);
+		const unsigned int minAcceptedPairs = std::min(static_cast<unsigned int>(cst->totalSuccess), static_cast<unsigned int>(cst2->totalSuccess));
+		const unsigned int acceptedImbalance = cst->totalSuccess >= cst2->totalSuccess
+			? static_cast<unsigned int>(cst->totalSuccess - cst2->totalSuccess)
+			: static_cast<unsigned int>(cst2->totalSuccess - cst->totalSuccess);
+		printSection("Paired-read consistency");
+		printValueRow("Minimum pairs with both reads accepted", formatCountPct(minAcceptedPairs, totalPairs), "n/a");
+		printValueRow("Accepted-read imbalance |R1-R2|", formatCountPct(acceptedImbalance, totalPairs), "n/a");
+	}
+
+	if (bShortAmplicons) {
+		give << "  Short-amplicon mode enabled.\n";
+	}
+	if (checkSwitchedRdPairs()) {
+		//give << "Looked for switched read pairs (" << intwithcommas(revConstellationN) << " detected)" << endl;
+	}
+	if (greenQualStats) {
+		printSection("Post-filter read characteristics");
+		cst->PostFilt.printStats2(give, remSeqs, 0);
+		collectStatistics[1]->PostFilt.printStats2(give, remSeqs, 1);
+	}
+	else {
+		printSection("Additional-output read characteristics");
+		statAddition[0]->PostFilt.printStats2(give, remSeqs, 0);
+	}
+	const ReportStats& preStats1 = greenQualStats ? cst->PreFilt : collectStatistics[0]->PreFilt;
+	const ReportStats& postStats1 = cst->PostFilt;
+	string read2TrimImpact = "n/a";
+	if (p2stat) {
+		const ReportStats& preStats2 = cst2->PreFilt;
+		const ReportStats& postStats2 = cst2->PostFilt;
+		read2TrimImpact = formatLengthImpact(preStats2.meanReadLength(), postStats2.meanReadLength(), preStats2.readCount(), postStats2.readCount());
+	}
+//	printSection("Trim impact summary");
+//	printValueRow("Mean read length pre->post",
+//		formatLengthImpact(preStats1.meanReadLength(), postStats1.meanReadLength(), preStats1.readCount(), postStats1.readCount()),
+//		read2TrimImpact);
+
+	printSection("End trimming");
+	float dval = (float)EWthr;	if (!greenQualStats) { dval = (float)alt_EWthr; }
+	int Xval = EWwidth;
+	if (dval > 0) {
+		printPercentRow("Quality < " + formatDecimal(dval) + " in " + to_string(Xval) + " bp window", cst->QWinTrimmed, totalReads1, cst2->QWinTrimmed, totalReads2);
+	}
+	dval = (float)maxAccumQP;	if (!greenQualStats) { dval = (float)alt_maxAccumQP; }
+	if (dval > 0.0) {
+		printPercentRow("Accumulated errors > " + formatDecimal(dval), cst->AccErrTrimmed, totalReads1, cst2->AccErrTrimmed, totalReads2);
+	}
+	if (trimHomonucleotide_ > 0 || cst->HomoNTtrimmed > 0) {
+		printPercentRow("Trailing homopolymer >= " + to_string(trimHomonucleotide_) + " nt", cst->HomoNTtrimmed, totalReads1, cst2->HomoNTtrimmed, totalReads2);
+	}
+
+	printSection("Rejection reasons");
+	float val = (float)min_l;
+	if (val == -1.f) { val = min_l_p; }
+	if (!greenQualStats) { val = (float)alt_min_l; }
+
+	printPercentRow("Sequence length below " + formatDecimal(val) + " bp", cst->minL, totalReads1, cst2->minL, totalReads2);
+	if (cst->minLqualTrim > 0) {//this is failed because seq was too short after trimming
+		printPercentRow("Includes: too short after quality trimming", cst->minLqualTrim, totalReads1, cst2->minLqualTrim, totalReads2);
+	}
+	float valf = min_q;	if (!greenQualStats) { valf = alt_min_q; }
+	printPercentRow("Average quality below " + formatDecimal(valf), cst->AvgQual, totalReads1, cst2->AvgQual, totalReads2);
+	printPercentRow("Quality < " + formatDecimal(FQWthr) + " in " + to_string(FQWwidth) + " nt window", cst->QualWin, totalReads1, cst2->QualWin, totalReads2);
+	printPercentRow("Sequence length above " + to_string(max_l) + " bp", cst->maxL, totalReads1, cst2->maxL, totalReads2);
+	printPercentRow("Homopolymer run above " + to_string(maxHomonucleotide_) + " nt", cst->HomoNT, totalReads1, cst2->HomoNT, totalReads2);
+	int val2 = MaxAmb;	if (!greenQualStats) { val2 = alt_MaxAmb; }
+	printPercentRow("Ambiguous bases above " + to_string(val2), cst->MaxAmb, totalReads1, cst2->MaxAmb, totalReads2);
+	if (BinFilP >= 0.f) {
+		printPercentRow("Binomial estimated errors > " + formatDecimal(BinFilErr), cst->BinomialErr, totalReads1, cst2->BinomialErr, totalReads2);
+	}
+	if ((removeAdapter && tAdapter != "") || bDoMultiplexing || searchesForwardPrimer || searchesReversePrimer) {
+		printSection("Primer, adapter, and barcode processing");
+	}
+	if (removeAdapter && tAdapter != "") {
+		printPercentRow("Adapter removed", cst->adapterRem, totalReads1, cst2->adapterRem, totalReads2);
+		printInfoRow("Adapter sequence: " + tAdapter);
+	}
+	if (searchesForwardPrimer) {
+		//printPercentRow("Forward primer missing (<= " + to_string(PrimerErrs) + " mismatches)", cst->PrimerFail, totalReads1, cst2->PrimerFail, totalReads2);
+		if (!sharedForwardPrimer.empty()) {
+			printInfoRow("Forward primer sequence: " + sharedForwardPrimer);
+		}
+		const unsigned int forwardDetectedRead1 = fullLengthForwardPrimerMatches > static_cast<uint64_t>(UINT_MAX)
+			? UINT_MAX
+			: static_cast<unsigned int>(fullLengthForwardPrimerMatches);
+		if (p2stat) {
+			printValueRow("Forward primer detected (<= " + to_string(PrimerErrs) + " mismatches)", formatCountPct(forwardDetectedRead1, totalReads1), "n/a");
+		}
+		else {
+			printPercentRow("Forward primer detected (<= " + to_string(PrimerErrs) + " mismatches)", forwardDetectedRead1, totalReads1);
+		}
+	
+	}
+	if (searchesReversePrimer) {
+		//printPercentRow("Reverse primer missing (<= " + to_string(PrimerErrs) + " mismatches)", cst->PrimerRevFail, totalReads1, cst2->PrimerRevFail, totalReads2);
+		if (!sharedReversePrimer.empty()) {
+			printInfoRow("Reverse primer sequence: " + sharedReversePrimer);
+		}
+		if (p2stat) {
+			const unsigned int reverseDetectedRead2 = totalReads2 >= cst2->PrimerRevFail ? totalReads2 - cst2->PrimerRevFail : 0;
+			printValueRow("Reverse primer detected (<= " + to_string(PrimerErrs) + " mismatches)", "n/a", formatCountPct(reverseDetectedRead2, totalReads2));
+		}
+		else {
+			const unsigned int reverseDetectedRead1 = totalReads1 >= cst->PrimerRevFail ? totalReads1 - cst->PrimerRevFail : 0;
+			printPercentRow("Reverse primer detected (<= " + to_string(PrimerErrs) + " mismatches)", reverseDetectedRead1, totalReads1);
+		}
+	}	
+	if (greenQualStats && primerVariantMinCount_ > 0 && primerVariantMinFraction_ > 0.f) {
+		uint64_t totalForwardMatches = 0;
+		uint64_t totalReverseMatches = 0;
+		map<pair<string, string>, uint64_t> forwardVariants;
+		map<pair<string, string>, uint64_t> reverseVariants;
+		{
+			lock_guard<mutex> lock(primerVariantTracker_->mutex);
+			totalForwardMatches = primerVariantTracker_->totalForwardMatches;
+			totalReverseMatches = primerVariantTracker_->totalReverseMatches;
+			forwardVariants = primerVariantTracker_->forwardVariants;
+			reverseVariants = primerVariantTracker_->reverseVariants;
+		}
+		const float warningFraction = primerVariantWarningFraction_;
+		auto printWarnings = [&give, warningFraction](const string& label, uint64_t totalMatches,
+			const map<pair<string, string>, uint64_t>& variants) {
+			if (totalMatches > 0) {
+				for (const auto& variant : variants) {
+				float fraction = static_cast<float>(variant.second) / static_cast<float>(totalMatches);
+				if (fraction >= warningFraction) {
+					ostringstream variantWarning;
+					variantWarning << std::fixed << std::setprecision(1) << fraction * 100.f;
+					give << "WARNING: " << label << " primer variant expected primer '" << variant.first.first
+						<< "' observed as '" << variant.first.second
+						<< "' occurred " << variant.second << " times ("
+						<< variantWarning.str() << "% of " << totalMatches
+						<< " full-length primer matches).\n";
+				}
+			}
+			}
+		};
+		printWarnings("Forward", totalForwardMatches, forwardVariants);
+		printWarnings("Reverse", totalReverseMatches, reverseVariants);
+	}
+
+	if (bDoMultiplexing) {
+		if (bDoBarcode) {
+			printPercentRow("Barcode not identified (<= " + to_string(barcodeErrors_) + " errors)", cst->TagFail, totalReads1, cst2->TagFail, totalReads2);
+			if (doubleBarcodes()) {
+				printPercentRow("Read pairs with both barcodes missing", cst->dblTagFail, totalReads1);
+			}
+
+			if (barcodeErrors_ > 0) {
+				printPercentRow("Barcodes corrected", cst->suc_correct_BC, totalReads1, cst2->suc_correct_BC, totalReads2);
+			}
+
+			if (bDoBarcode2) {
+				string barcodeMode = "Dual-index barcodes enabled";
+				if (BCdFWDREV[0].reversedBCs || BCdFWDREV[1].reversedBCs) {
+					barcodeMode += " (reversed ";
+					if (BCdFWDREV[1].reversedBCs && BCdFWDREV[0].reversedBCs) {
+						barcodeMode += "fwd & rev";
+					}
+					else	if (BCdFWDREV[0].reversedBCs) {
+						barcodeMode += "fwd";
+					}
+					else	if (BCdFWDREV[1].reversedBCs) {
+						barcodeMode += "rev";
+					}
+					barcodeMode += " barcodes)";
+				}
+				printInfoRow(barcodeMode);
+			}
+			else if (BCdFWDREV[0].reversedBCs) {
+				printInfoRow("All barcodes reversed");
+			}
+
+
+		}
+		else if (bDoHeadSmplID) {
+			printPercentRow("Header-tag assignment failed", cst->BarcodeDetectedFail.empty() ? 0 : std::accumulate(cst->BarcodeDetectedFail.begin(), cst->BarcodeDetectedFail.end(), 0), totalReads1,
+				cst2->BarcodeDetectedFail.empty() ? 0 : std::accumulate(cst2->BarcodeDetectedFail.begin(), cst2->BarcodeDetectedFail.end(), 0), totalReads2);
+		}
+	}
+
+
+
+	if (isGoldAxe()) {
+		GAstatistics->setBCs(SampleID, Barcode, Barcode2);
+		GAstatistics->printSummary(give);
+		//GAstatistics->printBCtabs(give);
+	}
+
+	mergeStats->print(give);
+
+
+	if (bDoMultiplexing) {
+		constexpr int sampleIdWidth = 20;
+		constexpr int sampleGroupWidth = 20;
+		constexpr int barcodeWidth = 18;
+		constexpr int inputFileWidth = 30;
+		constexpr int assignedReadsWidth = 16;
+
+		if (bDoBarcode && Barcode.size() > 0 && Barcode[0] != "") {
+			//printSection("Per-sample assignments");
+			give << "\nPer-sample assignments:\n";
+			give << "  " << left << setw(sampleIdWidth) << "Sample ID";
+			if (bDoCombiSamples) {
+				give << left << setw(sampleGroupWidth) << "Sample group";
+			}
+			give << left << setw(barcodeWidth) << "Barcode";
+			if (bDoBarcode2) { give << left << setw(barcodeWidth) << "Barcode2"; }
+			give << right << setw(assignedReadsWidth) << "Instances\n";
+			for (unsigned int i = 0; i < Barcode.size(); i++) {
+				give << "  " << left << setw(sampleIdWidth) << SampleID[i];
+				if (bDoCombiSamples) { give << left << setw(sampleGroupWidth) << SampleID_Combi[i]; }
+				give << left << setw(barcodeWidth) << Barcode[i];
+				if (bDoBarcode2) {
+					give << left << setw(barcodeWidth) << Barcode2[i];
+				}
+				give << right << setw(assignedReadsWidth) << intwithcommas((int)cst->BarcodeDetected[i]) << endl;
+			}
+
+		}
+		else if (bDoHeadSmplID) {
+			give << "\nPer-sample assignments:\n";
+			give << "  " << left << setw(sampleIdWidth) << "Sample ID";
+			if (bDoCombiSamples) { give << left << setw(sampleGroupWidth) << "Sample group"; }
+			give << left << setw(barcodeWidth) << "Header tag"
+				<< right << setw(assignedReadsWidth) << "Instances\n";
+			for (unsigned int i = 0; i < Barcode.size(); i++) {
+				give << "  " << left << setw(sampleIdWidth) << SampleID[i];
+				if (bDoCombiSamples) { give << left << setw(sampleGroupWidth) << SampleID_Combi[i]; }
+				give << left << setw(barcodeWidth) << HeadSmplID[i]
+					<< right << setw(assignedReadsWidth) << intwithcommas((int)cst->BarcodeDetected[i]) << endl;
+			}
+		}
+		else {
+			give << "\nPer-sample assignments:\n";
+			give << "  " << left << setw(sampleIdWidth) << "Sample ID";
+			if (bDoCombiSamples) { give << left << setw(sampleGroupWidth) << "Sample group"; }
+			give << left << setw(inputFileWidth) << "Input file (Read 1)" ;
+			give << right << setw(assignedReadsWidth) << "Instances" << '\n';
+			for (unsigned int i = 0; i < SampleID.size(); i++) {
+				string read1File;
+				if (i < FastqF.size() && !FastqF[i].empty()) {
+					read1File = FastqF[i];
+				}
+				else if (i < FastaF.size() && !FastaF[i].empty()) {
+					read1File = FastaF[i];
+				}
+				else {
+					read1File = "(not assigned)";
+				}
+				if (read1File != "(not assigned)") {
+					size_t separatorPos = read1File.find_last_of("/\\");
+					if (separatorPos != string::npos) {
+						read1File = read1File.substr(separatorPos + 1);
+					}
+					separatorPos = read1File.find_first_of(",");
+					if (separatorPos != string::npos) {
+						read1File = read1File.substr(0,separatorPos);
+					}
+
+				}
+				give << "  " << left << setw(sampleIdWidth) << SampleID[i];
+				if (bDoCombiSamples) { give << left << setw(sampleGroupWidth) << SampleID_Combi[i]; }
+				give << left << setw(inputFileWidth) << read1File ;
+				give << right << setw(assignedReadsWidth) << intwithcommas((int)cst->BarcodeDetected[i]) << endl;
+			}
+		}
+	}
+
+}
+
+
+void Filters::printStats_old(ostream& give, string file, string outf, bool greenQualStats) {
+	debugVerifyStats("printStats");
 	//TODO switch min_l to min_l_add
 	shared_ptr<collectstats> cst = collectStatistics[0];
 	shared_ptr<collectstats> cst2 = collectStatistics[1];
@@ -3599,6 +4351,39 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 		if (p2stat) { give << "; " << intwithcommas((int)cst2->PrimerFail) << endl; }
 		else { give << endl; }
 	}
+	if (greenQualStats && primerVariantMinCount_ > 0 && primerVariantMinFraction_ > 0.f) {
+		uint64_t totalForwardMatches = 0;
+		uint64_t totalReverseMatches = 0;
+		map<pair<string, string>, uint64_t> forwardVariants;
+		map<pair<string, string>, uint64_t> reverseVariants;
+		{
+			lock_guard<mutex> lock(primerVariantTracker_->mutex);
+			totalForwardMatches = primerVariantTracker_->totalForwardMatches;
+			totalReverseMatches = primerVariantTracker_->totalReverseMatches;
+			forwardVariants = primerVariantTracker_->forwardVariants;
+			reverseVariants = primerVariantTracker_->reverseVariants;
+		}
+		const float warningFraction = primerVariantWarningFraction_;
+		auto printWarnings = [&give, warningFraction](const string& label, uint64_t totalMatches,
+			const map<pair<string, string>, uint64_t>& variants) {
+			if (totalMatches > 0) {
+				for (const auto& variant : variants) {
+					float fraction = static_cast<float>(variant.second) / static_cast<float>(totalMatches);
+					if (fraction >= warningFraction) {
+					ostringstream variantWarning;
+					variantWarning << std::fixed << std::setprecision(1) << fraction * 100.f;
+					give << "WARNING: " << label << " primer variant expected primer '" << variant.first.first
+						<< "' observed as '" << variant.first.second
+						<< "' occurred " << variant.second << " times ("
+						<< variantWarning.str() << "% of " << totalMatches
+						<< " full-length primer matches).\n";
+				}
+			}
+			}
+		};
+		printWarnings("Forward", totalForwardMatches, forwardVariants);
+		printWarnings("Reverse", totalReverseMatches, reverseVariants);
+	}
 	if (bPrimerR) {
 		give << "  -With rev Primer remaining (<= " << PrimerErrs << " mismatches";
 		if ((!greenQualStats && alt_bRequireRevPrim) || bRequireRevPrim) {
@@ -3698,6 +4483,7 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 	}
 
 }
+
 
 //statistics for each single sample 
 void Filters::SmplSpecStats(ostream& give) {

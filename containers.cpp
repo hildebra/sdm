@@ -2047,7 +2047,7 @@ void UClinks::besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn
 	}
 	//general routine, matching tdn found
 	if (bestDNA[curCLID] == NULL) { //just fill with current DNA
-		if (fil->doReversePrimers() && !fil->checkYellowAndGreen(tdn1, CurSetPair, TagIdx, true)) {
+		if (fil->doReversePrimers() && !fil->checkYellowAndGreen(tdn1, CurSetPair, TagIdx, true, Filters::FilteringContext::Seeding)) {
 			return;//delete dnaTemp1;
 		}
 		shared_ptr< betterSeedStruct> tmpDNAst = make_shared<betterSeedStruct>(tdn1);

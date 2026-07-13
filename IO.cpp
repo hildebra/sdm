@@ -1195,6 +1195,11 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
     log.open(files.logF.c_str(), ios_base::out);
     mainFilter->printStats(log, mainFile, outFile, true);
     log.close();
+	string primerVariantReport = files.logF.substr(0, files.logF.length() - 3) + "primerVars.txt";
+#ifdef _gzipread
+	primerVariantReport += ".gz";
+#endif
+	mainFilter->writePrimerVariantReport(primerVariantReport);
 
     string logFs = files.logF.substr(0, files.logF.length() - 3) + "acceptsPerFile.log";
     log.open(logFs.c_str(), ios_base::out);
@@ -1465,6 +1470,13 @@ void printOptionHelp(){
 	helpOptionFile += "# sequence in output, or 0 to remove it.\n";
 	helpOptionFile += "maxBarcodeErrs\t0\n";
 	helpOptionFile += "maxPrimerErrs\t1\n";
+	helpOptionFile += "# Optional primer-variant warnings. Reporting is disabled while\n";
+	helpOptionFile += "# PrimerVariantMinCount is 0. Variants are substitutions only.\n";
+	helpOptionFile += "PrimerVariantMaxMismatches\t3\n";
+	helpOptionFile += "PrimerVariantMinCount\t0\n";
+	helpOptionFile += "PrimerVariantMinPercent\t1\n";
+	helpOptionFile += "# Warn in the main log when one variant reaches this percentage.\n";
+	helpOptionFile += "PrimerVariantWarningPercent\t50\n";
 	helpOptionFile += "keepBarcodeSeq\t0\n";
 	helpOptionFile += "keepPrimerSeq\t0\n";
 	helpOptionFile += "ExtensivePrimerChecks\tF\n";

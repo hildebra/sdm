@@ -162,7 +162,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.36: potential fix for missing writing out a derep file, tuned whoisBetter() weights
 //3.37: 13.6.26: new optContainer class, which allows for more flexible command line argument parsing and option file handling. Also added support for additional output formats and improved error handling.
 //3.38: 7.9.26: updated help text.
-static const char* sdm_version = "3.38";
+//3.39: 10.7.26: start logging common primer variants, through options PrimerVariantMaxMismatches, PrimerVariantMinCount, PrimerVariantMinPercent, PrimerVariantWarningPercent	
+//3.40: 11.7.26: Clearer output of statistics 
+
+static const char* sdm_version = "3.40";
 static const char* sdm_status = "beta";
 
 

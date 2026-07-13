@@ -727,6 +727,23 @@ bool DNA::cutSeq(int start, int stop, bool pseudo) {
 	return true;
 }
 
+DNA::PrimerMatchDetails DNA::getPrimerMatchDetails(const string& primer, int start) const {
+	PrimerMatchDetails details;
+	details.start = start;
+	if (start < 0 || static_cast<size_t>(start) + primer.length() > sequence_length_) {
+		return details;
+	}
+
+	details.fullLength = true;
+	details.observed = sequence_.substr(start, primer.length());
+	for (size_t i = 0; i < primer.length(); ++i) {
+		if (DNA_IUPAC[sequence_[start + i] + 256 * primer[i]] != 0) {
+			++details.mismatches;
+		}
+	}
+	return details;
+}
+
 int DNA::matchSeq(std::string PrSt, int Err, int searchSpace, int startPos, bool exhaustive) {
 	//const char* DN = sequence_.c_str();
 	//const char* Pr = PrSt.c_str();

@@ -208,6 +208,13 @@ public:
     bool cutSeqPseudo(int start) { return cutSeq(start, -1, true); }
     bool HomoNTRuns(int);
     int HomoNTTrim(int);
+    struct PrimerMatchDetails {
+        int start = -1;
+        int mismatches = 0;
+        bool fullLength = false;
+        string observed;
+    };
+    PrimerMatchDetails getPrimerMatchDetails(const string& primer, int start) const;
     int matchSeq(string, int Err, int searchSpace, int startPos, bool exhaustive = false);
     void reverse_compliment(bool reset = true);
     int matchSeqRev(const string&, int Err, int searchSpace, int start = 0, bool = false);

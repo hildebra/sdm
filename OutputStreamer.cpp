@@ -801,7 +801,7 @@ void OutputStreamer::analyzeDNA(const shared_ptr<DNA>& d, int FilterUse, int pai
 	}
 
 	//pricipally safe to call from thread
-	curFil->checkYellowAndGreen(d, pair, idx, false);
+	curFil->checkYellowAndGreen(d, pair, idx, false, Filters::FilteringContext::FinalFiltering);
 
 	//bit redundant.. but better safe than sorry
 	if (!curFil->secondaryOutput() && d->isYellowQual() && !d->isGreenQual()) {

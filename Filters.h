@@ -3,8 +3,23 @@
 //#include "InputStream.h"
 #include "containers.h"
 #include "Statistics.h"
+#include <set>
+#include <tuple>
 
 class Filters;
+
+struct PrimerVariantTracker {
+	enum class PrimerDirection { Forward, Reverse };
+	std::mutex mutex;
+	uint64_t totalForwardMatches = 0;
+	uint64_t totalReverseMatches = 0;
+	std::map<std::pair<std::string, std::string>, uint64_t> forwardVariants;
+	std::map<std::pair<std::string, std::string>, uint64_t> reverseVariants;
+	std::set<std::pair<std::string, PrimerDirection>> recordedMatches;
+
+	bool record(const std::string& readIdentity, int start, PrimerDirection direction,
+		const std::string& expected, const std::string& observed, bool isVariant);
+};
 
 inline std::vector<std::string> get_stats_invariant_warnings(const collectstats& stats, const std::string& label) {
 	std::vector<std::string> warnings;
@@ -25,6 +40,11 @@ inline std::vector<std::string> get_stats_invariant_warnings(const collectstats&
 //class Filters does the main demultiplexing of raw DNA/QUAL data
 class Filters : public std::enable_shared_from_this<Filters> {
 public:
+	enum class FilteringContext {
+		Seeding,
+		FinalFiltering
+	};
+
 	Filters(OptContainer*);
 	Filters(Filters* of, int, bool = false, size_t threads = 1);
 	//Filters(Filters* of, int, bool = false, size_t threads=1);
@@ -43,7 +63,7 @@ public:
 	//pair_:-1: no Pair-sequence_, 0,1=pair_ 1/2 (assumes MID BC)
 	//doSeeding: extract longes Seed //false, -1, -2
 	//bool check(shared_ptr<DNA> in, bool doSeeding, int pair, int &tagIdx);// , bool checkBC = true);
-  bool checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre, int& tagIdx, bool doSeeding);
+  bool checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre, int& tagIdx, bool doSeeding, FilteringContext filteringContext);
 	//vector<bool> check_pairs(shared_ptr<DNA>p1, shared_ptr<DNA>p2, shared_ptr<DNA>mid, vector<bool>, bool changePHead);
 	void setSeqLength(float minL, int maxL);
 	void setMaxAmb(int x) { MaxAmb = x; };
@@ -180,6 +200,8 @@ public:
 		return collectStatistics[0]->total;
 	}
 	void printStats(ostream&, string, string, bool);
+	void printStats_old(ostream&, string, string, bool);
+	void writePrimerVariantReport(const string& filename) const;
 	void printGC(ostream&, int);
 	string shortStats(const string&);
 	void SmplSpecStats(ostream&);
@@ -304,6 +326,8 @@ protected:
 	}
 	bool cutPrimer(shared_ptr<DNA> d, int primerID, bool&, int, bool = false);
 	bool cutPrimerRev(shared_ptr<DNA> d, int primerID, bool&, bool = false);
+	void recordPrimerVariant(const shared_ptr<DNA>& d, const string& primer, int start, bool reverseComplement,
+		PrimerVariantTracker::PrimerDirection direction);
 
 
 
@@ -379,6 +403,11 @@ protected:
 	unsigned int minPrimerLength_, maxHomonucleotide_, trimHomonucleotide_;
 	uint cut5PR1, cut5PR2;
 	int PrimerErrs, alt_PrimerErrs, barcodeErrors_, MaxAmb, alt_MaxAmb;//allowed max errs per Primer, Tag; max Ambigous Chars(not ACGT)
+	int primerVariantMaxMismatches_;
+	uint primerVariantMinCount_;
+	float primerVariantMinFraction_;
+	float primerVariantWarningFraction_;
+	shared_ptr<PrimerVariantTracker> primerVariantTracker_;
 	int FQWwidth, EWwidth; //Floating window width for avg quality
 	int RevPrimSeedL; // seed length of primer that will be searched for
 	bool b_BinFilBothPairs;

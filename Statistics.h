@@ -132,6 +132,10 @@ public:
     void printStats2(ostream& give, float remSeqs, int pair);
     void printGCstats(ostream& give);
     void printLvsQ(ostream& give);
+    double meanReadLength() const {
+        return rstat_totReads == 0 ? 0.0 : static_cast<double>(rstat_NTs) / static_cast<double>(rstat_totReads);
+    }
+    unsigned long readCount() const { return rstat_totReads; }
     void addRepStats(ReportStats&);
     bool bMedianCalcs;
     bool bLvsQlogs;
@@ -174,6 +178,10 @@ public:
         DerepAddBadSeq(0), BinomialErr(0),
         dblTagFail(0),
         reversedRds(0), swappedRds(0),
+        altRescueAccumError(0), altRescueQuality(0), altRescueAmbiguousBases(0),
+        primerSearchSucceededFwdRead1(0), primerSearchSucceededFwdRead2(0),
+        primerSearchSucceededRevRead1(0), primerSearchSucceededRevRead2(0),
+        multiFailReads(0),
         singleton(0), BarcodeDetected(0), BarcodeDetectedFail(0),
         PostFilt(ReportStats()), PreFilt(ReportStats())
     {
@@ -212,6 +220,14 @@ public:
     //swapping/reversing reads
     uint reversedRds;
     uint swappedRds;
+    unsigned int altRescueAccumError;
+    unsigned int altRescueQuality;
+    unsigned int altRescueAmbiguousBases;
+    unsigned int primerSearchSucceededFwdRead1;
+    unsigned int primerSearchSucceededFwdRead2;
+    unsigned int primerSearchSucceededRevRead1;
+    unsigned int primerSearchSucceededRevRead2;
+    unsigned int multiFailReads;
     //recovered singletons within pairs
     unsigned int singleton;
     vector<int> BarcodeDetected;

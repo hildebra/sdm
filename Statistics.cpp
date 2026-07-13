@@ -143,6 +143,14 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx) {
     total2.fetch_add(cs->total2.load(std::memory_order_relaxed), std::memory_order_relaxed);
     totalSuccess += cs->totalSuccess;
     swappedRds += cs->swappedRds; reversedRds += cs->reversedRds;
+    altRescueAccumError += cs->altRescueAccumError;
+    altRescueQuality += cs->altRescueQuality;
+    altRescueAmbiguousBases += cs->altRescueAmbiguousBases;
+    primerSearchSucceededFwdRead1 += cs->primerSearchSucceededFwdRead1;
+    primerSearchSucceededFwdRead2 += cs->primerSearchSucceededFwdRead2;
+    primerSearchSucceededRevRead1 += cs->primerSearchSucceededRevRead1;
+    primerSearchSucceededRevRead2 += cs->primerSearchSucceededRevRead2;
+    multiFailReads += cs->multiFailReads;
     PostFilt.addRepStats(cs->PostFilt);
     PreFilt.addRepStats(cs->PreFilt);
 
@@ -162,6 +170,10 @@ void collectstats::reset() {
     fail_correct_BC = 0; suc_correct_BC = 0; failedDNAread = 0;
     adapterRem = 0; RevPrimFound = 0; DerepAddBadSeq = 0;
     total2 = 0; totalSuccess = 0;
+    altRescueAccumError = 0; altRescueQuality = 0; altRescueAmbiguousBases = 0;
+    primerSearchSucceededFwdRead1 = 0; primerSearchSucceededFwdRead2 = 0;
+    primerSearchSucceededRevRead1 = 0; primerSearchSucceededRevRead2 = 0;
+    multiFailReads = 0;
 
     //reportStats
     PostFilt.reset(); PreFilt.reset();
