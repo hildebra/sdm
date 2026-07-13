@@ -8,6 +8,9 @@
 #include "DNAconsts.h"
 #include "InputStream.h"
 #include <atomic>
+#include <map>
+#include <mutex>
+#include <set>
 
 class Statistics {
 public:
@@ -79,6 +82,21 @@ public:
     void merge(Statistics &, vector<int> &idx);
     void reset();
     uint total2;
+};
+
+struct PrimerVariantTracker {
+    enum class PrimerDirection { Forward, Reverse };
+    std::mutex mutex;
+    uint64_t totalForwardMatches = 0;
+    uint64_t totalReverseMatches = 0;
+    std::map<std::pair<std::string, std::string>, uint64_t> forwardVariants;
+    std::map<std::pair<std::string, std::string>, uint64_t> reverseVariants;
+    std::set<std::pair<std::string, PrimerDirection>> recordedMatches;
+
+    bool record(const std::string& readIdentity, int start, PrimerDirection direction,
+        const std::string& expected, const std::string& observed, bool isVariant);
+    void mergeFrom(const PrimerVariantTracker& other);
+    void reset();
 };
 
 class MEstats {
@@ -241,6 +259,7 @@ public:
 
     ReportStats PostFilt;//green
     ReportStats PreFilt; //before filtering
+    PrimerVariantTracker primerVariants;
 };
 
 

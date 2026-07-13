@@ -8,30 +8,6 @@
 //*        FILTERS OBJECT
 //*******************************************
 
-bool PrimerVariantTracker::record(const std::string& readIdentity, int start, PrimerDirection direction,
-	const std::string& expected, const std::string& observed, bool isVariant) {
-	std::lock_guard<std::mutex> lock(mutex);
-	const auto match = std::make_pair(readIdentity, direction);
-	if (!recordedMatches.insert(match).second) {
-		return false;
-	}
-	if (direction == PrimerDirection::Reverse) {
-		++totalReverseMatches;
-	}
-	else {
-		++totalForwardMatches;
-	}
-	if (isVariant) {
-		if (direction == PrimerDirection::Reverse) {
-			++reverseVariants[std::make_pair(expected, observed)];
-		}
-		else {
-			++forwardVariants[std::make_pair(expected, observed)];
-		}
-	}
-	return true;
-}
-
 namespace {
 	enum class FailureReasonBit : uint32_t {
 		PrimerFwd = 1u << 0,
@@ -111,7 +87,6 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	PrimerErrs(0), alt_PrimerErrs(0), barcodeErrors_(0),
 	primerVariantMaxMismatches_(3), primerVariantMinCount_(0), primerVariantMinFraction_(0.f),
 	primerVariantWarningFraction_(0.5f),
-	primerVariantTracker_(make_shared<PrimerVariantTracker>()),
 	MaxAmb(-1), alt_MaxAmb(-1),
 	FQWwidth(0), EWwidth(0),
 	RevPrimSeedL(5),
@@ -703,7 +678,6 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	PrimerErrs(of->PrimerErrs), alt_PrimerErrs(of->alt_PrimerErrs), barcodeErrors_(of->barcodeErrors_),
 	primerVariantMaxMismatches_(of->primerVariantMaxMismatches_), primerVariantMinCount_(of->primerVariantMinCount_),
 	primerVariantMinFraction_(of->primerVariantMinFraction_), primerVariantWarningFraction_(of->primerVariantWarningFraction_),
-	primerVariantTracker_(of->primerVariantTracker_),
 	MaxAmb(of->MaxAmb), alt_MaxAmb(of->alt_MaxAmb),
 	FQWwidth(of->FQWwidth), EWwidth(of->EWwidth),
 	RevPrimSeedL(of->RevPrimSeedL),
@@ -2685,8 +2659,8 @@ void Filters::recordPrimerVariant(const shared_ptr<DNA>& d, const string& primer
 	if (reverseComplement) {
 		reverseTS(details.observed);
 	}
-		primerVariantTracker_->record(d->getPositionFreeId(), start, direction,
-			primer, details.observed, details.mismatches > 0);
+	collectStatistics[0]->primerVariants.record(d->getPositionFreeId(), start, direction,
+		primer, details.observed, details.mismatches > 0);
 }
 bool Filters::findPrimer(shared_ptr<DNA> d, int primerID, bool RC, int pair) {
 	//only adapted to singular BC
@@ -3668,11 +3642,11 @@ void Filters::writePrimerVariantReport(const string& filename) const {
 	map<pair<string, string>, uint64_t> forwardVariants;
 	map<pair<string, string>, uint64_t> reverseVariants;
 	{
-		lock_guard<mutex> lock(primerVariantTracker_->mutex);
-		totalForwardMatches = primerVariantTracker_->totalForwardMatches;
-		totalReverseMatches = primerVariantTracker_->totalReverseMatches;
-		forwardVariants = primerVariantTracker_->forwardVariants;
-		reverseVariants = primerVariantTracker_->reverseVariants;
+		lock_guard<mutex> lock(collectStatistics[0]->primerVariants.mutex);
+		totalForwardMatches = collectStatistics[0]->primerVariants.totalForwardMatches;
+		totalReverseMatches = collectStatistics[0]->primerVariants.totalReverseMatches;
+		forwardVariants = collectStatistics[0]->primerVariants.forwardVariants;
+		reverseVariants = collectStatistics[0]->primerVariants.reverseVariants;
 	}
 
 	#ifdef _gzipread
@@ -3693,7 +3667,7 @@ void Filters::writePrimerVariantReport(const string& filename) const {
 		const map<pair<string, string>, uint64_t>& variants) {
 		report << "\n[" << label << "]\n";
 		report << "# Full-length " << label << " primer matches observed: " << totalMatches << "\n";
-		report << "ExpectedPrimer\tObservedPrimer\tOccurrences\tPercentOfOrientationMatches\tMeetsMinCount\tMeetsMinPercent\tMeetsReportThreshold\n";
+		report << "ExpectedPrimer\tObservedPrimer\tOccurrences\tPercentOfOrientationMatches\n";
 	vector<pair<pair<string, string>, uint64_t>> allVariants(variants.begin(), variants.end());
 		sort(allVariants.begin(), allVariants.end(), [](const auto& left, const auto& right) {
 			if (left.second != right.second) {
@@ -3701,15 +3675,19 @@ void Filters::writePrimerVariantReport(const string& filename) const {
 			}
 			return left.first < right.first;
 		});
+		uint64_t reportedVariants = 0;
 		for (const auto& variant : allVariants) {
 			float fraction = totalMatches == 0 ? 0.f : static_cast<float>(variant.second) / static_cast<float>(totalMatches);
 			const bool meetsMinCount = primerVariantMinCount_ == 0 || variant.second >= primerVariantMinCount_;
 			const bool meetsMinPercent = primerVariantMinFraction_ <= 0.f || fraction >= primerVariantMinFraction_;
-			report << variant.first.first << '\t' << variant.first.second << '\t' << variant.second << '\t' << fraction * 100.f
-				<< '\t' << (meetsMinCount ? "yes" : "no")
-				<< '\t' << (meetsMinPercent ? "yes" : "no")
-				<< '\t' << ((meetsMinCount && meetsMinPercent) ? "yes" : "no")
-				<< '\n';
+			if (!(meetsMinCount && meetsMinPercent)) {
+				continue;
+			}
+			reportedVariants++;
+			report << variant.first.first << '\t' << variant.first.second << '\t' << variant.second << '\t' << fraction * 100.f << '\n';
+		}
+		if (reportedVariants == 0) {
+			report << "# No variants met report thresholds.\n";
 		}
 	};
 	writeSection("Forward", totalForwardMatches, forwardVariants);
@@ -3816,9 +3794,9 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 	uint64_t fullLengthForwardPrimerMatches = 0;
 	uint64_t fullLengthReversePrimerMatches = 0;
 	{
-		lock_guard<mutex> lock(primerVariantTracker_->mutex);
-		fullLengthForwardPrimerMatches = primerVariantTracker_->totalForwardMatches;
-		fullLengthReversePrimerMatches = primerVariantTracker_->totalReverseMatches;
+		lock_guard<mutex> lock(collectStatistics[0]->primerVariants.mutex);
+		fullLengthForwardPrimerMatches = collectStatistics[0]->primerVariants.totalForwardMatches;
+		fullLengthReversePrimerMatches = collectStatistics[0]->primerVariants.totalReverseMatches;
 	}
 	const unsigned int totalReads1 = cst->total;
 	const unsigned int totalReads2 = p2stat ? static_cast<unsigned int>(cst2->total) : 0;
@@ -4002,13 +3980,14 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 		if (!sharedReversePrimer.empty()) {
 			printInfoRow("Reverse primer sequence: " + sharedReversePrimer);
 		}
+		const unsigned int reverseDetected = fullLengthReversePrimerMatches > static_cast<uint64_t>(UINT_MAX)
+			? UINT_MAX
+			: static_cast<unsigned int>(fullLengthReversePrimerMatches);
 		if (p2stat) {
-			const unsigned int reverseDetectedRead2 = totalReads2 >= cst2->PrimerRevFail ? totalReads2 - cst2->PrimerRevFail : 0;
-			printValueRow("Reverse primer detected (<= " + to_string(PrimerErrs) + " mismatches)", "n/a", formatCountPct(reverseDetectedRead2, totalReads2));
+			printValueRow("Reverse primer detected (<= " + to_string(PrimerErrs) + " mismatches)", "n/a", formatCountPct(reverseDetected, totalReads2));
 		}
 		else {
-			const unsigned int reverseDetectedRead1 = totalReads1 >= cst->PrimerRevFail ? totalReads1 - cst->PrimerRevFail : 0;
-			printPercentRow("Reverse primer detected (<= " + to_string(PrimerErrs) + " mismatches)", reverseDetectedRead1, totalReads1);
+			printPercentRow("Reverse primer detected (<= " + to_string(PrimerErrs) + " mismatches)", reverseDetected, totalReads1);
 		}
 	}	
 	if (greenQualStats && primerVariantMinCount_ > 0 && primerVariantMinFraction_ > 0.f) {
@@ -4017,11 +3996,11 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 		map<pair<string, string>, uint64_t> forwardVariants;
 		map<pair<string, string>, uint64_t> reverseVariants;
 		{
-			lock_guard<mutex> lock(primerVariantTracker_->mutex);
-			totalForwardMatches = primerVariantTracker_->totalForwardMatches;
-			totalReverseMatches = primerVariantTracker_->totalReverseMatches;
-			forwardVariants = primerVariantTracker_->forwardVariants;
-			reverseVariants = primerVariantTracker_->reverseVariants;
+			lock_guard<mutex> lock(collectStatistics[0]->primerVariants.mutex);
+			totalForwardMatches = collectStatistics[0]->primerVariants.totalForwardMatches;
+			totalReverseMatches = collectStatistics[0]->primerVariants.totalReverseMatches;
+			forwardVariants = collectStatistics[0]->primerVariants.forwardVariants;
+			reverseVariants = collectStatistics[0]->primerVariants.reverseVariants;
 		}
 		const float warningFraction = primerVariantWarningFraction_;
 		auto printWarnings = [&give, warningFraction](const string& label, uint64_t totalMatches,
@@ -4357,11 +4336,11 @@ void Filters::printStats_old(ostream& give, string file, string outf, bool green
 		map<pair<string, string>, uint64_t> forwardVariants;
 		map<pair<string, string>, uint64_t> reverseVariants;
 		{
-			lock_guard<mutex> lock(primerVariantTracker_->mutex);
-			totalForwardMatches = primerVariantTracker_->totalForwardMatches;
-			totalReverseMatches = primerVariantTracker_->totalReverseMatches;
-			forwardVariants = primerVariantTracker_->forwardVariants;
-			reverseVariants = primerVariantTracker_->reverseVariants;
+			lock_guard<mutex> lock(collectStatistics[0]->primerVariants.mutex);
+			totalForwardMatches = collectStatistics[0]->primerVariants.totalForwardMatches;
+			totalReverseMatches = collectStatistics[0]->primerVariants.totalReverseMatches;
+			forwardVariants = collectStatistics[0]->primerVariants.forwardVariants;
+			reverseVariants = collectStatistics[0]->primerVariants.reverseVariants;
 		}
 		const float warningFraction = primerVariantWarningFraction_;
 		auto printWarnings = [&give, warningFraction](const string& label, uint64_t totalMatches,

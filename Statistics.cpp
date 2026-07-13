@@ -6,6 +6,51 @@
 #include <algorithm>
 #include <tuple>
 
+bool PrimerVariantTracker::record(const std::string& readIdentity, int start, PrimerDirection direction,
+    const std::string& expected, const std::string& observed, bool isVariant) {
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto match = std::make_pair(readIdentity, direction);
+    if (!recordedMatches.insert(match).second) {
+        return false;
+    }
+    if (direction == PrimerDirection::Reverse) {
+        ++totalReverseMatches;
+    }
+    else {
+        ++totalForwardMatches;
+    }
+    if (isVariant) {
+        if (direction == PrimerDirection::Reverse) {
+            ++reverseVariants[std::make_pair(expected, observed)];
+        }
+        else {
+            ++forwardVariants[std::make_pair(expected, observed)];
+        }
+    }
+    return true;
+}
+
+void PrimerVariantTracker::mergeFrom(const PrimerVariantTracker& other) {
+    std::lock_guard<std::mutex> lock(mutex);
+    totalForwardMatches += other.totalForwardMatches;
+    totalReverseMatches += other.totalReverseMatches;
+    for (const auto& kv : other.forwardVariants) {
+        forwardVariants[kv.first] += kv.second;
+    }
+    for (const auto& kv : other.reverseVariants) {
+        reverseVariants[kv.first] += kv.second;
+    }
+}
+
+void PrimerVariantTracker::reset() {
+    std::lock_guard<std::mutex> lock(mutex);
+    totalForwardMatches = 0;
+    totalReverseMatches = 0;
+    forwardVariants.clear();
+    reverseVariants.clear();
+    recordedMatches.clear();
+}
+
 const vector<unsigned int>& Statistics::get_rstat_Vmed(int x) {
     if (x == 1) { return rstat_VQmed; }
     return rstat_VSmed;
@@ -153,6 +198,7 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx) {
     multiFailReads += cs->multiFailReads;
     PostFilt.addRepStats(cs->PostFilt);
     PreFilt.addRepStats(cs->PreFilt);
+    primerVariants.mergeFrom(cs->primerVariants);
 
 }
 
@@ -177,6 +223,7 @@ void collectstats::reset() {
 
     //reportStats
     PostFilt.reset(); PreFilt.reset();
+    primerVariants.reset();
 }
 
 
