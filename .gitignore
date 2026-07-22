@@ -14,12 +14,13 @@ sdm
 Makefile_d
 MakefileD
 MakefileF
-DEBUG/
+
+Makefile.old
+deprecated/
+include/izlib.h
 tests/
 
-sdmN
-sdmD
-sdmD2
+
 
 # Build results
 [Dd]ebug/
@@ -31,7 +32,11 @@ x86/
 bld/
 [Bb]in/
 [Oo]bj/
-tests
+# Keep regression sources/scripts visible while ignoring their generated outputs.
+tests/*
+!tests/*.cpp
+!tests/*.sh
+!tests/*.txt
 
 # Visual Studio 2015 cache/options directory
 .vs/
@@ -247,11 +252,3 @@ _Pvt_Extensions
 
 # FAKE - F# Make
 .fake/
-
-#zlib experiments
-#include/iowrap*
-include/izlib*
-Makefile.old
-
-#old files..
-deprecated/*

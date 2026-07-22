@@ -251,7 +251,7 @@ public:
 
     void setMC(bool b) { doMC = b; }
     bool eof() { return atEnd && at >= bufS; }
-    bool operator! (void) { return !atEnd; }
+    bool operator! (void) { return eof(); }
     void jumpLines(int x = 1) { string mpt; for (int y = 0; y < x; y++) this->getlines(mpt, false); }
     int peekFirstChar() const {
         if (bufS == 0 || keeper.empty()) {

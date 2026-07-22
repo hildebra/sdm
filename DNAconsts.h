@@ -164,8 +164,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.38: 7.9.26: updated help text.
 //3.39: 10.7.26: start logging common primer variants, through options PrimerVariantMaxMismatches, PrimerVariantMinCount, PrimerVariantMinPercent, PrimerVariantWarningPercent	
 //3.40: 11.7.26: Clearer output of statistics 
+//3.41: 20.7.26: correctness repair set: fixed primer/barcode bounds and exhaustive reverse-primer matching,
+//      synchronized FASTA/QUAL and paired/MID input validation, safe gzip/output rotation and read limits,
+//      merge seed/quality and inclusive identity-cutoff handling, mapping row accounting, GoldenAxe aggregation,
+//      summary statistics, and 64-bit atomic output/read counters.
 
-static const char* sdm_version = "3.40";
+static const char* sdm_version = "3.41";
 static const char* sdm_status = "beta";
 
 

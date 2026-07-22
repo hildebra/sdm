@@ -162,7 +162,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		norm2fiveNTs = true;
 		cerr << "Warning: normRdsToFiveNTs is not implemented!\n";
 	}
-	if ((*cmdArgs)["-logLvsQ"].c_str() != "") {
+	if (!(*cmdArgs)["-logLvsQ"].empty()) {
 		collectStatistics[0]->setbLvsQlogsPreFilt(true);
 	}
 	if ((*cmdArgs)["-GoldenAxe"] == "1") { this->setGoldAxe(true, stoi((*cmdArgs)["-GoldenAxeMaxAmpli"]), stoi((*cmdArgs)["-GoldenAxeMinAmpli"])); }
@@ -2489,7 +2489,7 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
 				start = stars[0];
 				idx = indices[0];
 				stop = start + (int)(*localBarcodeLengths)[idx];
-				presentBC = d->getSubSeq(start, stop);
+				presentBC = d->getSubSeq(start, (*localBarcodeLengths)[idx]);
 			}
 		}
 
@@ -2704,7 +2704,7 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extra
 	//int limit = QS>>1;
 
 	if (RC) {
-		start = d->matchSeqRev(PrimerR_RC[primerID], PrimerErrs, limit, extraCheck);
+		start = d->matchSeqRev(PrimerR_RC[primerID], PrimerErrs, limit, 0, extraCheck);
 	}
 	else {
 		start = d->matchSeq(PrimerR[primerID], PrimerErrs, limit2, 0, extraCheck);
@@ -2717,7 +2717,7 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extra
 	if (start < 0) {//failed to match primer
 		int variantStart = -1;
 		if (RC) {
-			variantStart = d->matchSeqRev(PrimerR_RC[primerID], primerVariantMaxMismatches_, limit, extraCheck);
+			variantStart = d->matchSeqRev(PrimerR_RC[primerID], primerVariantMaxMismatches_, limit, 0, extraCheck);
 		}
 		else {
 			variantStart = d->matchSeq(PrimerR[primerID], primerVariantMaxMismatches_, limit2, 0, extraCheck);
@@ -2781,31 +2781,62 @@ bool Filters::readMap() {//core routine to read map info
 	if (!in) {
 		cerr << "Could not find " << MapF << " mapping file. Exiting.\n"; exit(2);
 	}
-	int ini_ColPerRow(0), cnt(0), skips(0);
+	int ini_ColPerRow(0), cnt(0), physicalLine(0);
+	bool headerSeen = false;
+	auto firstContent = [](const string& value) {
+		return value.find_first_not_of(" \t");
+	};
+	auto countTsvColumns = [](const string& value) {
+		return value.empty() ? 0 : 1 + static_cast<int>(std::count(value.begin(), value.end(), '\t'));
+	};
+	vector<string> terms(16); terms[0] = "SampleID";
+	terms[1] = "BarcodeSequence"; terms[2] = "LinkerPrimerSequence";
+	terms[3] = "ReversePrimer"; terms[4] = "fastqFile";
+	terms[5] = "fnaFile"; terms[6] = "qualFile";
+	terms[7] = "SampleIDinHead"; terms[8] = "MIDfqFile";
+	terms[9] = "CombineSamples"; terms[10] = "ForwardPrimer";
+	terms[11] = "Barcode2ndPair";
+	terms[12] = "HetSpacerFwd"; terms[13] = "HetSpacerRev";
+	terms[14] = "derepMin"; terms[15] = "SequencingRun";
+	auto looksLikeMapHeader = [&terms](const string& candidate) {
+		stringstream headerStream(candidate);
+		string field;
+		int knownFields = 0;
+		bool hasSampleId = false;
+		while (getline(headerStream, field, '\t')) {
+			trim(field);
+			for (const string& term : terms) {
+				if (field == term) {
+					++knownFields;
+					hasSampleId = hasSampleId || term == "SampleID";
+					break;
+				}
+			}
+		}
+		return hasSampleId || knownFields >= 2;
+	};
 
 	//check MAP format
-	//while(getline(in,line,'\n')) {
 	while (!safeGetline(in, line).eof()) {
+		++physicalLine;
 		stripUtf8Bom(line);
-		trim(line);
-		if (line.substr(0, 1) == "#" || line.length() == 0) { skips++; continue; }
-		string segments;
-		int ColsPerRow = 0; // Initialize counter.
-		stringstream ss;
-		ss << line;
-		while (getline(ss, segments, '\t')) {
-			ColsPerRow++;
+		const size_t content = firstContent(line);
+		if (content == string::npos) { continue; }
+		const bool comment = line[content] == '#';
+		if (!headerSeen) {
+			const string header = comment ? line.substr(content + 1) : line.substr(content);
+			if (comment && !looksLikeMapHeader(header)) { continue; }
+			headerSeen = true;
+			ini_ColPerRow = countTsvColumns(header);
+			continue;
 		}
-		if (segments == "") { ColsPerRow++; }
+		if (comment) { continue; }
 
-		if (cnt == 0) {
-			ini_ColPerRow = ColsPerRow;
-		}
-		else {
-			if (ColsPerRow != ini_ColPerRow) {
-				cerr << "Number of columns on line " << cnt + skips << " is " << ColsPerRow << ". Expected " << ini_ColPerRow << " columns.\n";
-				return false;
-			}
+		const int ColsPerRow = countTsvColumns(line);
+		if (ColsPerRow != ini_ColPerRow) {
+			cerr << "Number of columns on line " << physicalLine << " is " << ColsPerRow
+				<< ". Expected " << ini_ColPerRow << " columns.\n";
+			return false;
 		}
 		cnt++;
 	}
@@ -2841,31 +2872,25 @@ bool Filters::readMap() {//core routine to read map info
 
 	//extract MAP content
 	cnt = 0;
+	headerSeen = false;
 	bool hasQualityColumn = false;
-	vector<string> terms(16); terms[0] = "SampleID";
-	terms[1] = "BarcodeSequence"; terms[2] = "LinkerPrimerSequence";
-	terms[3] = "ReversePrimer"; terms[4] = "fastqFile";
-	terms[5] = "fnaFile"; terms[6] = "qualFile";
-	terms[7] = "SampleIDinHead"; terms[8] = "MIDfqFile";
-	terms[9] = "CombineSamples"; terms[10] = "ForwardPrimer";
-	terms[11] = "Barcode2ndPair";
-	terms[12] = "HetSpacerFwd";	terms[13] = "HetSpacerRev";
-	terms[14] = "derepMin"; terms[15] = "SequencingRun";
 	bool hetOneSide = false;
 
 	vector<int> termIdx(terms.size(), -1);
 
 	while (!safeGetline(in, line).eof()) {
 		stripUtf8Bom(line);
-		trim(line);
-		//	while(getline(in,line,'\n')) {
-		if (cnt != 0 && line.substr(0, 1) == "#") { continue; }
-		if (line.length() < 10) { continue; }
-		if (cnt == 0) {
-			if (!line.empty() && line[0] == '#') {
-				line = line.substr(1);
-			}
-			trim(line);
+		const size_t content = firstContent(line);
+		if (content == string::npos) { continue; }
+		const bool comment = line[content] == '#';
+		if (!headerSeen) {
+			const string header = comment ? line.substr(content + 1) : line.substr(content);
+			if (comment && !looksLikeMapHeader(header)) { continue; }
+			headerSeen = true;
+			line = header;
+		}
+		else if (comment) {
+			continue;
 		}
 
 		string segments;
@@ -2876,7 +2901,7 @@ bool Filters::readMap() {//core routine to read map info
 		//(*cmdArgs)["-i_MID_fastq"]
 		while (getline(ss, segments, '\t')) {
 			trim(segments);
-			if (cnt == 0) { //search for header
+			if (cnt == 0 && headerSeen) { //search for header
 				//Primer, BarcodeSequence, LinkerPrimerSequence
 				//PrLCol(-1), PrRCol(-1), BCCol(-1), SIDCol(-1);
 				for (unsigned int i = 0; i < terms.size(); i++) {
@@ -3218,10 +3243,10 @@ void Filters::debugVerifyStats(const char* context) const {
 }
 
 void Filters::addMergeStats(OutputStreamer* out) {
-	mergeStats->BPwritten = (uint)out->getBPwrittenInSR();
-	mergeStats->BPmergeWritte = (uint)out->getBPwrittenInSRmerg();
-	mergeStats->total_read_preMerge_ = (int)out->total_read_preMerge_;
-	mergeStats->merged_counter_ = (int)out->merged_counter_;
+	mergeStats->BPwritten = out->getBPwrittenInSR();
+	mergeStats->BPmergeWritte = out->getBPwrittenInSRmerg();
+	mergeStats->total_read_preMerge_ = out->total_read_preMerge_.load();
+	mergeStats->merged_counter_ = out->merged_counter_.load();
 
 
 

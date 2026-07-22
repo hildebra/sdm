@@ -33,17 +33,17 @@ void mergeStats::prepStats() {
 	percFwd.resize(matchFwd.size(), 0.f); percRev.resize(mismatchRev.size(), 0.f);
 	maxF = 0.f; maxR = 0.f;
 	for (size_t i = 0; i < matchFwd.size(); i++) {
-		percFwd[i] = mismatchFwd[i] / (mismatchFwd[i] + matchFwd[i]);
+		const float observations = mismatchFwd[i] + matchFwd[i];
+		percFwd[i] = observations > 0.f ? mismatchFwd[i] / observations : 0.f;
 		if (percFwd[i] > maxF) { maxF = percFwd[i]; }
-		percFwd[i] = -10 * log10(percFwd[i]);
 	}
 	//normalize to max val
 	//for (size_t i = 0; i < matchFwd.size(); i++) { percFwd[i] /= maxF; }
 	//same game for rev scores
 	for (size_t i = 0; i < mismatchRev.size(); i++) {
-		percRev[i] = mismatchRev[i] / (mismatchRev[i] + matchRev[i]);
+		const float observations = mismatchRev[i] + matchRev[i];
+		percRev[i] = observations > 0.f ? mismatchRev[i] / observations : 0.f;
 		if (percRev[i] > maxR) { maxR = percRev[i]; }
-		percRev[i] = -10 * log10(percRev[i]);
 	}
 	//normalize to max val
 	//for (size_t i = 0; i < matchRev.size(); i++) { percRev[i] /= maxR; }
@@ -63,14 +63,14 @@ void mergeStats::printLogs() {
 void mergeStats::logDistri(int p1, int p2, int overlap, bool same) {
 	if (p1>p2) {
 		if ((int)mismatchFwd.size() <= p1) { mismatchFwd.resize(p1 + 1, 0); matchFwd.resize(p1 + 1, 0); }
-		if (!same) { mismatchFwd[p1]++; }
-		matchFwd[p1]++;
+		if (same) { matchFwd[p1]++; }
+		else { mismatchFwd[p1]++; }
 	}
 	else {
 		//int i2 = overlap - p2 - 1;
 		if ((int)mismatchRev.size() <= p2) { mismatchRev.resize(p2 + 1, 0); matchRev.resize(p2 + 1, 0); }
-		if (!same) { mismatchRev[p2]++; }
-		matchRev[p2]++;
+		if (same) { matchRev[p2]++; }
+		else { mismatchRev[p2]++; }
 	}
 }
 
@@ -159,14 +159,14 @@ double ReadMerger::percentIdentity(const char* sequence1, const char* sequence2,
 	int length, int mismatches ) {
 	int match_count = 0;
 	int mismatch_count = 0;
-	if (mismatches == -1) mismatches = length;
+	if (mismatches < 0) mismatches = length;
 	if (length <= 0) return 0.f;
 
 	for (int i = 0; i < length; ++i) {
 		if (sequence1[i] == sequence2[i]) {
 			++match_count;
 		}
-		else if (++mismatch_count == mismatches) {
+		else if (++mismatch_count > mismatches) {
 			return -1.f;
 		}
 	}
@@ -184,7 +184,7 @@ double ReadMerger::percentIdentity(std::string_view sequence1, std::string_view 
 		return -1.f;
 	}
 
- if (mismatches == -1) { mismatches = length; }
+	if (mismatches < 0) { mismatches = length; }
 	if (length <= 0) return 0.f;
 
  for (int i = 0; i < length; ++i) {
@@ -192,7 +192,7 @@ double ReadMerger::percentIdentity(std::string_view sequence1, std::string_view 
       if (sequence1[i] == sequence2[i]) {
 			++match_count;
 		}
-		else if (++mismatch_count >= mismatches) {
+		else if (++mismatch_count > mismatches) {
 			return -1.f;
 		}
 	}
@@ -328,8 +328,8 @@ bool ReadMerger::findSeed(std::string& sequence1, std::string& sequence2, MergeR
         seedmap_.insert({ SeedStr(sequence2_ptr + forward_pos, seed_size_), static_cast<int>(forward_pos) });
 		seedmap_.insert({ SeedStr(sequence2_ptr + reverse_pos, seed_size_), static_cast<int>(reverse_pos) });
         if (check_reverse_complement_) {
-         seedmap_.insert({ SeedStr(reverse_sequence2_ptr + forward_pos, seed_size_), static_cast<int>(forward_pos) * -1 });
-			seedmap_.insert({ SeedStr(reverse_sequence2_ptr + reverse_pos, seed_size_), static_cast<int>(reverse_pos) * -1 });
+			seedmap_.insert({ SeedStr(reverse_sequence2_ptr + forward_pos, seed_size_), -static_cast<int>(forward_pos) - 1 });
+			seedmap_.insert({ SeedStr(reverse_sequence2_ptr + reverse_pos, seed_size_), -static_cast<int>(reverse_pos) - 1 });
 			//                auto rev_seed1 = std::string_view(reverse_complement_tmp_.c_str() + offset, seed_size_);
 			//                auto rev_seed2 = std::string_view(reverse_complement_tmp_.c_str() + reverse_complement_tmp_.size() - offset, seed_size_);
 			//                seedmap_[rev_seed1] = offset * -1;
@@ -367,7 +367,7 @@ bool ReadMerger::findSeed(std::string& sequence1, std::string& sequence2, MergeR
 			////                pos2 = seedmap_robin_.at(seed);
 			bool rev = pos2 < 0;
 
-			pos2 = -1 * pos2 * rev + !rev * pos2;
+			pos2 = rev ? (-pos2 - 1) : pos2;
 
           int offset = pos2 - static_cast<int>(pos1);
 
@@ -535,7 +535,7 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
 	//also log quality along read
 
 	int errInOverlap(0);
-	qual_score summedMismathcQ(0);
+	int summedMismathcQ(0);
 
 	for (size_t i = 0; i < overlap; i++, pos1++, pos2++, pos_overlap++) {
 		//            std::cout << "___" << std::endl;

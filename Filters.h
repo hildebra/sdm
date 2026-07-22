@@ -129,12 +129,12 @@ public:
 	inline bool checkRevRd() { return bRevRdCk; }
 
 	bool synRdPairs() { return bChkRdPrs; }
-	int writtenReads() { return ReadsWritten; }
+	uint64_t writtenReads() { return ReadsWritten.load(); }
 	int maxReadsOutput() { return maxReadsPerOFile; }
 	uint getDemultiBPperSR() { return demultiBPperSR; }
-	void setWrittenReads(int x) { ReadsWritten = x; }
+	void setWrittenReads(uint64_t x) { ReadsWritten = x; }
 	int getFileIncrementor() { return OFileIncre; }
-	int getReadsWritten() { return ReadsWritten; }
+	uint64_t getReadsWritten() { return ReadsWritten.load(); }
 	void incrementFileIncrementor() { OFileIncre++; ReadsWritten = 0; }//
 	void setBCoffset(int x) {
 		BCoffset = x;
@@ -436,7 +436,7 @@ protected:
 	//controls output file size
 	int maxReadsPerOFile;
 	int OFileIncre;
-	atomic_int ReadsWritten;
+	std::atomic<uint64_t> ReadsWritten;
 	uint demultiBPperSR;
 	//needed to pass by ref
 	BarcodeMap emptyBarcodes;

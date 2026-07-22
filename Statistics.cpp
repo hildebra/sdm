@@ -108,7 +108,9 @@ const vector<unsigned int>& ReportStats::get_rstat_Vmed(int x) {
 }
 
 float ReportStats::GCcontent() {
-    return float(NTcounts[2] + NTcounts[3]) / float(NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3]);
+    const long canonical = NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3];
+    if (canonical == 0) { return 0.f; }
+    return float(NTcounts[2] + NTcounts[3]) / float(canonical);
 }
 
 void collectstats::addPostFilt(shared_ptr<DNA> d) {
@@ -367,7 +369,7 @@ void ReportStats::printGCstats(ostream& give) {
     }
     //give << endl;
     for (uint i = 0; i < 4; i++) {
-        give << "\t" << float(QperNT[i]) / float(NTcounts[i]);
+        give << "\t" << (NTcounts[i] == 0 ? 0.f : float(QperNT[i]) / float(NTcounts[i]));
     }
     give << endl;
 }
@@ -411,7 +413,7 @@ void ReportStats::printStats2(ostream& give, float remSeqs, int pair) {
         //give << "Median Stats Pair 1";// -USQS : " << USQS;
         give << "\n     - Median sequence Length : " << rstat_Smed << ", Quality : " << rstat_Qmed;// << "\n";
     }
-    give << "\n     - Accum. Error " << (rstat_accumError / (float)rstat_totReads) << "\n";
+    give << "\n     - Accum. Error " << (rstat_totReads == 0 ? 0.f : rstat_accumError / (float)rstat_totReads) << "\n";
 }
 
 //add the stats from a different ReportStats object
@@ -453,15 +455,17 @@ void ReportStats::addRepStats(ReportStats& RepoStat) {
 //calculate median value from data stored as histogram-vector
 // for median use perc = 0.5f
 float ReportStats::calc_median(vector<uint>& in, float perc) {
-    unsigned int sum = 0;
-    for (unsigned int i = 0; i < in.size(); i++) {
-        sum += in[i];
+    uint64_t total = 0;
+    for (unsigned int count : in) {
+        total += count;
     }
-    unsigned int threshold = (unsigned int)(((float)sum) * perc);
-    sum = 0;
+    if (total == 0) { return 0.f; }
+    const double boundedPercentile = std::max(0.0, std::min(1.0, static_cast<double>(perc)));
+    const uint64_t threshold = std::max<uint64_t>(1, static_cast<uint64_t>(std::ceil(total * boundedPercentile)));
+    uint64_t cumulative = 0;
     for (unsigned int i = 0; i < in.size(); i++) {
-        sum += in[i];
-        if (sum >= threshold) {
+        cumulative += in[i];
+        if (cumulative >= threshold) {
             return (float)i;
         }
     }
@@ -613,7 +617,7 @@ void GAstats::addStats(shared_ptr<GAstats> o) {
             GALDISperBC[idx].resize(oSze );
             GALAMPLperBC[idx].resize(oSze );
         }
-        for (size_t x = 0; x < GALDISperBC[idx].size(); x++) {
+        for (size_t x = 0; x < o->GALDISperBC[idx].size(); x++) {
             GALDISperBC[idx][x] += o->GALDISperBC[idx][x];
             GALAMPLperBC[idx][x] += o->GALAMPLperBC[idx][x];
         }
@@ -800,7 +804,9 @@ void Statistics::reset() {
 }
 
 float Statistics::GCcontent() {
-    return float(NTcounts[2] + NTcounts[3]) / float(NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3]);
+    const long canonical = NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3];
+    if (canonical == 0) { return 0.f; }
+    return float(NTcounts[2] + NTcounts[3]) / float(canonical);
 }
 
 void Statistics::addDNAStats(shared_ptr<DNA> d) {
@@ -828,15 +834,17 @@ void Statistics::addMedian2Histo(unsigned int in, vector<unsigned int> &histo) {
 }
 
 inline float Statistics::calc_median(vector<unsigned int> &in, float perc) {
-    unsigned int sum = 0;
-    for (unsigned int i=0; i<in.size(); i++){
-        sum += in[i];
+    uint64_t total = 0;
+    for (unsigned int count : in) {
+        total += count;
     }
-    unsigned int threshold = (unsigned int) (((float)sum) * perc);
-    sum = 0;
+    if (total == 0) { return 0.f; }
+    const double boundedPercentile = std::max(0.0, std::min(1.0, static_cast<double>(perc)));
+    const uint64_t threshold = std::max<uint64_t>(1, static_cast<uint64_t>(std::ceil(total * boundedPercentile)));
+    uint64_t cumulative = 0;
     for (unsigned int i=0; i<in.size(); i++){
-        sum += in[i];
-        if (sum >= threshold){
+        cumulative += in[i];
+        if (cumulative >= threshold){
             return (float) i;
         }
     }

@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <deque>
 #include <thread>
+#include <shared_mutex>
 
 
 #ifdef _isa1gzip
@@ -206,7 +207,7 @@ public:
   void dereplicateDNA(const shared_ptr<DNA>&, const shared_ptr<DNA>&);
 	//debug function to look closer at nonBC reads, threadsafe
     void writeNonBCReads(const shared_ptr<DNA>& d, const shared_ptr<DNA>& d2);
-	void setReadLimit(int x) { maxRdsOut = x; }
+	void setReadLimit(uint64_t x) { maxRdsOut = x; }
 
 	//demultiplex related
  void write2Demulti(const shared_ptr<DNA>&, int, int BCoffset);
@@ -224,11 +225,11 @@ public:
 
 	uint getDemultiBPperSR() { return demultiBPperSR; }
 	void resetDemultiBPperSR() { demultiBPperSR = 0; }
-	void setBPwrittenInSR(uint x) { BPwrittenInSR = x; }
-	uint getBPwrittenInSR(void) { return BPwrittenInSR; }
-	void setBPwrittenInSRmerg(uint x) { BPwrittenInSRmerg = x; }
-	uint getBPwrittenInSRmerg(void) { return BPwrittenInSRmerg; }
-	int getReadsWritten() { return ReadsWritten; }
+	void setBPwrittenInSR(uint64_t x) { BPwrittenInSR = x; }
+	uint64_t getBPwrittenInSR(void) { return BPwrittenInSR.load(); }
+	void setBPwrittenInSRmerg(uint64_t x) { BPwrittenInSRmerg = x; }
+	uint64_t getBPwrittenInSRmerg(void) { return BPwrittenInSRmerg.load(); }
+	uint64_t getReadsWritten() { return TotalReadsWritten.load(); }
 
 	void attachBenchmark(Benchmark* bench) { _benchmark = bench; }
 	void activateReadMerger(int sz) {
@@ -323,16 +324,17 @@ private:
 	int Nthrds;  int thrdsCnt; bool thrdsActive;
 	//controls output file size
 	int maxReadsPerOFile;
-	atomic_int ReadsWritten;
+	std::atomic<uint64_t> ReadsWritten;
+	std::atomic<uint64_t> TotalReadsWritten;
 	uint demultiBPperSR;
-	atomic_int BPwrittenInSR;
-	atomic_int BPwrittenInSRmerg;
-	int maxRdsOut;//not used currently?
+	std::atomic<uint64_t> BPwrittenInSR;
+	std::atomic<uint64_t> BPwrittenInSRmerg;
+	uint64_t maxRdsOut;
 	bool stopAll;//red button, just stop all
 	string leadingOutf;
 	OptContainer* locCmdArgs;
 	shared_ptr<Dereplicate> dereplicator;
-	atomic_int cntDerep;
+	std::atomic<uint64_t> cntDerep;
 	mutex drpMTX;
 
 	//abstraction to real file type
@@ -361,6 +363,7 @@ private:
     vector<std::shared_ptr<ReadMerger>> mergers;
 	// serialize file increment (rotate) operations
 	mutex fileIncMTX;
+	std::shared_mutex outputEpochMTX;
 
 	Benchmark* _benchmark;
 };

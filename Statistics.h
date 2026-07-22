@@ -101,14 +101,14 @@ struct PrimerVariantTracker {
 
 class MEstats {
 public:
-    MEstats() :total_read_preMerge_(0), merged_counter_(0) {}
+    MEstats() :total_read_preMerge_(0), merged_counter_(0), BPwritten(0), BPmergeWritte(0) {}
     ~MEstats() {}
     void addStats(shared_ptr<MEstats> o);
 
     void print(ostream& give);
     //variables
-    int total_read_preMerge_, merged_counter_;
-    uint BPwritten, BPmergeWritte;
+    uint64_t total_read_preMerge_, merged_counter_;
+    uint64_t BPwritten, BPmergeWritte;
 
 
 };

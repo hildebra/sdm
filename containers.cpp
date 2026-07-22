@@ -1385,7 +1385,7 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 				match->attachPair(make_shared<DNAunique>(match2, -1));
 				//merge read
 				merger->findSeedForMerge(match, match2);
-				if (match->merge_seed_pos_ > 0) {
+				if (match->merge_seed_pos_ >= 0) {
 					shared_ptr<DNA> dM = merger->merge(match, match2);
 					if (dM != nullptr) {
 						match->attachMerge(make_shared<DNAunique>(dM, -1));

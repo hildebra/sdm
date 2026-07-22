@@ -819,13 +819,14 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 	// main loop that goes over different files
 	int maxReadsWr = mainFilter->getXreadsWr(); // should program stop after having written a certain amount of reads?
 	int maxReadsRd = mainFilter->getXreadsRd();
-	int totalReadsRead(0), totalReadsWrite(0);
+	int totalReadsRead(0);
+	uint64_t totalReadsWrite(0);
 	auto printConvertedSummary = [&]() {
 		if ((*cmdArgs)["-o_fna"] != "") {
 			cerr << "Converted sequences written: " << totalReadsWrite << "\n";
 		}
 	};
-	uint accumBPwrite(0), accumBPwriteMerg(0);
+	uint64_t accumBPwrite(0), accumBPwriteMerg(0);
 	vector<string> lastSRblock (1,"");  //set up SequencingRun blocks to track
 	string lastProcessedSRblock = "";
 
@@ -872,7 +873,7 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 		// Sample memory at the start of processing each file
 		Instr::g_memoryTracker.sample();
 
-		if (maxReadsWr > 0 && maxReadsWr - totalReadsWrite <= 0) { cerr << "Skipping file " << uFX.first << "due to firstXreadsWrite .."; break; }
+		if (maxReadsWr > 0 && totalReadsWrite >= static_cast<uint64_t>(maxReadsWr)) { cerr << "Skipping file " << uFX.first << "due to firstXreadsWrite .."; break; }
 		if (maxReadsRd > 0 && maxReadsRd - totalReadsRead <= 0) { cerr << "Skipping file " << uFX.first << "due to firstXreadsRead .."; break; }
 		if (files.idx[i].size() == 0) {	
 			throw std::runtime_error("fastXtar vector for " + uFX.first + " is empty");
@@ -967,7 +968,7 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 		OutStreamer->setBPwrittenInSR(accumBPwrite);OutStreamer->setBPwrittenInSRmerg(accumBPwriteMerg);	
 		OutStreamer->attachBenchmark(sdm_benchmark);filter->setMultiDNA(OutStreamer);
 		if (maxReadsWr > 0) {
-			OutStreamer->setReadLimit(maxReadsWr - totalReadsWrite);
+			OutStreamer->setReadLimit(static_cast<uint64_t>(maxReadsWr) - totalReadsWrite);
 		}
 		writeStatus = ofstream::app;
 		//prepare for BC checking (rev/fwd)

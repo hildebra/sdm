@@ -31,6 +31,29 @@ namespace {
 			out[i] = sanitizeFastqQualityChar(qWithOffset, offset);
 		}
 	}
+
+	std::vector<qual_score> parseFastaQualities(const std::string& text, size_t expectedCount,
+		const std::string& header) {
+		std::istringstream input(text);
+		std::vector<qual_score> qualities;
+		qualities.reserve(expectedCount);
+		int value = 0;
+		while (input >> value) {
+			if (value < SCHAR_MIN || value > SCHAR_MAX) {
+				throw std::runtime_error("FASTA/QUAL score outside supported range for " + header);
+			}
+			qualities.push_back(static_cast<qual_score>(value));
+		}
+		if (!input.eof()) {
+			throw std::runtime_error("Invalid token in FASTA/QUAL scores for " + header);
+		}
+		if (qualities.size() != expectedCount) {
+			throw std::runtime_error("FASTA/QUAL length mismatch for " + header + ": sequence has " +
+				std::to_string(expectedCount) + " bases but QUAL has " +
+				std::to_string(qualities.size()) + " scores");
+		}
+		return qualities;
+	}
 }
 
 
@@ -64,7 +87,8 @@ bool DNA::seal(bool isFasta) {//DN = sequence_.c_str();
 }
 DNA::DNA(const vector<string>& fas) :DNA() {
 	// Abort if input stream is at the end
-	if (fas[0].length() == 0) {
+	if (fas.size() < 2 || fas[0].empty()) {
+		delself();
 		return;
 	}
 	if (fas[0][0] != '>') {
@@ -72,33 +96,15 @@ DNA::DNA(const vector<string>& fas) :DNA() {
 		exit(23);
 	}
 	// Storage objects
-	string tqual;
 	this->setHeader(fas[0].substr(1));
 	sequence_ = fas[1];
 	sequence_length_ = sequence_.length();
-	uint lsize = (uint)fas[1].length();
-	qual_.assign(lsize, 11);
-	if (fas[2].length() > 0) {
-		tqual = fas[2];
-		rtrim(tqual);
-		const char* lQ = tqual.c_str();
-		uint ii(0);
-		qual_score nn(0);
-
-		for (; ii < lsize; ii++) {
-			nn = (qual_score)parseInt(&lQ);// , posStr);
-			qual_[ii] = nn;
-			if (*lQ == '\0') {
-				break;
-			}
-			//issQ >>  Iqual[ii];
-		}
-
-		if (qual_.size() != fas[1].length()) {
-			cerr << "Unequal fasta (" << fas[1].length() << ")/qual (" << fas[2].length() << ") length:\n";
-			cerr << fas[0] << endl << fas[1] << endl << fas[2] << endl;
-			exit(923);
-		}
+	const size_t lsize = sequence_.length();
+	if (fas.size() > 2 && !fas[2].empty()) {
+		qual_ = parseFastaQualities(fas[2], lsize, fas[0]);
+	}
+	else {
+		qual_.assign(lsize, 11);
 	}
 	avg_qual_ = -1.f;
 
@@ -116,7 +122,7 @@ DNA::DNA(const vector<string>& fq, qual_score fastQver) :DNA() {
 	this->setHeader(fq[0].substr(1));
 	sequence_ = fq[1];
 	sequence_length_ = sequence_.size();
-	if (fq[2][0] != '+') {
+	if (fq[2].empty() || fq[2][0] != '+') {
 		cerr << "Error input line " + fq[2] + ": Could not find \'+\' when expected (file likely corrupt, aborting):\n" + fq[0];// << endl;
 		delself();
 		return;
@@ -167,7 +173,7 @@ DNA::DNA(vector<string>&& fq, qual_score fastQver) :DNA() {
 	this->setHeader(std::move(fq[0]).substr(1));
 	sequence_ = std::move(fq[1]);
 	sequence_length_ = sequence_.size();
-	if (fq[2][0] != '+') {
+	if (fq[2].empty() || fq[2][0] != '+') {
 		cerr << "Error input line " + fq[2] + ": Could not find '+' when expected (file likely corrupt, aborting):\n" + fq[0];
 		delself();
 		return;
@@ -196,7 +202,8 @@ DNA::DNA(vector<string>&& fq, qual_score fastQver) :DNA() {
 }
 
 DNA::DNA(vector<string>&& fas) :DNA() {
-	if (fas[0].length() == 0) {
+	if (fas.size() < 2 || fas[0].empty()) {
+		delself();
 		return;
 	}
 	if (fas[0][0] != '>') {
@@ -206,28 +213,13 @@ DNA::DNA(vector<string>&& fas) :DNA() {
 	this->setHeader(std::move(fas[0]).substr(1));
 	sequence_ = std::move(fas[1]);
 	sequence_length_ = sequence_.length();
-	uint lsize = (uint)sequence_.length();
-	qual_.assign(lsize, 11);
-	if (fas[2].length() > 0) {
+	const size_t lsize = sequence_.length();
+	if (fas.size() > 2 && !fas[2].empty()) {
 		string tqual = std::move(fas[2]);
-		rtrim(tqual);
-		const char* lQ = tqual.c_str();
-		uint ii(0);
-		qual_score nn(0);
-
-		for (; ii < lsize; ii++) {
-			nn = (qual_score)parseInt(&lQ);
-			qual_[ii] = nn;
-			if (*lQ == '\0') {
-				break;
-			}
-		}
-
-		if (qual_.size() != sequence_.length()) {
-			cerr << "Unequal fasta (" << sequence_.length() << ")/qual (" << tqual.length() << ") length:\n";
-			cerr << fas[0] << endl << sequence_ << endl << tqual << endl;
-			exit(923);
-		}
+		qual_ = parseFastaQualities(tqual, lsize, id_);
+	}
+	else {
+		qual_.assign(lsize, 11);
 	}
 	avg_qual_ = -1.f;
 }
@@ -334,20 +326,19 @@ bool DNA::scanSequenceChecks(int maxHomoNT, int& ambNTs_out) {
 	return true;
 }
 void DNA::stripLeadEndN() {
-	int i = 0;
-	while (i >= 0 && DNA_amb[static_cast<unsigned char>(sequence_[i])]) {
-		i++;
+	size_t first = 0;
+	while (first < sequence_.size() && DNA_amb[static_cast<unsigned char>(sequence_[first])]) {
+		++first;
 	}
-	if (i) {
-		this->cutSeq(0, i);
+	size_t last = sequence_.size();
+	while (last > first && DNA_amb[static_cast<unsigned char>(sequence_[last - 1])]) {
+		--last;
 	}
-	//cut at end N's
-	i = (int)sequence_.length();
-	while (i >= 0 && DNA_amb[static_cast<unsigned char>(sequence_[i])]) {
-		i--;
+	if (last < sequence_.size()) {
+		this->cutSeq(static_cast<int>(last), static_cast<int>(sequence_.size()));
 	}
-	if (i != (int)sequence_.length()) {
-		this->cutSeq(i + 1, (int)sequence_.length());
+	if (first > 0) {
+		this->cutSeq(0, static_cast<int>(first));
 	}
 
 }
@@ -767,8 +758,8 @@ int DNA::matchSeq(std::string PrSt, int Err, int searchSpace, int startPos, bool
 			//old, direct match
 			if (!matchDNA(sequence_[Prp2], PrSt[Prp])) { c_err++; if (c_err > Err) { break; } }
 #endif
-			Prp++; Prp2++;
 			if (sequence_[Prp2] != 'N') { c_points++; }
+			Prp++; Prp2++;
 		} while (Prp < PrL);
 		/*if (c_points >= point_aim) {
 			int x = 0; //DEBUG
@@ -879,7 +870,13 @@ int DNA::matchSeq_tot(const string& Pr, int error, int maxPos, int& c_err) {
 	int PrL = (int)Pr.length();
 	int pos(0), Prp(0), Prp2(0);
 	bool success(false);
-	for (pos = 0; pos < maxPos; pos++) {
+	if (PrL == 0 || error < 0 || static_cast<size_t>(PrL) > sequence_.size()) {
+		c_err = error + 1;
+		return -1;
+	}
+	const int validStarts = static_cast<int>(sequence_.size()) - PrL + 1;
+	const int searchEnd = std::max(0, std::min(maxPos, validStarts));
+	for (pos = 0; pos < searchEnd; pos++) {
 		c_err = 0; Prp = 0; Prp2 = pos;
 		do {
 			if (sequence_[Prp2] != Pr[Prp]) {
