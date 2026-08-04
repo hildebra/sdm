@@ -18,32 +18,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #pragma once
 #include "DNA.h"
 #include "Common.h"
+#include "InputFileStream.h"
 #include <chrono>
 #include <thread>
-
-#ifdef _isa1gzip
-#include "include/GZipStr.h"
-#endif
-
-#ifdef _izlib
-#include "include/izlib.h"
-#else
-
-#ifdef _gzipread
-#include "include/gzstream.h"
-#include "include/zstr.h"
-#endif
-/*typedef struct {
-    FILE* fp;char* mode;int is_plain;
-//    struct isal_gzip_header* gzip_header;
-//    struct inflate_state* state;
-//    struct isal_zstream* zstream;
-    uint8_t* buf_in;size_t buf_in_size;uint8_t* buf_out;size_t buf_out_size;
-} gzFile_t;
-int gzeof(gzFile_t* fp) { return 0; }
-typedef gzFile_t* gzFile;
-*/
-#endif
 
 
 extern char DNA_trans[256];
@@ -117,8 +94,8 @@ struct multi_tmp_lines {
 class ifbufstream {
 public:
     ifbufstream(const string& inF, size_t buf1 = 20000, bool isMC = false, bool test = false)
-        : file(inF), modeIO(ios::in), at(0), isGZ(false), atEnd(false), doMC(isMC), bufS(buf1),
-        bufSW(0), primary(nullptr),
+        : file(inF), modeIO(ios::in), at(0), isGZ(false), atEnd(false), doMC(isMC),
+        primary(nullptr), bufS(buf1), bufSW(0), bufferCapacity(buf1),
         totalLines(0), total4Lines(0) {
         if (bufS < 10) {
             cerr << "Buffer size chosen too small: " << bufS << endl << "class ifbufstream\n";
@@ -128,125 +105,66 @@ public:
 
         if (isGZfile(file)) {
             isGZ = true;
-#if !defined(_gzipread) && !defined(_isa1gzip)
-            cerr << "ifbufstream::gzip input not supported in your sdm build\n" << file << endl;
-            exit(51);
-#endif
         }
         openFstream();
-#ifdef _izlib
-        if (isGZ) {
-            if (!primaryG) {
-                atEnd = true;
-                return;
-            }
-        }
-        else {
-            if (!primary) {
-                atEnd = true;
-                return;
-            }
-        }
-#else
         if (!primary) {
             atEnd = true;
             return;
         }
-#endif
         if (test) return;
 
-#if __cplusplus >= 201103L
         {
             Instr::TimedSharedLockGuard input_lock(input_mtx);
-#else
-        input_mtx.lock();
-#endif
-#ifdef _izlib
-        if (isGZ) {
-            int rd = gzread(primaryG, keeper.data(), bufS);
-            if (rd <= 0) {
-                bufS = 0; atEnd = true; keeperW.clear();
+            primary->read(
+                keeper.data(),
+                static_cast<std::streamsize>(bufferCapacity));
+            const size_t read = static_cast<size_t>(primary->gcount());
+            bufS = read;
+            if (read == 0) {
+                atEnd = true;
+                keeperW.clear();
             }
-            else {
-                bufS = (size_t)rd;
-                if (gzeof(primaryG)) atEnd = true;
+            else if (primary->eof() || !primary->good()) {
+                atEnd = true;
             }
         }
-        else {
-            primary->read(keeper.data(), bufS);
-            size_t read = (size_t)primary->gcount();
-            if (read == 0) { bufS = 0; atEnd = true; keeperW.clear(); }
-            else { bufS = read; if (primary->eof() || !primary->good()) atEnd = true; }
-        }
-#else
-        primary->read(keeper.data(), bufS);
-        size_t read = (size_t)primary->gcount();
-        if (read == 0) { bufS = 0; atEnd = true; keeperW.clear(); }
-        else { bufS = read; if (primary->eof() || !primary->good()) atEnd = true; }
-#endif
-
-#if __cplusplus >= 201103L
-        }
-#else
-        input_mtx.unlock();
-#endif
     }
 
     ~ifbufstream() {
         cdbg(("destroy ibufstream, total lines: " + to_string(totalLines) + " 4Lines: " + to_string(total4Lines) + "\n"));
-#if __cplusplus >= 201103L
         {
             Instr::TimedSharedLockGuard input_lock_del(input_mtx);
-#else
-        input_mtx.lock();
-#endif
-#ifdef _izlib
-        if (isGZ && primaryG) {
-            gzclose(primaryG);
-            primaryG = nullptr;
+            keeper.clear();
+            keeperW.clear();
+            primary.reset();
         }
-#endif
-        keeper.clear();
-        keeperW.clear();
-        primary.reset();
-#if __cplusplus >= 201103L
-        }
-#else
-        input_mtx.unlock();
-#endif
     }
 
     void reset() {
-        totalLines = 0; total4Lines = 0;
+        totalLines = 0;
+        total4Lines = 0;
 
-#if __cplusplus >= 201103L
-        {
-            Instr::TimedSharedLockGuard lk(input_mtx);
-            at = 0;
-            if (primary) primary->clear();
-            primary.reset();
-            openFstream();
-            iniBufStrm();
-            primary->read(keeper.data(), bufS);
-            size_t read = (size_t)primary->gcount();
-            if (read == 0) { bufS = 0; atEnd = true; keeperW.clear(); }
-            else { bufS = read; if (primary->eof() || !primary->good()) atEnd = true; }
-
-        }
-#else
-        input_mtx.lock();
+        Instr::TimedSharedLockGuard lock(input_mtx);
         at = 0;
+        atEnd = false;
+        bufS = bufferCapacity;
+        bufSW = 0;
         if (primary) primary->clear();
         primary.reset();
         openFstream();
         iniBufStrm();
-        primary->read(keeper.data(), bufS);
-        size_t read = (size_t)primary->gcount();
-        if (read == 0) { bufS = 0; atEnd = true; keeperW.clear(); }
-        else { bufS = read; if (primary->eof() || !primary->good()) atEnd = true; }
-
-        input_mtx.unlock();
-#endif
+        primary->read(
+            keeper.data(),
+            static_cast<std::streamsize>(bufferCapacity));
+        const size_t read = static_cast<size_t>(primary->gcount());
+        bufS = read;
+        if (read == 0) {
+            atEnd = true;
+            keeperW.clear();
+        }
+        else if (primary->eof() || !primary->good()) {
+            atEnd = true;
+        }
     }
 
     void setMC(bool b) { doMC = b; }
@@ -334,60 +252,34 @@ public:
 
 private:
     bool internalReadChunk() {
-        // Cache bufS locally to avoid races with swap operations
-        size_t localBufS = bufS;
-        if (localBufS == 0) {
-            // nothing to read
-            bufSW = 0; keeperW.clear(); return false;
+        const size_t localBufS = bufferCapacity;
+        if (localBufS == 0 || !primary || !(*primary)) {
+            bufSW = 0;
+            atEnd = true;
+            keeperW.clear();
+            return false;
         }
-        // ensure worker buffer has enough space
-        if (keeperW.size() < localBufS) keeperW.resize(localBufS);
-#ifdef _izlib
-        if (isGZ) {
-            if (!primaryG) { keeperW.clear(); atEnd = true; bufSW = 0; return false; }
+        if (keeperW.size() < localBufS) {
+            keeperW.resize(localBufS);
         }
-        else {
-            if (!primary || !(*primary)) { keeperW.clear(); atEnd = true; bufSW = 0; return false; }
-        }
-#else
-        if (!primary || !(*primary)) { keeperW.clear(); atEnd = true; bufSW = 0; return false; }
-#endif
-#ifdef _izlib
-        if (isGZ) {
-            int rd = gzread(primaryG, keeperW.data(), (int)localBufS);
-            if (rd <= 0) { bufSW = 0; keeperW.clear(); }
-            else bufSW = (size_t)rd;
-        }
-        else {
-            primary->read(keeperW.data(), localBufS);
-            size_t read = (size_t)primary->gcount();
-            bufSW = read;
-            if (read == 0) keeperW.clear();
-        }
-#else
-        primary->read(keeperW.data(), localBufS);
-        size_t read = (size_t)primary->gcount();
+
+        primary->read(
+            keeperW.data(),
+            static_cast<std::streamsize>(localBufS));
+        const size_t read = static_cast<size_t>(primary->gcount());
         bufSW = read;
-        if (read == 0) keeperW.clear();
-#endif
+        if (read == 0) {
+            atEnd = true;
+            keeperW.clear();
+        }
+        else if (primary->eof() || !primary->good()) {
+            atEnd = true;
+        }
         return bufSW > 0;
     }
 
     void openFstream() {
-        if (isGZ) {
-#ifdef _isa1gzip
-            primary = std::make_unique<GzipIfstream>(file.c_str(), 48 * 1024 * 1024);
-#elif defined(_izlib)
-            primaryG = gzopen(file.c_str(), "rb");
-#elif defined(_gzipread)
-            primary = std::make_unique<zstr::ifstream>(file.c_str());
-#else
-            cerr << "gzip not supported in your sdm build\n (ifbufstream) " << file; exit(50);
-#endif
-        }
-        else {
-            primary = std::make_unique<std::ifstream>(file, modeIO | ios::binary);
-        }
+        primary = openInputFile(file, modeIO, bufferCapacity, doMC);
     }
 
     bool readChunk() {
@@ -405,8 +297,8 @@ private:
 
     void iniBufStrm() {
         cdbg("Ini ibufstream");
-        keeper.resize(bufS);
-        keeperW.resize(bufS);
+        keeper.resize(bufferCapacity);
+        keeperW.resize(bufferCapacity);
     }
 
     string file;
@@ -417,11 +309,8 @@ private:
     size_t at;
     bool isGZ, atEnd, doMC;
     std::unique_ptr<std::istream> primary;
-#ifdef _izlib
-    gzFile primaryG;
-#endif
 
-    size_t bufS, bufSW;
+    size_t bufS, bufSW, bufferCapacity;
     mutex localMTX;
     shared_mutex input_mtx;
     long long totalLines, total4Lines;
@@ -434,7 +323,7 @@ public:
     InputStreamer(bool fnRd, qual_score fq, string ignore_IO_errors,
         string pairedRD_HD_out, int threads) :
             _fileLength(10), _max(60), _last(0),
-			_globalRdsRead(0), _globalMaxRdsRead(-1), _localRdsRead(0),
+			_globalRdsRead(0), _globalMaxRdsRead(0), _localRdsRead(0),
             fasta_istreams(3, NULL), quality_istreams(3, NULL), fastq_istreams(3, NULL),
             fastaFilepathTemp(3, ""), qualityFilepathTemp(3, ""), 
             dnaTemp1(3, NULL), dnaTemp2(3, NULL),
@@ -485,8 +374,8 @@ public:
 	void allStreamClose();
 	void allStreamReset();//go back to line 1
 	void setTIO(bool x) { doTIO = x; }
-	void setGlobalRdsRead(int x) { _globalRdsRead = x; }
-	void setMaxRdsRead(int x) { _globalMaxRdsRead = x; }
+	void setGlobalRdsRead(uint64_t x) { _globalRdsRead = x; }
+	void setMaxRdsRead(uint64_t x) { _globalMaxRdsRead = x; }
 
 	void openMIDseqs(string,string);
 	int pairNum() { return numPairs; }
@@ -508,6 +397,7 @@ public:
 
 private:
 	string current_infiles();
+	shared_ptr<DNA> getDNAUnlocked(int pos);
 	inline qual_score minmaxQscore(qual_score t, bool& print);// , int lnCnt);
 	void minmaxQscore(shared_ptr<DNA> t, bool&);// , int lnCnt);
 	bool setupFastq_2(string, string, string);
@@ -528,6 +418,7 @@ private:
 		for (size_t i = 0; i < pairs_read.size(); i++) { pairs_read[i] = 0; }
 		for (size_t i = 0; i < opos.size(); i++) { opos[i] = 0; }
 		currentFile = 0; totalFileNumber = 0; BCnumber = 0;
+		_localRdsRead = 0;
 	}
 	bool desync(int pos) { if ( abs(pairs_read[pos] - pairs_read[opos[pos]]) > 1 ) {return true; } return false; }
 	void IO_Error(string x);
@@ -537,7 +428,7 @@ private:
 	inline void _print(int cur, float prog);
 	
 	int _fileLength, _max, _last;
-	int _globalRdsRead, _globalMaxRdsRead, _localRdsRead; //to keep track of processed reads so far (and before = global)
+	uint64_t _globalRdsRead, _globalMaxRdsRead, _localRdsRead; //processed read counts and optional limit
 	
 	//abstraction to real file type
 
@@ -588,7 +479,7 @@ private:
 	vector <job3> slots;
 #endif
 	int verbose;
-    long long N_DNApairsReturned, N_DNAreturned;
+    uint64_t N_DNApairsReturned, N_DNAreturned;
     
     /*shared_ptr<DNA> getDNA(bool &has_next);
     
@@ -630,7 +521,4 @@ double pointFiveRatio(double v1, double v2, double scale = 0.5);
 
 
 
-#ifdef _gzipread2
-std::vector< char > readline(gzFile f);
-#endif 
 

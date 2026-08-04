@@ -1,13 +1,10 @@
 #include "Common.h"
+#include "InputFileStream.h"
 #include <algorithm>
 #include <iomanip>
 #include <cstring>
 #include <fstream>
 #include <cctype>
-#ifdef _gzipread
-#include "include/gzstream.h"
-#include "include/zstr.h"
-#endif
 // DNA_trans is defined in InputStream.cpp; declare extern here so utilities can use it
 extern char DNA_trans[256];
 
@@ -80,6 +77,28 @@ string intwithcommas(int value) {
     return (numWithCommas);
 }
 
+string intwithcommas(int64_t value) {
+    const bool negative = value < 0;
+    string numWithCommas = std::to_string(value);
+    int insertPosition = static_cast<int>(numWithCommas.length()) - 3;
+    const int firstDigit = negative ? 1 : 0;
+    while (insertPosition > firstDigit) {
+        numWithCommas.insert(static_cast<size_t>(insertPosition), ",");
+        insertPosition -= 3;
+    }
+    return numWithCommas;
+}
+
+string intwithcommas(uint64_t value) {
+    string numWithCommas = std::to_string(value);
+    int insertPosition = static_cast<int>(numWithCommas.length()) - 3;
+    while (insertPosition > 0) {
+        numWithCommas.insert(static_cast<size_t>(insertPosition), ",");
+        insertPosition -= 3;
+    }
+    return numWithCommas;
+}
+
 // itos removed - use std::to_string everywhere
 
 std::string ftos(float number,int digits) {
@@ -103,14 +122,11 @@ static string normalizePathToken(string fi) {
 
 bool isGZfile(const string fi) {
     string f = normalizePathToken(fi);
-    if (f.size() < 3) {
-        return false;
-    }
-    const size_t p = f.size() - 3;
-    const char c0 = static_cast<char>(std::tolower(static_cast<unsigned char>(f[p])));
-    const char c1 = static_cast<char>(std::tolower(static_cast<unsigned char>(f[p + 1])));
-    const char c2 = static_cast<char>(std::tolower(static_cast<unsigned char>(f[p + 2])));
-    return (c0 == '.' && c1 == 'g' && c2 == 'z');
+    std::transform(f.begin(), f.end(), f.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return (f.size() >= 3 && f.compare(f.size() - 3, 3, ".gz") == 0) ||
+        (f.size() >= 5 && f.compare(f.size() - 5, 5, ".gzip") == 0);
 }
 
 static string normalizeInputPath(string fileS) {
@@ -176,6 +192,14 @@ void remove_paired_info(string &s, short RP) {
     if (f1 != string::npos) {
         s.erase(f1);
         f1 = string::npos;
+    }
+    if (s.size() >= 4) {
+        const size_t legacyPos = s.size() - 4;
+        if (s[legacyPos] == '#' && (s[legacyPos + 1] == '1' || s[legacyPos + 1] == '2') &&
+            s[legacyPos + 2] == ':' && s[legacyPos + 3] == '0') {
+            s.erase(legacyPos);
+            return;
+        }
     }
     if (s.size() < 2) { return; }
     size_t  tarPos = s.size() - 2;
@@ -312,7 +336,13 @@ string applyFileIT(string x, int it,const string xtr){
 
 bool fileExists(const std::string& name, int i, bool extiffail) {
     if (name == "") { return false; }
+#ifdef _MSC_VER
+    FILE* rawFile = nullptr;
+    fopen_s(&rawFile, name.c_str(), "r");
+    std::unique_ptr<FILE, decltype(&fclose)> file(rawFile, &fclose);
+#else
     std::unique_ptr<FILE, decltype(&fclose)> file(fopen(name.c_str(), "r"), &fclose);
+#endif
     if (file) {
         return true;
     } else {
@@ -343,7 +373,12 @@ string detectSeqFmt(const string inF) {
 
             // Prefer extension-based detection for gzip files to avoid stream backend issues during auto-detect.
             if (isGZfile(fileS)) {
-                string base = fLower.substr(0, fLower.size() - 3);
+                const size_t suffixLength =
+                    fLower.size() >= 5 &&
+                    fLower.compare(fLower.size() - 5, 5, ".gzip") == 0
+                        ? 5
+                        : 3;
+                string base = fLower.substr(0, fLower.size() - suffixLength);
                 if (base.size() >= 6 && (base.compare(base.size() - 6, 6, ".fastq") == 0)) {
                     return "-i_fastq";
                 }
@@ -358,16 +393,10 @@ string detectSeqFmt(const string inF) {
                 }
             }
 
-#ifdef _gzipread
-            if (isGZfile(fileS)) {
-                fnax.reset(new zstr::ifstream(fileS.c_str()));
-            }
-            else {
-                fnax.reset(new std::ifstream(fileS.c_str(), std::ios::in));
-            }
-#else
-            fnax.reset(new std::ifstream(fileS.c_str(), std::ios::in));
-#endif
+            // Format probing uses the same centralized backend as full input,
+            // but remains sequential because only the first bytes are needed.
+            fnax = openInputFile(
+                fileS, std::ios::in, 64 * 1024, false);
 
             if (!*(fnax)) {
                 std::cerr << "\nCouldn't open " << file_type << " file \"" << fileS << "\"! Skipping..\n";

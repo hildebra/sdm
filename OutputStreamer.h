@@ -18,31 +18,6 @@
 #include <thread>
 #include <shared_mutex>
 
-
-#ifdef _isa1gzip
-#include "include/GZipStr.h"
-#endif
-
-#ifdef _izlib
-#include "include/izlib.h"
-#else
-
-#ifdef _gzipread
-#include "include/gzstream.h"
-#include "include/zstr.h"
-#endif
-/*typedef struct {
-    FILE* fp;char* mode;int is_plain;
-//    struct isal_gzip_header* gzip_header;
-//    struct inflate_state* state;
-//    struct isal_zstream* zstream;
-    uint8_t* buf_in;size_t buf_in_size;uint8_t* buf_out;size_t buf_out_size;
-} gzFile_t;
-int gzeof(gzFile_t* fp) { return 0; }
-typedef gzFile_t* gzFile;
-*/
-#endif
-
 //static mutex output_mtx;
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
@@ -305,7 +280,8 @@ private:
 	int suppressOutWrite;//0=all normal, 1=skip mainfile, 2=skip addfile, 3=skip both
 	bool write2File;
 	//bool mem_used;
-	atomic_int DNAinMem, writeThreadStatus;
+	std::atomic<uint64_t> DNAinMem;
+	std::atomic<int> writeThreadStatus;
 
 	int fastQver; //33, 62 or 59
 	int fastQoutVer; //33, 62 or 59
@@ -323,7 +299,7 @@ private:
 	//std::vector<std::future<ulong>> threads; 
 	int Nthrds;  int thrdsCnt; bool thrdsActive;
 	//controls output file size
-	int maxReadsPerOFile;
+	uint64_t maxReadsPerOFile;
 	std::atomic<uint64_t> ReadsWritten;
 	std::atomic<uint64_t> TotalReadsWritten;
 	uint demultiBPperSR;

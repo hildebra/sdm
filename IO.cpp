@@ -119,17 +119,22 @@ bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 	bool MIDuse, OutputStreamer* MD, int curThread) {
 
-	if (tdn[0] == nullptr) {
+	auto& read1 = tdn[0];
+	auto& read2 = tdn[1];
+	auto& midRead = tdn[2];
+
+	if (read1 == nullptr) {
 	    return false;
 	} //|| tdn->length()==0
     Instr::ScopedTimer st_proc(Instr::PROCESS_DNA);
 	//DNA objects as they should be??
-	if (MIDuse && tdn[2] == nullptr) {
+	if (MIDuse && midRead == nullptr) {
 		//cerr << "Missing MID read pair.\n";		exit(4);
 		throw std::runtime_error("Missing MID read pair.");
 
 	}
-	if (tdn[1] == nullptr && tdn[0] != nullptr && MD->isPEseq() == 2) {
+	const bool read2notNull = read2 != nullptr;
+	if (!read2notNull && MD->isPEseq() == 2) {
 		//cerr << "Second provided file has not the same number of entries as first file.\n";exit(5);
 		throw std::runtime_error("Second provided file has not the same number of entries as first file.");
 	}
@@ -139,32 +144,34 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 	//cdbg("process_DNA"+ tdn[0]->getId()+"\n");
 
 	Filters* curFil = MD->getFilters(curThread);
+	const int mdPeSeq = MD->isPEseq();
+	const int pairedRd = curFil->isPaired();
+	const bool doBCsAtAll = curFil->doBarcodes();
+	const bool dualBCs = curFil->doubleBarcodes();
+	const int BCoffs = curFil->getBCoffset();
 	//register read at all with stat counter:
 	 curFil->sTotalPlus(0);
-	if (tdn[1] != nullptr || curFil->isPaired() == 2) {
+	if (read2notNull || pairedRd == 2) {
 		curFil->sTotalPlus(1);
 	}
 	//collect some info on general run parameters
-	curFil->preFilterSeqStat(tdn[0], 0);
-	curFil->preFilterSeqStat(tdn[1], 1);
+	curFil->preFilterSeqStat(read1, 0);
+	curFil->preFilterSeqStat(read2, 1);
 
 
 
 	//prep some variables
-	int BCoffs = curFil->getBCoffset();
 	bool checkSwitchedRdPairs = curFil->checkSwitchedRdPairs();
-	bool dualBCs = curFil->doubleBarcodes();
-	bool doBCsAtAll = curFil->doBarcodes();
-	int pairedRd = curFil->isPaired();
+	(void)checkSwitchedRdPairs;
 	//bool checkReversedRead = curFil->checkRevRd();
 
 	int tagIdx(-2); int tagIdx2(-2);
 	string presentBC(""); int c_err(0);
 	//bool isReversed(false);//was a reversion detected?
 
-	if (MIDuse && tdn[2] != nullptr) {
-		tagIdx = curFil->findTag(tdn[2], presentBC, c_err, true,0,true,false); 
-		tdn[0]->setBCnumber(tagIdx, BCoffs);
+	if (MIDuse && midRead != nullptr) {
+		tagIdx = curFil->findTag(midRead, presentBC, c_err, true,0,true,false); 
+		read1->setBCnumber(tagIdx, BCoffs);
 	}
 	//routine checks, and reverses/swaps DNA objects
 	//bool reversedDNA = curFil->swapReverseDNApairs(tdn);
@@ -175,12 +182,13 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 
 
 	//manage reversed / swapped reads by detecting where the fwd primer is
-	bool wasReversed;
+	bool wasReversed = false;
 	if (pairedRd == 2) {
 		wasReversed= curFil->swapReverseDNApairs(tdn);
-	} else if (tdn[1] == nullptr) {
-		wasReversed = curFil->isReversedAmplicon(tdn[0]);
+	} else if (!read2notNull) {
+		wasReversed = curFil->isReversedAmplicon(read1);
 	}
+	(void)wasReversed;
 
 
     /*if (checkBC2ndRd) {
@@ -212,19 +220,19 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
     
 	//tdn[0]->reverse_compliment();
 	//actually important routine
-	MD->analyzeDNA(tdn[0], -1, 0, tagIdx, curThread);
+	MD->analyzeDNA(read1, -1, 0, tagIdx, curThread);
 	//tdn[0]->matchSeqRev
-	bool ch1(false); if (tdn[0] != NULL) { ch1 = tdn[0]->isGreenQual(); }
-	bool ch2(false); bool ch2n(false);
+	const bool ch1 = read1->isGreenQual();
+	bool ch2(false);
 
 
 
 	//if ( ch1 ) {	cerr << cnt << " \n";	}
 	//normal case for check 2nd read
-	if (!ch2 && tdn[1] != nullptr) { //ch1&&
+	if (read2notNull) { //ch1&&
 								//dnaTemp2->setBCnumber(tdn[0]->getBCnumber());
 		if (doBCsAtAll && !dualBCs) { //only check in read1 for BC, if not dual BCing!!
-			tagIdx2 = tdn[0]->getBCnumber();  // no 2nd BC, thus no BC search in 2nd read
+			tagIdx2 = read1->getBCnumber();  // no 2nd BC, thus no BC search in 2nd read
 			if (tagIdx2 >= 0) {
 				tagIdx2 -= BCoffs;
 			}else if (tagIdx2 < -1) {//something wrong with BCoffs
@@ -232,8 +240,8 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 			}
 		}
 		//if (isReversed) { tdn[1]->reverse_compliment(); }
-		MD->analyzeDNA(tdn[1], -1, 1, tagIdx2, curThread);
-		ch2 = tdn[1]->isGreenQual();
+		MD->analyzeDNA(read2, -1, 1, tagIdx2, curThread);
+		ch2 = read2->isGreenQual();
 	}
 
 	//set up BC in DNA header
@@ -244,41 +252,40 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 		//	tagIdx2 = curFil->findTag2(tdn[0], presentBC, c_err, false, -1);
 		//}
 
-		curFil->dblBCeval(tagIdx, tagIdx2, presentBC, tdn[0], tdn[1]);
+		curFil->dblBCeval(tagIdx, tagIdx2, presentBC, read1, read2);
 		c_err = -1;
 
 		//check a second time that barcode was correctly identified, just to be double sure...
-		if ( tagIdx != tagIdx2 || tdn[0]->getBCnumber() != tdn[1]->getBCnumber()) {
+		if ( tagIdx != tagIdx2 || read1->getBCnumber() != read2->getBCnumber()) {
 			//cerr << "Unequal BC numbers:" << tagIdx << " : " << tagIdx2 << "; in object: " << tdn[0]->getBCnumber() << " : " << tdn[1]->getBCnumber() << endl;
 			//cerr << "In read:" << tdn[0]->getId() << endl; exit(835);
-			throw std::runtime_error("Unequal BC numbers:" + itos(tagIdx) + " : " + itos(tagIdx2) + "; in object: " + itos(tdn[0]->getBCnumber()) + " : " + itos(tdn[1]->getBCnumber()) + "\nIn read:" + tdn[0]->getId());			
+			throw std::runtime_error("Unequal BC numbers:" + itos(tagIdx) + " : " + itos(tagIdx2) + "; in object: " + itos(read1->getBCnumber()) + " : " + itos(read2->getBCnumber()) + "\nIn read:" + read1->getId());			
 		}
 	}
 	
 
 	
 	if (tagIdx == -1 || tagIdx2 == -1) {
-		tdn[0]->setBarcodeDetected(false);
-		if (tdn[1] != nullptr) {
-			tdn[1]->setBarcodeDetected(false);
+		read1->setBarcodeDetected(false);
+		if (read2notNull) {
+			read2->setBarcodeDetected(false);
 		}
 	}	else  {
-		curFil->setBCdna(tagIdx, tdn[0]);
-		if (ch2) { curFil->setBCdna(tagIdx, tdn[1]); }
+		curFil->setBCdna(tagIdx, read1);
+		if (ch2) { curFil->setBCdna(tagIdx, read2); }
 		if (MIDuse && ch1) {
-			curFil->BCintoHead(tagIdx, tdn[0], presentBC, c_err, true);
-			if (ch2) { curFil->BCintoHead(tagIdx, tdn[1], presentBC, c_err, true); }
+			curFil->BCintoHead(tagIdx, read1, presentBC, c_err, true);
+			if (ch2) { curFil->BCintoHead(tagIdx, read2, presentBC, c_err, true); }
 		}
 	}
 
 
 
 	int idx1 = 1; int idx2 = 2;
-	bool read2notNull = tdn[1] != nullptr;
 
-	if (MD->isPEseq() == 2 ) {
-		if (read2notNull && tdn[0] != nullptr &&
-			(tdn[0]->isGreenYellowQual() && tdn[1]->isGreenYellowQual()) ) {
+	if (mdPeSeq == 2 ) {
+		if (read2notNull &&
+			(read1->isGreenYellowQual() && read2->isGreenYellowQual()) ) {
 			//only this case allows for paired reads out
 			idx1 = 1;  idx2 = 2;
 		}
@@ -347,10 +354,10 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 	bool owr2;
 	{
 		Instr::ScopedTimer st_out(Instr::OUTPUT_WRITE);
-		owr1 = MD->saveForWrite(tdn[0], idx1, curThread, Cstr1,false);
-		owr2 = MD->saveForWrite(tdn[1], idx2, curThread, Cstr2,false);
+		owr1 = MD->saveForWrite(read1, idx1, curThread, Cstr1,false);
+		owr2 = MD->saveForWrite(read2, idx2, curThread, Cstr2,false);
 		//mutex version to ensure read pairs together..
-		MD->writeForWrite(tdn[0],idx1,Cstr1,tdn[1],idx2,Cstr2);
+		MD->writeForWrite(read1,idx1,Cstr1,read2,idx2,Cstr2);
 	}
 
 	if (!owr1 || (!owr2 && read2notNull)) {
@@ -817,9 +824,9 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 	string shrtLog = "";
 
 	// main loop that goes over different files
-	int maxReadsWr = mainFilter->getXreadsWr(); // should program stop after having written a certain amount of reads?
-	int maxReadsRd = mainFilter->getXreadsRd();
-	int totalReadsRead(0);
+	uint64_t maxReadsWr = mainFilter->getXreadsWr(); // should program stop after having written a certain amount of reads?
+	uint64_t maxReadsRd = mainFilter->getXreadsRd();
+	uint64_t totalReadsRead(0);
 	uint64_t totalReadsWrite(0);
 	auto printConvertedSummary = [&]() {
 		if ((*cmdArgs)["-o_fna"] != "") {
@@ -873,8 +880,8 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 		// Sample memory at the start of processing each file
 		Instr::g_memoryTracker.sample();
 
-		if (maxReadsWr > 0 && totalReadsWrite >= static_cast<uint64_t>(maxReadsWr)) { cerr << "Skipping file " << uFX.first << "due to firstXreadsWrite .."; break; }
-		if (maxReadsRd > 0 && maxReadsRd - totalReadsRead <= 0) { cerr << "Skipping file " << uFX.first << "due to firstXreadsRead .."; break; }
+		if (maxReadsWr > 0 && totalReadsWrite >= maxReadsWr) { cerr << "Skipping file " << uFX.first << "due to firstXreadsWrite .."; break; }
+		if (maxReadsRd > 0 && totalReadsRead >= maxReadsRd) { cerr << "Skipping file " << uFX.first << "due to firstXreadsRead .."; break; }
 		if (files.idx[i].size() == 0) {	
 			throw std::runtime_error("fastXtar vector for " + uFX.first + " is empty");
 			//cerr << "fastXtar vector for " << uFX.first << " is empty" << endl;	exit(10);		
@@ -968,7 +975,7 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 		OutStreamer->setBPwrittenInSR(accumBPwrite);OutStreamer->setBPwrittenInSRmerg(accumBPwriteMerg);	
 		OutStreamer->attachBenchmark(sdm_benchmark);filter->setMultiDNA(OutStreamer);
 		if (maxReadsWr > 0) {
-			OutStreamer->setReadLimit(static_cast<uint64_t>(maxReadsWr) - totalReadsWrite);
+			OutStreamer->setReadLimit(maxReadsWr - totalReadsWrite);
 		}
 		writeStatus = ofstream::app;
 		//prepare for BC checking (rev/fwd)
@@ -1338,10 +1345,6 @@ void general_help(){
 #else
     cout << "No gzip support compiled\n";
 #endif
-#ifdef _isa1gzip
-	cout << "Compiled with ISA-1 gzip support\n";
-
-#endif
 #ifdef _THREADED
     cout<<"Multithreading not supported"
 #else
@@ -1373,7 +1376,6 @@ void printCmdsHelp(){//actually these are flags
 		 << " -paired <1|2|3>                1: singleton; 2: paired; 3: R1/R3 plus MID R2\n"
 		 << " -onlyPair <1|2>                Process only the selected read of a pair\n"
 		 << " -mergedPairs <0|1>             Input pairs were merged externally\n"
-		 << " -SyncReadPairs <T|F>           Synchronize paired input reads\n"
 		 << " -ignore_IO_errors <0|1>        Continue after corrupt FASTQ reads (default: 0)\n\n";
 	cout << "Mapping and output:\n"
 		 << " -map <file>                    Tab-delimited sample mapping file\n"
@@ -1493,7 +1495,7 @@ void printOptionHelp(){
 	helpOptionFile += "AmpliconShortPE\tF\n";
 	helpOptionFile += "CheckForMixedPairs\tF\n";
 	helpOptionFile += "CheckForReversedSeqs\tF\n";
-	helpOptionFile += "SyncReadPairs\tT\n\n";
+	helpOptionFile += "# Paired read identifiers are always validated for synchronization.\n\n";
 	helpOptionFile += "# Dereplication. If omitted, derepSrchLen defaults to minSeqLength.\n";
 	helpOptionFile += "derepSrchLen\t250\n\n";
 	helpOptionFile += "# Set TechnicalAdapter to an adapter sequence to remove it. Do not include\n";

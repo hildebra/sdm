@@ -58,21 +58,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 
 
-//#define _isa//1gzip
-//#define _iz//lib
-
 #ifndef _CRT_SECURE_NO_DEPRECATE
 #define _CRT_SECURE_NO_DEPRECATE
 #endif
 
-//read gzip'd files using zlib.h
+// Read and write gzip/BGZF using the custom zlib backends.
 #if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
 #include <stdlib.h>
 #include <crtdbg.h>
-#elif !defined(_isa1gzip) && !defined(_izlib)
-//#define _notgzip
-#define _gzipread   //enables gzip read/write support via zlib (zstr.h)
-#define _SDM_PARALLEL_GZIP_OUTPUT   //enables parallel gzip output (only for zlib-based gzip support)
+#else
+#define _gzipread
 #endif
 
 
@@ -133,7 +128,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //2.17: fixed PB rev seq checks..
 //2.18: fastq autoversion updated (more robust)
 //3.00: PacBio GoldenAxe, LotuS3
-//3.02: ISA-L gzip read integration (reverted at the end)
 //3.03: integrated safer deactivation of certain filters via "-1", GA round 2, streamlined findTag and detectBC functions
 //3.04: GA v2
 //3.05: fix for GA to report sample names and seed ext only to add samples with valid smpl name from demulti.add.fna
@@ -168,8 +162,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //      synchronized FASTA/QUAL and paired/MID input validation, safe gzip/output rotation and read limits,
 //      merge seed/quality and inclusive identity-cutoff handling, mapping row accounting, GoldenAxe aggregation,
 //      summary statistics, and 64-bit atomic output/read counters.
+//3.42: 22.7.26: made paired/MID identifier synchronization mandatory, completed 64-bit dereplication and
+//      cumulative read-counter propagation, and repaired logical quality medians, cache invalidation,
+//      bounded error lookups, floating-point quality-window thresholds, logical-trim operations, atomic
+//      R1/R2/MID acquisition, legacy mate-ID normalization, and malformed synchronized-input rejection.
+//3.43: 22.7.26: enforced synchronized paired reads, completed 64-bit counters, and fixed quality/trim logic.
 
-static const char* sdm_version = "3.41";
+static const char* sdm_version = "3.43";
 static const char* sdm_status = "beta";
 
 

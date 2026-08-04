@@ -25,7 +25,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define _CRT_SECURE_NO_DEPRECATE
 #endif
 
-//#include "include/iowrap.h"
 //#include "FastxReader.h"
 #include <functional>
 #include <cctype>
@@ -100,15 +99,21 @@ public:
         good_quality_ = false; mid_quality_ = false; failed_ = true;
     }
     //~DNA(){}
-    void appendSequence(const string& s) { sequence_ += s; sequence_length_ = sequence_.length(); }
+    void appendSequence(const string& s) {
+        sequence_ += s;
+        sequence_length_ = sequence_.length();
+        invalidateQualityCaches();
+    }
     void appendQuality(const vector<qual_score>& q);
     void fixQ0(void);
     void setSequence(string& s) {
         sequence_ = s;
         sequence_length_ = sequence_.length();
+        invalidateQualityCaches();
     }    void setSequence(string&& s) {
         sequence_ = std::move(s);
         sequence_length_ = sequence_.length();
+        invalidateQualityCaches();
     }
 
 
@@ -134,10 +139,16 @@ public:
         return std::string_view(sequence_.data(), len);
     }
 
-    void setQual(vector<qual_score> Q) { qual_ = move(Q); avg_qual_ = -1.f; }
+    void setQual(vector<qual_score> Q) {
+        qual_ = move(Q);
+        invalidateQualityCaches();
+    }
     //void setQual(vector<qual_score>&& Q) { qual_ = Q; avg_qual_ = -1.f; }
 
-    void setAllQual(qual_score q) { for (size_t i = 0; i < qual_.size(); i++) { qual_[i] = q; } avg_qual_ = -1.f; }
+    void setAllQual(qual_score q) {
+        for (size_t i = 0; i < qual_.size(); i++) { qual_[i] = q; }
+        invalidateQualityCaches();
+    }
 
     const string& getId() {
         if (id_fixed_) {
@@ -172,7 +183,7 @@ public:
     int numNonCanonicalDNA(bool);
     float getAvgQual();
     int getMedianQual();
-    unsigned int getQsum() { return quality_sum_; }
+    uint64_t getQsum() { return quality_sum_; }
     float qualWinfloat(uint, float, int&);
 
 
@@ -183,22 +194,10 @@ public:
     bool qualAccumTrim(double d);
     int qualAccumulate(double d);
 
-    double getAccumError() {
-        if (accumulated_error_ == 0.f) {
-            for (uint i = 0; i < qual_.size(); i++) {
-                if (qual_[i] >= 0) {
-                    accumulated_error_ += SAqualP[qual_[i]];
-                }
-            }
-        }
-        if (std::isinf((double)accumulated_error_)) {
-            accumulated_error_ = 5.f;
-        }
-        return accumulated_error_;
-    }
+    double getAccumError();
     int minQual() { int mq = 50; for (uint i = 0; i < qual_.size(); i++) { if (qual_[i] < mq) { mq = qual_[i]; } }return mq; }
-    void ntSpecQualScores(vector<long>&, vector<long>&);
-    void ntSpecQualScoresMT(vector<long>&, vector<long>&);
+    void ntSpecQualScores(vector<uint64_t>&, vector<uint64_t>&);
+    void ntSpecQualScoresMT(vector<uint64_t>&, vector<uint64_t>&);
 
     //returns qual filtered length 
     inline uint length() { return (uint)sequence_length_; }
@@ -280,7 +279,10 @@ public:
 
     void prepareWrite(int fastQver);
     void reset();
-    void resetTruncation() { sequence_length_ = sequence_.length(); }
+    void resetTruncation() {
+        sequence_length_ = sequence_.length();
+        invalidateQualityCaches();
+    }
     void setPassed(bool b);
     void setYellowQual(bool b) {
         mid_quality_ = b; failed_ = false;
@@ -423,8 +425,14 @@ protected:
 
     //const char* DN;
     float avg_qual_;
-    unsigned int quality_sum_;
+    uint64_t quality_sum_;
     double accumulated_error_;
+
+    void invalidateQualityCaches() {
+        avg_qual_ = -1.f;
+        quality_sum_ = 0;
+        accumulated_error_ = 0.;
+    }
     uint8_t good_quality_ : 1;
     uint8_t mid_quality_ : 1;
     uint8_t failed_ : 1;
@@ -484,7 +492,7 @@ protected:
     float tempFloat;
 };
 
-using sample_count_t = uint32_t;
+using sample_count_t = uint64_t;
 using read_occ_entry = std::pair<int, sample_count_t>;
 typedef std::vector<read_occ_entry> read_occ;
 
@@ -520,19 +528,19 @@ public:
     bool betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2);
     void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, int, bool);
     void incrementSampleCounter(int sample_id);
-    void writeMap(ofstream& os, const string&, vector<int>&, const vector<int>&, vector<uint64_t>&, vector<int>&);
+    void writeMap(ofstream& os, const string&, vector<uint64_t>&, const vector<int>&, vector<uint64_t>&, vector<int>&);
     //inline int getCount() { return count_; }
     uint64_t totalSum();
     //uint getBestSeedLength() { return best_seed_length_; }
     //void setBestSeedLength(uint i) { best_seed_length_ = i; }
-    void incrementSampleCounterBy(int sample_id, long count);
+    void incrementSampleCounterBy(int sample_id, uint64_t count);
     void transferOccurence(shared_ptr<DNAunique>);
     const read_occ& getDerepMap() { return occurence; }
-    vector<int> getDerepMapSort(size_t);
+    vector<uint64_t> getDerepMapSort(size_t);
     //vector<pair_<int, int>> getDerepMapSort2(size_t wh);
     //void getDerepMapSort(vector<int>&, vector<int>&);
 
-    using qual_accum_t = uint32_t;
+    using qual_accum_t = uint64_t;
 
     void addToQualSum(qual_accum_t& target, qual_accum_t value);
 

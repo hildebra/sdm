@@ -187,7 +187,7 @@ The `-options` file contains tab-separated `setting<TAB>value` lines. Lines begi
 
 ### Paired reads, dereplication, and adapters
 
-- `AmpliconShortPE`, `CheckForMixedPairs`, `CheckForReversedSeqs`, and `SyncReadPairs` accept `T` or `F`.
+- `AmpliconShortPE`, `CheckForMixedPairs`, and `CheckForReversedSeqs` accept `T` or `F`.
 - `derepSrchLen` sets the dereplication search length. If absent, it defaults to `minSeqLength`.
 - With `-illuminaClip 1`, provide adapter sequences through `illuminaFwd`, `illuminaRev`, `illuminaSngUni`, and `illuminaSngIdx` as needed.
 
@@ -248,7 +248,7 @@ sdm -i_fastq reads.fastq -o_fastq subset.fastq -XfirstReadsRead 10000 -XfirstRea
 - `-i_qual_offset <0|auto|n>` — input FASTQ quality offset.
 - `-o_qual_offset <n>` — output FASTQ quality offset; default: `33`.
 - `-ignore_IO_errors <0|1>` — continue after corrupted FASTQ records; default: `0`.
-- `-SyncReadPairs <T|F>` — check and synchronize paired input order.
+- Paired-read and MID identifiers are always checked for synchronized input order.
 - `-mergedPairs <0|1>` — indicate reads were merged externally.
 - `-5PR1cut <n>` and `-5PR2cut <n>` — remove leading bases from read 1 or 2.
 

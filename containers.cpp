@@ -519,28 +519,19 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 	}
 
     if (dna_merged){
-		// use merged sequence for searching but keep the merged object alive
-		const string& mergedSeq = dna_merged->getSequence();
-		size_t searchLen = (searchLength == -1)
+		const std::string_view mergedSeq = dna_merged->getSeqPseudoView();
+		const size_t searchLen = (searchLength == -1)
 			? mergedSeq.size()
 			: std::min(static_cast<size_t>(searchLength), mergedSeq.size());
-		if (searchLen == mergedSeq.size()) {
-			srchSeqPtr = &mergedSeq;
-		}else {
-			srchSeqBuffer.assign(mergedSeq.data(), searchLen);
-			srchSeqPtr = &srchSeqBuffer;
-		}
+		srchSeqBuffer.assign(mergedSeq.data(), searchLen);
+		srchSeqPtr = &srchSeqBuffer;
 	} else {
-      const string& seq = dna->getSequence();
-		size_t searchLen = (searchLength == -1)
+		const std::string_view seq = dna->getSeqPseudoView();
+		const size_t searchLen = (searchLength == -1)
 			? seq.size()
 			: std::min(static_cast<size_t>(searchLength), seq.size());
-		if (searchLen == seq.size()) {
-			srchSeqPtr = &seq;
-		}else {
-			srchSeqBuffer.assign(seq.data(), searchLen);
-			srchSeqPtr = &srchSeqBuffer;
-		}
+		srchSeqBuffer.assign(seq.data(), searchLen);
+		srchSeqPtr = &srchSeqBuffer;
 	}
 	const string& srchSeq = *srchSeqPtr;
 	srch_seq_total_len_.fetch_add(static_cast<uint64_t>(srchSeq.size()), std::memory_order_relaxed);
@@ -831,7 +822,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	//bool thrHit = false;
 
 	//sanity check
-	vector<int> counts_per_sample(barcode_number_to_sample_id_.size(), 0);
+	vector<uint64_t> counts_per_sample(barcode_number_to_sample_id_.size(), 0);
 	vector<uint64_t> map_combined_counts;
 	vector<int> map_touched_groups;
 	if (!smplId2comb.empty()) {
@@ -982,7 +973,8 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 		for (; j < barcode_number_to_sample_id_.size(); j++) {
 			if (SampleID[i] == barcode_number_to_sample_id_[j]) { detected = true;  break; }
 		}
-        if (detected && mf->collectStatistics[0]->BarcodeDetected[i] != counts_per_sample[j] && mf->collectStatistics[0]->BarcodeDetected[i] != -1) {
+        if (detected && mf->collectStatistics[0]->BarcodeDetected[i] != -1 &&
+            static_cast<uint64_t>(mf->collectStatistics[0]->BarcodeDetected[i]) != counts_per_sample[j]) {
 			//cerr << "ERROR: Unequal counts for " << SampleID[i] << ": " << mf->collectStatistics.BarcodeDetected[i] << " vs " << counts_per_sample[j] << endl;
 			uneqCnts++;
 			
@@ -1007,8 +999,8 @@ bool Dereplicate::pass_deprep_conditions(shared_ptr<DNAunique> d) {
 	if (minCopiesFastFailThreshold > 0 && d->totalSum() < minCopiesFastFailThreshold) {
 		return false;
 	}
-	vector<int> x = d->getDerepMapSort(minCopiesSiz);
-	int cumSum(0);
+	vector<uint64_t> x = d->getDerepMapSort(minCopiesSiz);
+	uint64_t cumSum(0);
 	for (size_t i = 0; i < x.size(); i++) {
 		cumSum += x[i];
 		//if (minCopies[i] == -1) { continue; }
@@ -1203,13 +1195,13 @@ void UClinks::readDerepInfo(const string dereM) {
 }
 
 //read in dereplicated info from derep.map and derep.hq.fq (in IS) -> they are in the same order
-int UClinks::oneDerepLine(shared_ptr<DNAunique> d) {
+uint64_t UClinks::oneDerepLine(shared_ptr<DNAunique> d) {
 	
 	if (MAPread){
 		return 0;
 	}
 	string line("");
-	int cnt(0);
+	uint64_t cnt(0);
 	while (!safeGetline(mapdere, line).eof()) {
 		//if (line.length() < 3) { continue; }
 		if (line[0] == '#') {continue;}
@@ -1218,7 +1210,7 @@ int UClinks::oneDerepLine(shared_ptr<DNAunique> d) {
 		//string head("");
 		//ss << line;
 		int tbcnt = -1;
-		long curCnt(0),curCnt2(0);
+		uint64_t curCnt(0), curCnt2(0);
 		size_t strpos(line.find_first_of('\t')), lastpos(0);
 		while (strpos != string::npos){
 		//while (getline(ss, segments, '\t')) {
@@ -1235,19 +1227,19 @@ int UClinks::oneDerepLine(shared_ptr<DNAunique> d) {
 				}
 				size_t idx = segments.find(";size=");
 				if (idx != string::npos) {
-					curCnt = atoi(segments.substr(idx + 6, segments.find(";", idx + 5) - (idx + 6)).c_str());
+					curCnt = stoull(segments.substr(idx + 6, segments.find(";", idx + 5) - (idx + 6)));
 					//curCnt
 				}
 				continue;
 			}
-			size_t spl = segments.find(":"); int occur = stoi(segments.substr(spl+1));
+			size_t spl = segments.find(":"); uint64_t occur = stoull(segments.substr(spl + 1));
             d->incrementSampleCounterBy(stoi(segments.substr(0, spl)), occur);
 			curCnt2 += occur;
 			//string tmp = segments.substr(0, spl);
 		}
 		//last round
 		segments = line.substr(lastpos);
-		size_t spl = segments.find(":"); long occur = stoi(segments.substr(spl + 1));
+		size_t spl = segments.find(":"); uint64_t occur = stoull(segments.substr(spl + 1));
         d->incrementSampleCounterBy(stoi(segments.substr(0, spl)), occur);
 		curCnt2 += occur;
 
@@ -1276,14 +1268,14 @@ void UClinks::finishMAPfile(){
 	string line("");
 	//bool hardAdd = false;
 
-	int finishMapCnt = 0;
+	uint64_t finishMapCnt = 0;
 
 	//go through ucl file line by line
 	while (!safeGetline(mapdere, line).eof()) {	
 		if (line[0] == '#') { continue; }
 		string segments;
 		int tbcnt = -1;
-		int curCnt(0), curCnt2(0);
+		uint64_t curCnt(0), curCnt2(0);
 		size_t strpos(line.find_first_of('\t')), lastpos(strpos + 1);
 		segments = line.substr(0, strpos);
 		//1st setup empty DNA for each remaining line
@@ -1291,7 +1283,7 @@ void UClinks::finishMAPfile(){
 		d->seal();
 		size_t idx = segments.find(";size=");
 		if (idx != string::npos) {
-			curCnt = atoi(segments.substr(idx + 6, segments.find(";", idx + 5) - (idx + 6)).c_str());
+			curCnt = stoull(segments.substr(idx + 6, segments.find(";", idx + 5) - (idx + 6)));
 		}
 		strpos = line.find_first_of('\t', lastpos);
 
@@ -1300,14 +1292,14 @@ void UClinks::finishMAPfile(){
 			lastpos = strpos + 1;
 			strpos = line.find_first_of('\t', lastpos);
 			tbcnt++;
-			size_t spl = segments.find(":"); int occur = stoi(segments.substr(spl + 1));
+			size_t spl = segments.find(":"); uint64_t occur = stoull(segments.substr(spl + 1));
             d->incrementSampleCounterBy(stoi(segments.substr(0, spl)), occur);
 			curCnt2 += occur;
 			//string tmp = segments.substr(0, spl);
 		}
 		//last round
 		segments = line.substr(lastpos);
-		size_t spl = segments.find(":"); int occur = stoi(segments.substr(spl + 1));
+		size_t spl = segments.find(":"); uint64_t occur = stoull(segments.substr(spl + 1));
         d->incrementSampleCounterBy(stoi(segments.substr(0, spl)), occur);
 		curCnt2 += occur;
 
@@ -1350,7 +1342,7 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 #ifdef DEBUG
 	cerr << "UC seed extension" << endl;
 #endif
-	int UCcnt = 0;
+	uint64_t UCcnt = 0;
 	std::list<string>::iterator listIT;
 	shared_ptr<DNAunique> match(nullptr); shared_ptr<DNA>  match2(nullptr);
 	string segs("");
@@ -2170,10 +2162,11 @@ void UClinks::writeNewSeeds(OutputStreamer* MD, Filters* fil,
 			d->setNewID(newH + ".1");
 
 			if (b_merge_pairs_optiSeed_ ){//&& bestDNA2[i] != NULL) {
-				bool didMerge = MD->saveForWrite_merge(d, newH, 0, true);
-				//didMerge = MD->saveForWrite_merge(dM, nullptr, newH, 0, true);
-				if (!didMerge) {//not merged? we want to add this DNA nonetheless to output
-					//better to do this in saveForWrite already
+				// Route each OTU seed to exactly one output class.  A failed merge
+				// must fall through to paired/singleton output without first writing
+				// R1 to the merged file; a successful merge is already fully written.
+				if (MD->saveForWrite_merge(d, newH, 0, false)) {
+					continue;
 				}
 			}
 

@@ -152,7 +152,10 @@ inline void ThreadPool::configure(size_t threads) {
     configured_threads_().store(threads);
     if (!gzip_instance_created_().load() && configured_gzip_threads_().load() == 0) {
         size_t gzipThreads = threads / 4;
-        if (gzipThreads == 0) {
+        if (threads > 1 && gzipThreads < 2) {
+            gzipThreads = 2;
+        }
+        else if (gzipThreads == 0) {
             gzipThreads = 1;
         }
         configured_gzip_threads_().store(gzipThreads);
@@ -185,7 +188,10 @@ inline size_t ThreadPool::configured_gzip_thread_count() {
     }
     size_t compute = configured_thread_count();
     size_t derived = compute / 4;
-    if (derived == 0) {
+    if (compute > 1 && derived < 2) {
+        derived = 2;
+    }
+    else if (derived == 0) {
         derived = 1;
     }
     return derived;

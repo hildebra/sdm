@@ -2,238 +2,7 @@
 #include "ThreadPool.h"
 #include "Benchmark.h"
 
-#if defined(_gzipread) && defined(_SDM_PARALLEL_GZIP_OUTPUT)
-// Uses zstr (already included in _gzipread builds via OutputStreamer.h).
-#include "include/iowrap.h"
-class ParallelGzipZlibOfstream : public std::ostream, private std::streambuf {
-public:
-	ParallelGzipZlibOfstream(const std::string& filename, std::ios_base::openmode mode, size_t bufferSize)
-		: std::ostream(this), file_(filename, mode), bufferSize_(bufferSize) {
-		if (!file_.is_open()) {
-			throw std::runtime_error("Error opening file: " + filename);
-		}
-		if (bufferSize_ == 0) {
-			bufferSize_ = 1024 * 1024;
-		}
-		buffer_.resize(bufferSize_);
-		setp(buffer_.data(), buffer_.data() + buffer_.size());
-		ThreadPool::set_gzip_mode(true);
-		startWriterThread();
-	}
-
-	~ParallelGzipZlibOfstream() override {
-		sync();
-		stopWriterThread();
-		ThreadPool::set_gzip_mode(false);
-		if (file_.is_open()) {
-			file_.close();
-		}
-	}
-
-protected:
-	std::streambuf::int_type overflow(std::streambuf::int_type ch) override {
-		using traits = std::streambuf::traits_type;
-		if (!compressAndQueue()) {
-			return traits::eof();
-		}
-		if (!traits::eq_int_type(ch, traits::eof())) {
-			*pptr() = traits::to_char_type(ch);
-			pbump(1);
-		}
-		return traits::not_eof(ch);
-	}
-
-	int sync() override {
-		return compressAndQueue() ? 0 : -1;
-	}
-
-private:
-	bool compressAndQueue() {
-		const size_t dataSize = static_cast<size_t>(pptr() - pbase());
-		if (dataSize == 0) {
-			return file_.good();
-		}
-
-		std::vector<uint8_t> input(dataSize);
-		std::memcpy(input.data(), buffer_.data(), dataSize);
-
-		{
-			std::unique_lock<std::mutex> lk(mtx_);
-			cv_.wait(lk, [this]() {
-				return stop_ || inFlight_ < maxInFlight_;
-			});
-			if (stop_) {
-				return false;
-			}
-			pending_.emplace_back(ThreadPool::instance().submit_gzip([in = std::move(input)]() mutable {
-				return compressMember(std::move(in));
-			}));
-			++inFlight_;
-		}
-		cv_.notify_all();
-
-		setp(buffer_.data(), buffer_.data() + buffer_.size());
-		return file_.good();
-	}
-
-	static std::vector<uint8_t> compressMember(std::vector<uint8_t>&& input) {
-		if (input.empty()) {
-			return std::vector<uint8_t>();
-		}
-
-		z_stream strm;
-		std::memset(&strm, 0, sizeof(strm));
-		const int initRc = deflateInit2(&strm, Z_BEST_SPEED, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
-		if (initRc != Z_OK) {
-			throw std::runtime_error("deflateInit2 failed with code: " + std::to_string(initRc));
-		}
-
-		std::vector<uint8_t> out(compressBound(static_cast<uLong>(input.size())) + 128);
-		strm.next_in = reinterpret_cast<Bytef*>(input.data());
-		strm.avail_in = static_cast<uInt>(input.size());
-		strm.next_out = out.data();
-		strm.avail_out = static_cast<uInt>(out.size());
-
-		int rc = Z_OK;
-		while (rc == Z_OK) {
-			rc = deflate(&strm, Z_FINISH);
-			if (rc == Z_OK && strm.avail_out == 0) {
-				size_t oldSize = out.size();
-				out.resize(oldSize * 2);
-				strm.next_out = out.data() + oldSize;
-				strm.avail_out = static_cast<uInt>(out.size() - oldSize);
-			}
-		}
-
-		if (rc != Z_STREAM_END) {
-			deflateEnd(&strm);
-			throw std::runtime_error("deflate failed with code: " + std::to_string(rc));
-		}
-
-		const int endRc = deflateEnd(&strm);
-		if (endRc != Z_OK) {
-			throw std::runtime_error("deflateEnd failed with code: " + std::to_string(endRc));
-		}
-
-		out.resize(static_cast<size_t>(strm.total_out));
-		return out;
-	}
-
-	void startWriterThread() {
-		if (started_) {
-			return;
-		}
-		stop_ = false;
-		writer_ = std::thread(&ParallelGzipZlibOfstream::writerLoop, this);
-		started_ = true;
-	}
-
-	void stopWriterThread() {
-		if (!started_) {
-			return;
-		}
-		{
-			std::lock_guard<std::mutex> lk(mtx_);
-			stop_ = true;
-		}
-		cv_.notify_all();
-		if (writer_.joinable()) {
-			writer_.join();
-		}
-		started_ = false;
-	}
-
-	void writerLoop() {
-		for (;;) {
-			std::future<std::vector<uint8_t>> fut;
-			{
-				std::unique_lock<std::mutex> lk(mtx_);
-				cv_.wait(lk, [this]() {
-					return stop_ || !pending_.empty();
-				});
-				if (pending_.empty()) {
-					if (stop_) {
-						break;
-					}
-					continue;
-				}
-				fut = std::move(pending_.front());
-				pending_.pop_front();
-			}
-
-			std::vector<uint8_t> compressed;
-			try {
-				compressed = fut.get();
-			}
-			catch (...) {
-				{
-					std::lock_guard<std::mutex> lk(mtx_);
-					stop_ = true;
-				}
-				cv_.notify_all();
-				break;
-			}
-			if (!compressed.empty()) {
-				file_.write(reinterpret_cast<const char*>(compressed.data()), static_cast<std::streamsize>(compressed.size()));
-			}
-
-			{
-				std::lock_guard<std::mutex> lk(mtx_);
-				if (inFlight_ > 0) {
-					--inFlight_;
-				}
-			}
-			cv_.notify_all();
-		}
-
-		for (;;) {
-			std::future<std::vector<uint8_t>> fut;
-			{
-				std::lock_guard<std::mutex> lk(mtx_);
-				if (pending_.empty()) {
-					break;
-				}
-				fut = std::move(pending_.front());
-				pending_.pop_front();
-			}
-			std::vector<uint8_t> compressed;
-			try {
-				compressed = fut.get();
-			}
-			catch (...) {
-				{
-					std::lock_guard<std::mutex> lk(mtx_);
-					stop_ = true;
-				}
-				cv_.notify_all();
-				break;
-			}
-			if (!compressed.empty()) {
-				file_.write(reinterpret_cast<const char*>(compressed.data()), static_cast<std::streamsize>(compressed.size()));
-			}
-			{
-				std::lock_guard<std::mutex> lk(mtx_);
-				if (inFlight_ > 0) {
-					--inFlight_;
-				}
-			}
-			cv_.notify_all();
-		}
-	}
-
-	std::ofstream file_;
-	size_t bufferSize_;
-	std::vector<char> buffer_;
-	std::deque<std::future<std::vector<uint8_t>>> pending_;
-	std::mutex mtx_;
-	std::condition_variable cv_;
-	std::thread writer_;
-	size_t inFlight_ = 0;
-	size_t maxInFlight_ = 32;
-	bool stop_ = false;
-	bool started_ = false;
-};
-#endif
+#include "OutputFileStream.h"
 
 //**************************** ofbufstream ****************************
 ofbufstream::ofbufstream(const string IF, int mif, bool isMC, size_t bufferS)
@@ -252,12 +21,14 @@ ofbufstream::ofbufstream(const string IF, int mif, bool isMC, size_t bufferS)
 }
 
 ofbufstream::~ofbufstream() {
-	deactivate();
+	try { deactivate(); }
+	catch (const std::exception& error) {
+		std::cerr << "Failed to finalize " << file << ": " << error.what() << "\n";
+	}
 }
 
 void ofbufstream::finishWrites() {
-   emptyStream();
-	stopWriterThread();
+	emptyStream();
 }
 
 bool ofbufstream::operator! (void) {
@@ -353,36 +124,21 @@ void ofbufstream::activate() {
 	if (modeIO == ios::app) m |= ios::app;
 	else m |= ios::trunc;
 
-	if (isGZ) {
-#if defined(_gzipread)
-		#if defined(_SDM_PARALLEL_GZIP_OUTPUT)
-		primary = std::make_unique<ParallelGzipZlibOfstream>(file.c_str(), m | ios::binary, bufS);
-		#else
-		primary = std::make_unique<zstr::ofstream>(file.c_str(), m | ios::binary);
-		#endif
-#elif defined(_isa1gzip)
-		primary = std::make_unique<GzipOfstream>(file.c_str(), 8 * 1024 * 1024);
-#else
-		cerr << "Warning: gzip output requested but no gzip support compiled in; writing uncompressed output to " << file << endl;
-		primary = std::make_unique<std::ofstream>(file.c_str(), m | ios::binary);
-#endif
-	}
-	else {
-		primary = std::make_unique<std::ofstream>(file.c_str(), m | ios::binary);
-	}
-
+	primary = openOutputFile(file, m, bufS, doMC);
 	asyncWriterEnabled = shouldUseAsyncWriter();
-	if (asyncWriterEnabled) {
-		startWriterThread();
-	}
 }
 
 void ofbufstream::deactivate() {
 	if (coutW) return;
 	finishWrites();
-	if (primary) {
-		primary->flush();
+	if (!primary) return;
+	try {
+		finalizeOutputFile(primary, file);
 		primary.reset();
+	}
+	catch (...) {
+		primary.reset();
+		throw;
 	}
 }
 
@@ -487,7 +243,7 @@ void ofbufstream::stopWriterThread() {
 }
 
 bool ofbufstream::shouldUseAsyncWriter() const {
-	return isGZ;
+	return false;
 }
 
 bool ofbufstream::internalWrite(bool closeThis) {
@@ -780,22 +536,19 @@ void OutputStreamer::analyzeDNA(const shared_ptr<DNA>& d, int FilterUse, int pai
 		return;
 	}
 	if (d->isFailed()) { return; }
+	(void)FilterUse;
 	Filters* curFil = this->getFilters(thr);
-	bool isP1 = max(0, pair) == 0;
+	const bool isP1 = (pair <= 0);
+	const int cut5p = isP1 ? curFil->getcut5PR1() : curFil->getcut5PR2();
+	const bool doFilter = curFil->doFilterAtAll();
+	const bool dualBC = curFil->doubleBarcodes();
 
-	if (isP1 && curFil->getcut5PR1()) {
-		d->cutSeq(0, curFil->getcut5PR1());
-
+	if (cut5p > 0) {
+		d->cutSeq(0, cut5p);
 	}
-	else if (!isP1 && curFil->getcut5PR2()) {
-		d->cutSeq(0, curFil->getcut5PR2());
-	}
 
-	if (!curFil->doFilterAtAll()) {
-		if (idx < 0 && !isP1 && !curFil->doubleBarcodes()) {
-			;
-		}
-		else if (idx < 0) {
+	if (!doFilter) {
+		if (idx < 0 && (isP1 || dualBC)) {
 			idx = curFil->detectCutBC(d, isP1); //still need to check for BC
 		}
 		if (idx >= 0) { //prevent second read pair_ from being flagged as true

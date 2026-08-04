@@ -28,60 +28,61 @@ public:
                    RSQS(0.f), USQS(0.f), rstat_accumError(0.f),
                    rstat_VQmed(0), rstat_VSmed(0){}
 
-    unsigned int maxL, PrimerFail, AvgQual, HomoNT, HomoNTtrimmed;
-    unsigned int PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)
-    unsigned int minL, minLqualTrim, TagFail, MaxAmb, QualWin;
-    unsigned int Trimmed, AccErrTrimmed, QWinTrimmed, total, totalRejected;
-    unsigned int fail_correct_BC, suc_correct_BC, failedDNAread;
-    unsigned int adapterRem, RevPrimFound;
-    uint totalSuccess;
-    uint DerepAddBadSeq;
+    uint64_t maxL, PrimerFail, AvgQual, HomoNT, HomoNTtrimmed;
+    uint64_t PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)
+    uint64_t minL, minLqualTrim, TagFail, MaxAmb, QualWin;
+    uint64_t Trimmed, AccErrTrimmed, QWinTrimmed;
+    uint64_t total, totalRejected;
+    uint64_t fail_correct_BC, suc_correct_BC, failedDNAread;
+    uint64_t adapterRem, RevPrimFound;
+    uint64_t totalSuccess;
+    uint64_t DerepAddBadSeq;
     //binomial error model
-    unsigned int BinomialErr;
-    uint dblTagFail;
+    uint64_t BinomialErr;
+    uint64_t dblTagFail;
     //recovered singletons within pairs
-    unsigned int singleton;
-    vector<int> BarcodeDetected;
-    vector<int> BarcodeDetectedFail;
+    uint64_t singleton;
+    vector<int64_t> BarcodeDetected;
+    vector<int64_t> BarcodeDetectedFail;
 
     // ReportStats
     bool bMedianCalcs;
 
-    const vector<unsigned int>& get_rstat_Vmed(int x);
+    const vector<uint64_t>& get_rstat_Vmed(int x);
 
     //median
-    unsigned int rstat_totReads, rstat_NTs, rstat_qualSum, rstat_Qmed, rstat_Smed;
+    uint64_t rstat_totReads, rstat_NTs, rstat_qualSum, rstat_Qmed, rstat_Smed;
     //means, Relative sample_id_ Quality Score (RSQS), Unifying sample_id_ Quality Score (USQS)
     float RSQS, USQS;
     float rstat_accumError;
-    vector<long> QperNT, NTcounts;
-    vector<unsigned int> rstat_VQmed, rstat_VSmed;
+    vector<uint64_t> QperNT, NTcounts;
+    vector<uint64_t> rstat_VQmed, rstat_VSmed;
 
 
     void addDNAStats(shared_ptr<DNA> d);
 
     void calcSummaryStats(float remSeqs, unsigned int min_l, float min_q);
 
-    static float calc_median(vector<unsigned int> &in, float perc);
+    static float calc_median(vector<uint64_t> &in, float perc);
 
-    static void addMedian2Histo(unsigned int in, vector<unsigned int> &histo);
+    static void addMedian2Histo(unsigned int in, vector<uint64_t> &histo);
 
-    unsigned int lowest(const vector<uint> &in);
+    unsigned int lowest(const vector<uint64_t> &in);
 
-    unsigned int highest(const vector<uint> &in);
+    unsigned int highest(const vector<uint64_t> &in);
 
     void printStats2(ostream &give, float remSeqs, int pair);
 
     void printGCstats(ostream &give);
 
-    vector<size_t> medVrange(const vector<uint>);
+    vector<size_t> medVrange(const vector<uint64_t>);
 
     vector<size_t> getVrange(int which);
 
     float GCcontent();
     void merge(Statistics &, vector<int> &idx);
     void reset();
-    uint total2;
+    uint64_t total2;
 };
 
 struct PrimerVariantTracker {
@@ -137,43 +138,43 @@ public:
     bool getbLvsQlogs();
     //void addDNAStatsMT(shared_ptr<DNA> d, data_MT *data);
     void calcSummaryStats(float remSeqs, unsigned int min_l, float min_q);
-    float calc_median(vector<uint>& in, float perc);
-    void add_median2histo(vector<unsigned int>& in, vector<unsigned int>& histo);
-    void addMedian2Histo(unsigned int in, vector<unsigned int>& histo);
-    void addMeanStats(unsigned int NT, unsigned int Qsum, float AccErr);
+    float calc_median(vector<uint64_t>& in, float perc);
+    void add_median2histo(vector<uint64_t>& in, vector<uint64_t>& histo);
+    void addMedian2Histo(unsigned int in, vector<uint64_t>& histo);
+    void addMeanStats(uint64_t NT, uint64_t Qsum, float AccErr);
     void addLvsQlogs(uint L, float avg, int med);
     // TEST IF PRODUCES SAME RESULTS
     void addNtSpecQualScores(shared_ptr<DNA> dna);
 
-    unsigned int lowest(const vector<uint>& in);
-    unsigned int highest(const vector<uint>& in);
+    unsigned int lowest(const vector<uint64_t>& in);
+    unsigned int highest(const vector<uint64_t>& in);
     void printStats2(ostream& give, float remSeqs, int pair);
     void printGCstats(ostream& give);
     void printLvsQ(ostream& give);
     double meanReadLength() const {
         return rstat_totReads == 0 ? 0.0 : static_cast<double>(rstat_NTs) / static_cast<double>(rstat_totReads);
     }
-    unsigned long readCount() const { return rstat_totReads; }
+    uint64_t readCount() const { return rstat_totReads; }
     void addRepStats(ReportStats&);
     bool bMedianCalcs;
     bool bLvsQlogs;
-    const vector<unsigned int>& get_rstat_Vmed(int x);
+    const vector<uint64_t>& get_rstat_Vmed(int x);
     //const vector<unsigned int> &get_rstat_VSmed(){return rstat_VSmed;}
     vector<size_t> getVrange(int which);
 
 protected:
 
     //median
-    vector<size_t> medVrange(const vector<uint>);
-    unsigned long rstat_totReads, rstat_NTs, rstat_qualSum, rstat_Qmed, rstat_Smed;
+    vector<size_t> medVrange(const vector<uint64_t>);
+    uint64_t rstat_totReads, rstat_NTs, rstat_qualSum, rstat_Qmed, rstat_Smed;
     //means, Relative sample_id_ Quality Score (RSQS), Unifying sample_id_ Quality Score (USQS)
     float RSQS, USQS;
     double rstat_accumError;
-    vector<long> QperNT, NTcounts;
+    vector<uint64_t> QperNT, NTcounts;
     float GCcontent();
 
     //bin based median calculation's
-    vector<unsigned int> rstat_VQmed, rstat_VSmed;
+    vector<uint64_t> rstat_VQmed, rstat_VSmed;
     std::list<int> listOfLengths;
     std::list<float> listOfQuals;
     std::list<float> listOfQualMeds;
@@ -221,35 +222,36 @@ public:
     void addPostFilt(shared_ptr<DNA> d);
     void addPreFilt(shared_ptr<DNA> d);
 
-    unsigned int maxL, PrimerFail, AvgQual, HomoNT, HomoNTtrimmed;
-    unsigned int PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)
-    unsigned int minL, minLqualTrim, TagFail, MaxAmb, QualWin;
-    unsigned int Trimmed, AccErrTrimmed, QWinTrimmed, totalMid;
-    std::atomic<unsigned int> total;
-    std::atomic<unsigned int> totalRejected;
-    unsigned int fail_correct_BC, suc_correct_BC, failedDNAread;
-    unsigned int adapterRem, RevPrimFound;
-    std::atomic<unsigned int> total2;
-    unsigned int totalSuccess;
-    uint DerepAddBadSeq;
+    uint64_t maxL, PrimerFail, AvgQual, HomoNT, HomoNTtrimmed;
+    uint64_t PrimerRevFail; //Number of sequences, where RevPrimer was detected (and removed)
+    uint64_t minL, minLqualTrim, TagFail, MaxAmb, QualWin;
+    uint64_t Trimmed, AccErrTrimmed, QWinTrimmed;
+    uint64_t totalMid;
+    std::atomic<uint64_t> total;
+    std::atomic<uint64_t> totalRejected;
+    uint64_t fail_correct_BC, suc_correct_BC, failedDNAread;
+    uint64_t adapterRem, RevPrimFound;
+    std::atomic<uint64_t> total2;
+    uint64_t totalSuccess;
+    uint64_t DerepAddBadSeq;
     //binomial error model
-    unsigned int BinomialErr;
-    uint dblTagFail;
+    uint64_t BinomialErr;
+    uint64_t dblTagFail;
     //swapping/reversing reads
-    uint reversedRds;
-    uint swappedRds;
-    unsigned int altRescueAccumError;
-    unsigned int altRescueQuality;
-    unsigned int altRescueAmbiguousBases;
-    unsigned int primerSearchSucceededFwdRead1;
-    unsigned int primerSearchSucceededFwdRead2;
-    unsigned int primerSearchSucceededRevRead1;
-    unsigned int primerSearchSucceededRevRead2;
-    unsigned int multiFailReads;
+    uint64_t reversedRds;
+    uint64_t swappedRds;
+    uint64_t altRescueAccumError;
+    uint64_t altRescueQuality;
+    uint64_t altRescueAmbiguousBases;
+    uint64_t primerSearchSucceededFwdRead1;
+    uint64_t primerSearchSucceededFwdRead2;
+    uint64_t primerSearchSucceededRevRead1;
+    uint64_t primerSearchSucceededRevRead2;
+    uint64_t multiFailReads;
     //recovered singletons within pairs
-    unsigned int singleton;
-    vector<int> BarcodeDetected;
-    vector<int> BarcodeDetectedFail;
+    uint64_t singleton;
+    vector<int64_t> BarcodeDetected;
+    vector<int64_t> BarcodeDetectedFail;
     void addStats(shared_ptr<collectstats>, vector<int>& idx);
     void reset();
     //void ini_repStat(bool midQ) {}
@@ -283,13 +285,13 @@ public:
     void printBCAmpliNdistribution(ostream& give); //distribution of lengths of BCs
     void printBCAmpliLdistribution(ostream& give); //distribution of lengths of BCs
     void addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int missedGAs);
-    uint totalRds, totalGAs; //total reads, total amplicons
-    uint inccorrectPrimers, missGAs;
+    uint64_t totalRds, totalGAs; //total reads, total amplicons
+    uint64_t inccorrectPrimers, missGAs;
     double totalRdLen, totalGALen; //length in bp
-    vector<int> GAperBC, CNTperBC, GALENperBC, rdLENperBC, GAfailsPerBC;
-    vector<int> inCorPrimPerBC, missGAsPerBC;
+    vector<uint64_t> GAperBC, CNTperBC, GALENperBC, rdLENperBC, GAfailsPerBC;
+    vector<uint64_t> inCorPrimPerBC, missGAsPerBC;
     vector<string> SmplIDBC, BC1, BC2;
-    vector<vector<int>> GALDISperBC;
+    vector<vector<uint64_t>> GALDISperBC;
     vector<vector<double>>  GALAMPLperBC;
 
 };

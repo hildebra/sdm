@@ -9,11 +9,11 @@ class Filters;
 
 inline std::vector<std::string> get_stats_invariant_warnings(const collectstats& stats, const std::string& label) {
 	std::vector<std::string> warnings;
-	const long long total = (long long)stats.total;
-	const long long success = (long long)stats.totalSuccess;
-	const long long rejected = (long long)stats.totalRejected;
-	const long long mid = (long long)stats.totalMid;
-	if (success + rejected != total) {
+	const uint64_t total = stats.total.load(std::memory_order_relaxed);
+	const uint64_t success = stats.totalSuccess;
+	const uint64_t rejected = stats.totalRejected.load(std::memory_order_relaxed);
+	const uint64_t mid = stats.totalMid;
+	if (success > total || rejected != total - success) {
 		warnings.push_back(label + ": totalSuccess + totalRejected != total");
 	}
 	if (mid > success) {
@@ -102,8 +102,8 @@ public:
 	//idxG needs to be BCoffset free, BC from shared_ptr<DNA> needs to have BCoffset added
   void failedStats2(const shared_ptr<DNA>& d, int);
 
-   void BCintoHead(int idx, const shared_ptr<DNA>& d, std::string_view presentBC, const int, bool, bool = false);
-	void setBCdna(int idx, shared_ptr<DNA> d) { d->setBCnumber(idx, BCoffset); }
+	  void BCintoHead(int idx, const shared_ptr<DNA>& d, std::string_view presentBC, const int, bool, bool = false);
+	void setBCdna(int idx, const shared_ptr<DNA>& d) { d->setBCnumber(idx, BCoffset); }
 	void SampleIntoHead(const int idx, shared_ptr<DNA> d, const size_t pos);
 	void setMultiDNA(OutputStreamer* m) { lMD = m; }
 	//stats... probably mutexed functions
@@ -111,7 +111,7 @@ public:
 	//routine checks, and reverses/swaps DNA objects
 	bool swapReverseDNApairs(vector< shared_ptr<DNA>>&);
 	//for single PB reads: check if they are reversed?
-	bool isReversedAmplicon(shared_ptr<DNA>);
+	bool isReversedAmplicon(const shared_ptr<DNA>&);
  void preFilterSeqStat(const shared_ptr<DNA>& d, int pair);
 	//    void preFilterSeqStatMT(shared_ptr<DNA> d, data_MT *data, int pair_);
 	inline void updateMaxSeqL(int x);
@@ -128,9 +128,8 @@ public:
 	inline bool checkSwitchedRdPairs() { return b2ndRDBcPrimCk; }
 	inline bool checkRevRd() { return bRevRdCk; }
 
-	bool synRdPairs() { return bChkRdPrs; }
 	uint64_t writtenReads() { return ReadsWritten.load(); }
-	int maxReadsOutput() { return maxReadsPerOFile; }
+	uint64_t maxReadsOutput() { return maxReadsPerOFile; }
 	uint getDemultiBPperSR() { return demultiBPperSR; }
 	void setWrittenReads(uint64_t x) { ReadsWritten = x; }
 	int getFileIncrementor() { return OFileIncre; }
@@ -179,7 +178,7 @@ public:
 			collectStatistics[pair]->addPostFilt(d); //->PostFilt.addDNAStats(d);
 		}
 	}
-	int getLocalRdsRead() {
+	uint64_t getLocalRdsRead() {
 		if (pairedSeq > 1) {
 			return collectStatistics[0]->total + collectStatistics[1]->total;
 		}
@@ -253,9 +252,9 @@ public:
 
 	//combiner of samples base_map to collect the group number
 	unordered_map<string, int> combiMapCollectGrp;
-	int getXreadsWr() { return firstXreadsW; }
-	int getXreadsRd() { return firstXreadsR; }
-	int getLocalAcceptRds() { //just plain number of successes..
+	uint64_t getXreadsWr() { return firstXreadsW; }
+	uint64_t getXreadsRd() { return firstXreadsR; }
+	uint64_t getLocalAcceptRds() { //just plain number of successes..
 		if (pairedSeq > 1) {
 			return collectStatistics[0]->totalSuccess + collectStatistics[1]->totalSuccess;
 		}
@@ -361,8 +360,6 @@ protected:
 	bool b2ndRDBcPrimCk;
 	//check if reads have been reversed_
 	bool bRevRdCk;
-	//check if read pairs are correctly synced
-	bool bChkRdPrs;
 	//specialized function for LotuS, which doesn't need all the huge output files..
 	//BCs are in mid file
 	//bool bHasMidSeq;
@@ -421,8 +418,8 @@ protected:
 		void fix() { BChit = 0; BCrevhit = 0; b_BCdirFix = true; reversedBCs = false; }
 	};
 	vector<BCdecide> BCdFWDREV;
-	int firstXreadsW;//just prints the first X reads for experiment (read pairs being counted as 2)
-	int firstXreadsR;//just reads the first X reads for experiment (read pairs being counted as 2)
+	uint64_t firstXreadsW;//just prints the first X reads for experiment (read pairs being counted as 2)
+	uint64_t firstXreadsR;//just reads the first X reads for experiment (read pairs being counted as 2)
 	bool restartSet;//start from beginning, i.e. wrong BC direction
 	bool b_optiClusterSeq;//SEED extension
 	bool b_subselectionReads;//filter out a specific set of reads
@@ -434,7 +431,7 @@ protected:
 	bool bDoCombiSamples;
 
 	//controls output file size
-	int maxReadsPerOFile;
+	uint64_t maxReadsPerOFile;
 	int OFileIncre;
 	std::atomic<uint64_t> ReadsWritten;
 	uint demultiBPperSR;
@@ -454,7 +451,7 @@ protected:
 
 	OptContainer* cmdArgs;
 
-	uint passed_interval_reads;
+	uint64_t passed_interval_reads;
 
 
 };

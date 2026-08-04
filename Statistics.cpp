@@ -51,7 +51,7 @@ void PrimerVariantTracker::reset() {
     recordedMatches.clear();
 }
 
-const vector<unsigned int>& Statistics::get_rstat_Vmed(int x) {
+const vector<uint64_t>& Statistics::get_rstat_Vmed(int x) {
     if (x == 1) { return rstat_VQmed; }
     return rstat_VSmed;
 }
@@ -78,7 +78,7 @@ bool ReportStats::getbLvsQlogs() {
     return bLvsQlogs;
 }
 
-void ReportStats::addMeanStats(unsigned int NT, unsigned int Qsum, float AccErr) {
+void ReportStats::addMeanStats(uint64_t NT, uint64_t Qsum, float AccErr) {
     rstat_NTs += NT;
     rstat_qualSum += Qsum;
     rstat_accumError += AccErr;
@@ -97,18 +97,18 @@ void ReportStats::addNtSpecQualScores(shared_ptr<DNA> dna) {
     const string seq = dna->getSequence();
     for (uint i = 0; i < sql; i++) {
         short p = NT_POS[(unsigned char)seq[i]];
-        QperNT[p] += (long)quals[i];
+        QperNT[p] += static_cast<uint64_t>(quals[i]);
         NTcounts[p]++;
     }
 }
 
-const vector<unsigned int>& ReportStats::get_rstat_Vmed(int x) {
+const vector<uint64_t>& ReportStats::get_rstat_Vmed(int x) {
     if (x == 1) { return rstat_VQmed; }
     return rstat_VSmed;
 }
 
 float ReportStats::GCcontent() {
-    const long canonical = NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3];
+    const uint64_t canonical = NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3];
     if (canonical == 0) { return 0.f; }
     return float(NTcounts[2] + NTcounts[3]) / float(canonical);
 }
@@ -153,7 +153,7 @@ void GAstats::reset() {
 }
 
 void GAstats::addMissedGAs(int X) {
-    missGAs += X;
+    if (X > 0) { missGAs += static_cast<uint64_t>(X); }
 }
 
 
@@ -318,13 +318,13 @@ void ReportStats::reset() {
     rstat_VQmed.resize(0); rstat_VSmed.resize(0);
     listOfLengths.resize(0); listOfQuals.resize(0); listOfQualMeds.resize(0);
 }
-unsigned int ReportStats::lowest(const vector<uint>& in) {
+unsigned int ReportStats::lowest(const vector<uint64_t>& in) {
     for (int i = 0; i < (int)in.size(); i++) {
         if (in[i] > 0) { return i; }
     }
     return(0);
 }
-unsigned int ReportStats::highest(const vector<uint>& in) {
+unsigned int ReportStats::highest(const vector<uint64_t>& in) {
     if (in.size() == 0) { return 0; }
     for (int i = (int)in.size() - 1; i >= 0; i--) {
         if (in[i] > 0) { return i; }
@@ -379,18 +379,20 @@ void ReportStats::printStats2(ostream& give, float remSeqs, int pair) {
     }
     if (pair == 0) {
         if (bMedianCalcs) {
-            unsigned int minS = lowest(rstat_VSmed);
-            unsigned int maxS = highest(rstat_VSmed);
-            unsigned int minQ = lowest(rstat_VQmed);
-            unsigned int maxQ = highest(rstat_VQmed);
-            give << "Min/Avg/Max stats Pair 1";// -RSQS : "<<RSQS;
-            if (remSeqs == 0) {
+            const unsigned int lengthQ05 = static_cast<unsigned int>(calc_median(rstat_VSmed, 0.05f));
+            const unsigned int lengthQ50 = static_cast<unsigned int>(calc_median(rstat_VSmed, 0.50f));
+            const unsigned int lengthQ95 = static_cast<unsigned int>(calc_median(rstat_VSmed, 0.95f));
+            const unsigned int qualityQ05 = static_cast<unsigned int>(calc_median(rstat_VQmed, 0.05f));
+            const unsigned int qualityQ50 = static_cast<unsigned int>(calc_median(rstat_VQmed, 0.50f));
+            const unsigned int qualityQ95 = static_cast<unsigned int>(calc_median(rstat_VQmed, 0.95f));
+            give << "5%/50%/95% quantiles Pair 1";
+            if (rstat_totReads == 0) {
                 give << "\n     - sequence Length : " << "0/0/0"
                     << "\n     - Quality :   " << "0/0/0";
             }
             else {
-                give << "\n     - sequence Length : " << minS << "/" << float(rstat_NTs) / (float)rstat_totReads << "/" << maxS
-                    << "\n     - Quality :   " << minQ << "/" << float(rstat_qualSum) / (float)rstat_totReads << "/" << maxQ;
+                give << "\n     - sequence Length : " << lengthQ05 << "/" << lengthQ50 << "/" << lengthQ95
+                    << "\n     - Quality :   " << qualityQ05 << "/" << qualityQ50 << "/" << qualityQ95;
             }
         }
         else {
@@ -409,10 +411,6 @@ void ReportStats::printStats2(ostream& give, float remSeqs, int pair) {
         give << "Pair 2 stats";
     }
 
-    if (bMedianCalcs) {
-        //give << "Median Stats Pair 1";// -USQS : " << USQS;
-        give << "\n     - Median sequence Length : " << rstat_Smed << ", Quality : " << rstat_Qmed;// << "\n";
-    }
     give << "\n     - Accum. Error " << (rstat_totReads == 0 ? 0.f : rstat_accumError / (float)rstat_totReads) << "\n";
 }
 
@@ -454,9 +452,9 @@ void ReportStats::addRepStats(ReportStats& RepoStat) {
 }
 //calculate median value from data stored as histogram-vector
 // for median use perc = 0.5f
-float ReportStats::calc_median(vector<uint>& in, float perc) {
+float ReportStats::calc_median(vector<uint64_t>& in, float perc) {
     uint64_t total = 0;
-    for (unsigned int count : in) {
+    for (uint64_t count : in) {
         total += count;
     }
     if (total == 0) { return 0.f; }
@@ -472,16 +470,16 @@ float ReportStats::calc_median(vector<uint>& in, float perc) {
 
     return 0.f;
 }
-void ReportStats::add_median2histo(vector<unsigned int>& in, vector<unsigned int>& histo)
+void ReportStats::add_median2histo(vector<uint64_t>& in, vector<uint64_t>& histo)
 {
     if (in.empty()) return;
-    unsigned int maxv = *max_element(in.begin(), in.end());
+    const uint64_t maxv = *max_element(in.begin(), in.end());
     if (maxv + 1 > histo.size()) {
         if (maxv > 10000) { cerr << "max bigger 10000.\n"; exit(77); }
         histo.resize(maxv + 1, 0);
     }
     for (size_t i = 0; i < in.size(); ++i) {
-        unsigned int v = in[i];
+        const size_t v = static_cast<size_t>(in[i]);
         histo[v]++;
     }
 }
@@ -504,7 +502,7 @@ vector<size_t> ReportStats::getVrange(int which) {
         return medVrange(rstat_VSmed);
     }
 }
-vector<size_t> ReportStats::medVrange(const vector<uint> x) {
+vector<size_t> ReportStats::medVrange(const vector<uint64_t> x) {
     vector<size_t> ret(2, 0); ret[1] = 0; bool empty = true;
     for (size_t i = 0; i < x.size(); i++) {
         if (x[i] > 0) {
@@ -516,7 +514,7 @@ vector<size_t> ReportStats::medVrange(const vector<uint> x) {
     return ret;
 }
 
-void ReportStats::addMedian2Histo(const uint in, vector<unsigned int>& histo)
+void ReportStats::addMedian2Histo(const uint in, vector<uint64_t>& histo)
 {
     std::lock_guard<std::mutex> lock(stats_mutex);
     if (in >= histo.size()) {
@@ -529,9 +527,9 @@ void ReportStats::addMedian2Histo(const uint in, vector<unsigned int>& histo)
 
 
 void GAstats::addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int missedGAs) {
-  totalRds++; totalGAs += (uint)GA.size();
+    totalRds++; totalGAs += static_cast<uint64_t>(GA.size());
     totalRdLen += dn->length();
-    missGAs += missedGAs;
+    if (missedGAs > 0) { missGAs += static_cast<uint64_t>(missedGAs); }
     double totL(0.f); int incP(0);
     for (size_t i = 0; i < GA.size(); i++) {
         totL += (double)GA[i]->length();
@@ -547,7 +545,7 @@ void GAstats::addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int
         GAfailsPerBC.resize(idx + 1, 0);
         inCorPrimPerBC.resize(idx+1, 0);
         missGAsPerBC.resize(idx+1, 0);
-        GALDISperBC.resize(idx + 1, vector<int>(0));
+        GALDISperBC.resize(idx + 1, vector<uint64_t>(0));
         GALAMPLperBC.resize(idx + 1, vector<double>(0));
     }
     if (idx >= 0) {
@@ -566,7 +564,7 @@ void GAstats::addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int
             }
             GALDISperBC[idx][GAL] ++;
             GALAMPLperBC[idx][GAL] += totL;
-            missGAsPerBC[idx] += missedGAs;
+            if (missedGAs > 0) { missGAsPerBC[idx] += static_cast<uint64_t>(missedGAs); }
         }
     }
     else {
@@ -582,7 +580,7 @@ void GAstats::setBCs(vector<string> SI, vector<string> B1, vector<string> B2) {
     GAfailsPerBC.resize(idx, 0);
     inCorPrimPerBC.resize(idx, 0);
     missGAsPerBC.resize(idx, 0);
-    GALDISperBC.resize(idx , vector<int>(0));
+    GALDISperBC.resize(idx , vector<uint64_t>(0));
     GALAMPLperBC.resize(idx , vector<double>(0));
 
 }
@@ -602,7 +600,7 @@ void GAstats::addStats(shared_ptr<GAstats> o) {
         SmplIDBC.resize(idx, ""); BC1.resize(idx, ""); BC2.resize(idx, "");
         inCorPrimPerBC.resize(idx, 0);
         missGAsPerBC.resize(idx, 0);
-        GALDISperBC.resize(idx, vector<int>(0));
+        GALDISperBC.resize(idx, vector<uint64_t>(0));
         GALAMPLperBC.resize(idx, vector<double>(0));
     }
     for (idx = 0; idx < GAperBC.size(); idx++) {
@@ -692,11 +690,11 @@ void GAstats::printBCtabs(ostream& give) {
     for (unsigned int i = 0; i < GAperBC.size(); i++) {
         give << SmplIDBC[i] << "\t" << CNTperBC[i] << "\t" << GAfailsPerBC[i] << "\t";
         if (CNTperBC[i] > 0) {
-            give << float(GAperBC[i]) / float(CNTperBC[i]) << "\t";
-            give << int(float(rdLENperBC[i]) / float(CNTperBC[i]) + 0.5f) << "\t";
+            give << static_cast<double>(GAperBC[i]) / static_cast<double>(CNTperBC[i]) << "\t";
+            give << static_cast<uint64_t>(static_cast<double>(rdLENperBC[i]) / static_cast<double>(CNTperBC[i]) + 0.5) << "\t";
         } else { give <<"0\t0\t"; }
         if (GAperBC[i] > 0) {
-            give << int(float(GALENperBC[i]) / float(GAperBC[i]) + 0.5f) << "\t";
+            give << static_cast<uint64_t>(static_cast<double>(GALENperBC[i]) / static_cast<double>(GAperBC[i]) + 0.5) << "\t";
         }else { give << "0\t"; }
 
         give<< inCorPrimPerBC[i] << "\t"<< missGAsPerBC[i];
@@ -707,10 +705,13 @@ void GAstats::printBCtabs(ostream& give) {
 }
 
 void GAstats::printSummary(ostream& give) {
-    int totalFails = 0; for (size_t i = 0; i < GAfailsPerBC.size(); i++) { totalFails += GAfailsPerBC[i]; }
+    uint64_t totalFails = 0; for (size_t i = 0; i < GAfailsPerBC.size(); i++) { totalFails += GAfailsPerBC[i]; }
     give << "\nGoldenAxe Stats\n";
-    give << "  Total reads; fails; inc. Primers; amplicons/read: " << totalRds << "; " << totalFails << "; "<< inccorrectPrimers<< "; " << (float)totalGAs / (float)totalRds << endl;
-    give << "  Length reads; amplicon; missed Amplicons     : " << totalRdLen / (double)totalRds << "; " << totalGALen / (double)totalGAs << "; " << missGAs<< endl;
+    const double ampliconsPerRead = totalRds > 0 ? static_cast<double>(totalGAs) / static_cast<double>(totalRds) : 0.0;
+    const double meanReadLength = totalRds > 0 ? totalRdLen / static_cast<double>(totalRds) : 0.0;
+    const double meanAmpliconLength = totalGAs > 0 ? totalGALen / static_cast<double>(totalGAs) : 0.0;
+    give << "  Total reads; fails; inc. Primers; amplicons/read: " << totalRds << "; " << totalFails << "; "<< inccorrectPrimers<< "; " << ampliconsPerRead << endl;
+    give << "  Length reads; amplicon; missed Amplicons     : " << meanReadLength << "; " << meanAmpliconLength << "; " << missGAs<< endl;
 }
 
 
@@ -804,7 +805,7 @@ void Statistics::reset() {
 }
 
 float Statistics::GCcontent() {
-    const long canonical = NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3];
+    const uint64_t canonical = NTcounts[0] + NTcounts[1] + NTcounts[2] + NTcounts[3];
     if (canonical == 0) { return 0.f; }
     return float(NTcounts[2] + NTcounts[3]) / float(canonical);
 }
@@ -825,7 +826,7 @@ void Statistics::addDNAStats(shared_ptr<DNA> d) {
     }
 }
 
-void Statistics::addMedian2Histo(unsigned int in, vector<unsigned int> &histo) {
+void Statistics::addMedian2Histo(unsigned int in, vector<uint64_t> &histo) {
     if (in >= histo.size()) {
         histo.resize(in + 3, 0);
         assert(in < 1e6);
@@ -833,9 +834,9 @@ void Statistics::addMedian2Histo(unsigned int in, vector<unsigned int> &histo) {
     histo[in] += 1;
 }
 
-inline float Statistics::calc_median(vector<unsigned int> &in, float perc) {
+inline float Statistics::calc_median(vector<uint64_t> &in, float perc) {
     uint64_t total = 0;
-    for (unsigned int count : in) {
+    for (uint64_t count : in) {
         total += count;
     }
     if (total == 0) { return 0.f; }

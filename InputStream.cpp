@@ -44,6 +44,13 @@ std::string normalizedRecordId(const std::string& header) {
 	return id;
 }
 
+std::string exactRecordId(const std::string& header) {
+	if (header.empty()) { return std::string(); }
+	const size_t start = (header[0] == '@' || header[0] == '>') ? 1u : 0u;
+	const size_t end = header.find_first_of(" \t", start);
+	return header.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
 bool recordBufferHasData(const std::vector<std::string>& record) {
 	return std::any_of(record.begin(), record.end(), [](const std::string& value) {
 		return !value.empty();
@@ -85,8 +92,8 @@ bool readFastaRecord(ifbufstream* fasta, ifbufstream* quality, std::vector<std::
 		if (!gotQualityHeader || !gotQualities) {
 			throw std::runtime_error("QUAL input ended before FASTA record '" + normalizedRecordId(record[0]) + "'");
 		}
-		const std::string fastaId = normalizedRecordId(record[0]);
-		const std::string qualityId = normalizedRecordId(qualityHeader);
+		const std::string fastaId = exactRecordId(record[0]);
+		const std::string qualityId = exactRecordId(qualityHeader);
 		if (fastaId.empty() || qualityId.empty() || fastaId != qualityId) {
 			throw std::runtime_error("FASTA/QUAL headers are not synchronized: '" + fastaId +
 				"' versus '" + qualityId + "'");
@@ -743,6 +750,7 @@ void InputStreamer::allStreamClose(){
 		if (quality_istreams[i] != NULL) { delete quality_istreams[i];  quality_istreams[i] = NULL; }
 		if (fastq_istreams[i] != NULL) { delete fastq_istreams[i];   fastq_istreams[i] = NULL; }
 	}
+	hasMIDs = false;
 
     if (!isFasta && minQScore < SCHAR_MAX) { /* maxminQualWarns_fq() moved/removed with utilities */ }
 }
@@ -759,23 +767,26 @@ void InputStreamer::jumpToNextDNA(bool& stillMore, int pos) {
 }
 
 vector<shared_ptr<DNA>> InputStreamer::getDNApairs() {
+	// One critical section owns the full R1/R2/MID set so concurrent consumers
+	// cannot interleave mates from adjacent records.
+	std::unique_lock<std::shared_mutex> lock(protect);
 	vector<shared_ptr<DNA>> ret(3, nullptr);
-	ret[0] = getDNA(0);
-	if (numPairs == 2) {
-		ret[1] = getDNA(1);
+	ret[0] = getDNAUnlocked(0);
+	if (numPairs > 1) {
+		ret[1] = getDNAUnlocked(1);
 	}
 	if (hasMIDs) {
-		ret[2] = getDNA(2);
+		ret[2] = getDNAUnlocked(2);
 	}
 
-	const bool allEnded = ret[0] == nullptr && (numPairs != 2 || ret[1] == nullptr) &&
+	const bool allEnded = ret[0] == nullptr && (numPairs <= 1 || ret[1] == nullptr) &&
 		(!hasMIDs || ret[2] == nullptr);
 	if (allEnded) { return ret; }
-	if (ret[0] == nullptr || (numPairs == 2 && ret[1] == nullptr) || (hasMIDs && ret[2] == nullptr)) {
+	if (ret[0] == nullptr || (numPairs > 1 && ret[1] == nullptr) || (hasMIDs && ret[2] == nullptr)) {
 		throw std::runtime_error("Input streams ended at different records while reading a synchronized read set");
 	}
 	if (!ret[0]->seal() || ret[0]->isEmpty()) { ret[0] = nullptr; }
-	if (numPairs == 2) {
+	if (numPairs > 1) {
 		if (!ret[1]->seal() || ret[1]->isEmpty()) { ret[1] = nullptr; }
 		if (ret[0] && ret[1] && !ret[0]->sameHeadPosFree(ret[1])) {
 			throw std::runtime_error("Paired input headers do not match: '" + ret[0]->getShortId() +
@@ -790,7 +801,7 @@ vector<shared_ptr<DNA>> InputStreamer::getDNApairs() {
 		}
 		if (ret[2]) { ret[2]->setMIDseq(true); }
 	}
-	if (!ret[0] || (numPairs == 2 && !ret[1]) || (hasMIDs && !ret[2])) {
+	if (!ret[0] || (numPairs > 1 && !ret[1]) || (hasMIDs && !ret[2])) {
 		throw std::runtime_error("Malformed record encountered in a synchronized input set");
 	}
 
@@ -822,8 +833,12 @@ bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse,b
 	assert(tmpO->size() == blocks);
 	size_t k(0);
 	for (k = 0; k < blocks; k++) {
-		const int recordsNeeded = 1 + (numPairs > 1 ? 1 : 0) + (MIDuse ? 1 : 0);
-		if (_globalMaxRdsRead > 0 && _globalRdsRead + _localRdsRead + recordsNeeded > _globalMaxRdsRead) {
+		// MID/index reads are synchronized metadata; read limits count biological mates only.
+		const uint64_t recordsNeeded = 1u + (numPairs > 1 ? 1u : 0u);
+		if (_globalMaxRdsRead > 0 &&
+			(_globalRdsRead >= _globalMaxRdsRead ||
+			 _localRdsRead > _globalMaxRdsRead - _globalRdsRead ||
+			 recordsNeeded > _globalMaxRdsRead - _globalRdsRead - _localRdsRead)) {
 			tmpO->setSize(k);
 			return false;
 		}
@@ -847,7 +862,13 @@ bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse,b
 		}
 		if (!b1 || (numPairs > 1 && !b2) || (MIDuse && !b3) || partial1 || partial2 || partial3) {
 			tmpO->setSize(k);
-			throw std::runtime_error("Input streams are truncated or ended at different records: " + current_infiles());
+			const std::string message =
+				"Input streams are truncated or ended at different records: " + current_infiles();
+			if (DieOnError) {
+				throw std::runtime_error(message);
+			}
+			IO_Error(message + "; stopping after recovered records");
+			return false;
 		}
 
 		if (numPairs > 1) {
@@ -888,6 +909,34 @@ bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 		}
 		//fqRead
 		stillMore = fastq_istreams[pos]->get4lines(ret);
+		if (!stillMore && recordBufferHasData(ret)) {
+			const std::string message = "Truncated FASTQ record in " + fastq_istreams[pos]->getInFile();
+			if (DieOnError) {
+				throw std::runtime_error(message);
+			}
+			IO_Error(message + "; discarding incomplete record");
+			ret.assign(4, std::string());
+		}
+		if (stillMore) {
+			std::string malformedMessage;
+			if (ret[0].empty() || ret[0][0] != '@') {
+				malformedMessage = "Malformed FASTQ header";
+			}
+			else if (ret[2].empty() || ret[2][0] != '+') {
+				malformedMessage = "Malformed FASTQ plus line for " + ret[0];
+			}
+			else if (ret[1].size() != ret[3].size()) {
+				malformedMessage = "FASTQ sequence/quality length mismatch for " + ret[0];
+			}
+			if (!malformedMessage.empty()) {
+				if (DieOnError) {
+					throw std::runtime_error(malformedMessage);
+				}
+				IO_Error(malformedMessage + "; discarding malformed record");
+				ret.assign(4, std::string());
+				stillMore = false;
+			}
+		}
 		/*for (int xx = 0; xx < 4; xx++) {
 			stillMore = fastq_istreams[pos]->getline(ret[xx]);
 		}*/
@@ -905,9 +954,12 @@ bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 	return stillMore;
 }
 
-shared_ptr<DNA> InputStreamer::getDNA(int pos){
-	// Stream cursors are mutable shared state; access must be serialized.
+shared_ptr<DNA> InputStreamer::getDNA(int pos) {
 	std::unique_lock<std::shared_mutex> lock(protect);
+	return getDNAUnlocked(pos);
+	}
+
+shared_ptr<DNA> InputStreamer::getDNAUnlocked(int pos){
 	//if (sync) {
 	//	while (desync(pos)) {
 	//		jumpToNextDNA(stillMore, pos);
@@ -972,7 +1024,7 @@ void InputStreamer::openMIDseqs(string p,string in){
 	if (in==""){return;}
 	
 	if (fastq_istreams[2] != NULL){
-		cerr << "MID file was already initialized" << endl;
+		throw std::runtime_error("MID file was already initialized");
 	}
 #ifdef DEBUG
 	cerr << "Open Mid sequence_ file" << endl;
@@ -980,7 +1032,6 @@ void InputStreamer::openMIDseqs(string p,string in){
 
 	string file_type = "MID specific fastq";
 	string tmp = (p + in);
-	bool doMC = num_threads > 1;
 
 	fastq_istreams[2] = DBG_NEW ifbufstream(tmp, (size_t)round(INPUT_BUFFER_SIZE*0.6),doTIO);
 	if (fastq_istreams[2]->eof()) {
@@ -1006,16 +1057,10 @@ bool InputStreamer::detectAndSwitchFileFormat(ifbufstream* stream, const std::st
 
 	// Check if detected format differs from assumed format
 	if (detectedFasta && !isFasta) {
-		cerr << "WARNING: File " << filepath << " contains FASTA format (starts with '>')" 
-			 << " but was opened as FASTQ. Switching to FASTA mode.\n";
-		isFasta = true;
-		return true;  // Format was switched
+		throw std::runtime_error("Input format mismatch: FASTA data supplied through FASTQ input: " + filepath);
 	}
 	else if (detectedFastq && isFasta) {
-		cerr << "WARNING: File " << filepath << " contains FASTQ format (starts with '@')" 
-			 << " but was opened as FASTA. Switching to FASTQ mode.\n";
-		isFasta = false;
-		return true;  // Format was switched
+		throw std::runtime_error("Input format mismatch: FASTQ data supplied through FASTA input: " + filepath);
 	}
 
 	return false;  // No format switch needed
@@ -1073,6 +1118,11 @@ bool InputStreamer::setupFastq(string path, string fileS, int& pairs, string sub
 	}
 	else 	if (subsPairs == "2") {
 		p1 = p2; p2 = "";
+	}
+	if (!subsPairs.empty()) {
+		pairs = 1;
+		numPairs = 1;
+		midp.clear();
 	}
 
 	if (simu) {
@@ -1310,6 +1360,12 @@ bool InputStreamer::setupFastaQual(string path, string fasta, string qual, int& 
 	if (pairs == -1) {
 		pairs = (int)fna.size();
 	}
+	if (pairs > 1 && subsPairs.empty() && fna.size() < static_cast<size_t>(pairs)) {
+		throw std::runtime_error("Paired FASTA input is missing one or more mate files");
+	}
+	if (!qua.empty() && pairs > 1 && subsPairs.empty() && qua.size() < static_cast<size_t>(pairs)) {
+		throw std::runtime_error("Paired QUAL input is missing one or more mate files");
+	}
 	numPairs = pairs;
 
 	fastaFilepathTemp[0] = (fna.empty() ? "" : path + fna[0]);
@@ -1324,6 +1380,12 @@ bool InputStreamer::setupFastaQual(string path, string fasta, string qual, int& 
 	else if (subsPairs == "2") {
 		fastaFilepathTemp[0] = fastaFilepathTemp[1];
 		qualityFilepathTemp[0] = qualityFilepathTemp[1];
+	}
+	if (!subsPairs.empty()) {
+		pairs = 1;
+		numPairs = 1;
+		fastaFilepathTemp[1].clear();
+		qualityFilepathTemp[1].clear();
 	}
 
 	if (simu) {

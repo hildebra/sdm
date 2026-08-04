@@ -566,7 +566,7 @@ private:
 	inline void removeSampleID(string&, const string &);
 	inline void removeSampleID(string&, const string &, string&);
 	void readDerepInfo(const string);
-	int oneDerepLine(shared_ptr<DNAunique>);
+	uint64_t oneDerepLine(shared_ptr<DNAunique>);
 
 	inline bool getTMPmapperLine(string&);
 
@@ -614,7 +614,7 @@ private:
 	bool unregistered_samples;
 	bool doChimeraCnt;
 	bool OTUnumFixed; // can new OTUs be added, after inital reading of DNA OTU.fna?
-	long totalDerepCnt;
+	uint64_t totalDerepCnt;
 
 	float qCovThr, perIDmatch;
 

@@ -39,7 +39,7 @@ namespace {
 		qualities.reserve(expectedCount);
 		int value = 0;
 		while (input >> value) {
-			if (value < SCHAR_MIN || value > SCHAR_MAX) {
+			if (value < 0 || value > maxSAqualP) {
 				throw std::runtime_error("FASTA/QUAL score outside supported range for " + header);
 			}
 			qualities.push_back(static_cast<qual_score>(value));
@@ -79,8 +79,21 @@ bool DNA::seal(bool isFasta) {//DN = sequence_.c_str();
 		this->setPassed(false);
 		return false;
 	}
-	//uppercase DNA
-	std::transform(sequence_.begin(), sequence_.end(), sequence_.begin(), ::toupper);
+	// uppercase DNA only when needed (avoids unconditional per-char writes)
+	bool needsUppercase = false;
+	for (const char c : sequence_) {
+		if (c >= 'a' && c <= 'z') {
+			needsUppercase = true;
+			break;
+		}
+	}
+	if (needsUppercase) {
+		for (char& c : sequence_) {
+			if (c >= 'a' && c <= 'z') {
+				c = static_cast<char>(c - ('a' - 'A'));
+			}
+		}
+	}
 	sequence_length_ = sequence_.length();
 	this->fixQ0();
 	return true;
@@ -113,20 +126,14 @@ DNA::DNA(const vector<string>& fas) :DNA() {
 DNA::DNA(const vector<string>& fq, qual_score fastQver) :DNA() {
 	//string line;
 	if (fq.size() != 4 || fq[0].length() == 0) { delself(); return; }
-	while (fq[0][0] != '@') {
-		cerr << "ERROR on line " + fq[0] + ": Could not find \'@\' when expected (file likely corrupt, trying to recover):\n";// << endl;
-		delself();
-		return;
-
+	if (fq[0][0] != '@') {
+		throw std::runtime_error("Malformed FASTQ header: " + fq[0]);
 	}
 	this->setHeader(fq[0].substr(1));
 	sequence_ = fq[1];
 	sequence_length_ = sequence_.size();
 	if (fq[2].empty() || fq[2][0] != '+') {
-		cerr << "Error input line " + fq[2] + ": Could not find \'+\' when expected (file likely corrupt, aborting):\n" + fq[0];// << endl;
-		delself();
-		return;
-		//if (!safeGetline(fna, line)) { delete tdn; return NULL; }
+		throw std::runtime_error("Malformed FASTQ plus line for " + fq[0]);
 	}
 
 	//qual_ score
@@ -134,15 +141,7 @@ DNA::DNA(const vector<string>& fq, qual_score fastQver) :DNA() {
 
 
 	if (line.length() != this->mem_length()) {
-		string sizdif = "More";
-		if (line.length() > this->mem_length()) {
-			sizdif = "Less";
-		}
-		//check that quality gets not more length than DNA
-		delself();
-		cerr << "Error input line " + fq[3] + "'\n" + fq[1] + "'\n: " + sizdif + " quality positions than nucleotides detected for sequence\n " +
-			fq[0];// << endl;
-		return;
+		throw std::runtime_error("FASTQ sequence/quality length mismatch for " + fq[0]);
 	}
 
 	uint qcnt(0); uint lline = (uint)this->mem_length();// line.length();
@@ -158,45 +157,29 @@ DNA::DNA(const vector<string>& fq, qual_score fastQver) :DNA() {
 // Move-aware constructors (definitions)
 DNA::DNA(vector<string>&& fq, qual_score fastQver) :DNA() {
 	if (fq.size() != 4 || fq[0].length() == 0) { delself(); return; }
-	while (fq[0][0] != '@') {
-		if (g_fastqHeaderWarnings < MAX_FASTQ_HEADER_WARNINGS) {
-			cerr << "ERROR on line " + fq[0] + ": Could not find '@' when expected (file likely corrupt, trying to recover):\n";
-		}
-		else if (g_fastqHeaderWarnings == MAX_FASTQ_HEADER_WARNINGS) {
-			cerr << "Further FASTQ header warnings suppressed after " << MAX_FASTQ_HEADER_WARNINGS << " messages.\n";
-		}
-		g_fastqHeaderWarnings++;
-		delself();
-		return;
-
+	if (fq[0][0] != '@') {
+		throw std::runtime_error("Malformed FASTQ header: " + fq[0]);
 	}
-	this->setHeader(std::move(fq[0]).substr(1));
+	const string headerForError = fq[0];
+	fq[0].erase(0, 1);
+	this->setHeader(std::move(fq[0]));
 	sequence_ = std::move(fq[1]);
 	sequence_length_ = sequence_.size();
 	if (fq[2].empty() || fq[2][0] != '+') {
-		cerr << "Error input line " + fq[2] + ": Could not find '+' when expected (file likely corrupt, aborting):\n" + fq[0];
-		delself();
-		return;
+		throw std::runtime_error("Malformed FASTQ plus line for " + headerForError);
 	}
 
 	// qual_ score
 	const string& line = fq[3];
 
 	if (line.length() != this->mem_length()) {
-		string sizdif = "More";
-		if (line.length() > this->mem_length()) {
-			sizdif = "Less";
-		}
-		delself();
-		cerr << "Error input line " + fq[3] + "'\n" + fq[1] + "'\n: " + sizdif + " quality positions than nucleotides detected for sequence\n " + fq[0];
-		return;
+		throw std::runtime_error("FASTQ sequence/quality length mismatch for " + headerForError);
 	}
 
-	uint qcnt(0); uint lline = (uint)this->mem_length();
-	qual_.resize(this->mem_length(), 0);
-	for (; qcnt < lline; qcnt++) {
-		qual_score q = (qual_score)line[qcnt] - fastQver;
-		qual_[qcnt] = q;
+	const size_t lline = this->mem_length();
+	qual_.resize(lline, 0);
+	for (size_t qcnt = 0; qcnt < lline; ++qcnt) {
+		qual_[qcnt] = static_cast<qual_score>(line[qcnt] - fastQver);
 	}
 	avg_qual_ = -1.f;
 }
@@ -210,7 +193,8 @@ DNA::DNA(vector<string>&& fas) :DNA() {
 		cerr << "ERROR: Line 1 in fasta file does not start with '>' :\n" << fas[0] << endl;
 		exit(23);
 	}
-	this->setHeader(std::move(fas[0]).substr(1));
+	fas[0].erase(0, 1);
+	this->setHeader(std::move(fas[0]));
 	sequence_ = std::move(fas[1]);
 	sequence_length_ = sequence_.length();
 	const size_t lsize = sequence_.length();
@@ -345,31 +329,44 @@ void DNA::stripLeadEndN() {
 void DNA::appendQuality(const vector<qual_score>& q)
 {
 	qual_.insert(qual_.end(), q.begin(), q.end());
-	avg_qual_ = -1.f;
+	invalidateQualityCaches();
 }
 
 float DNA::getAvgQual() {
 	if (avg_qual_ < 0.f) {
-		if (quality_sum_ == 0 && !qual_.empty()) {
-			for (unsigned int i = 0; i < std::min((size_t)this->length(), qual_.size()); i++) {
-				quality_sum_ += qual_[i];
-			}
+		quality_sum_ = 0;
+		const size_t logicalLength = std::min(sequence_length_, qual_.size());
+		for (size_t i = 0; i < logicalLength; ++i) {
+			quality_sum_ += static_cast<uint64_t>(std::max<int>(0, qual_[i]));
 		}
-		if (this->length() == 0) {
+		if (logicalLength == 0) {
 			avg_qual_ = 0.f;
 		}
 		else {
-			avg_qual_ = static_cast<float>(quality_sum_) / static_cast<float>(this->length());
+			avg_qual_ = static_cast<float>(quality_sum_) / static_cast<float>(logicalLength);
 		}
-
 	}
 	return avg_qual_;
 }
 int DNA::getMedianQual() {
-	/*vector<qual_score> meq = qual_;
-	sort(meq.begin(), meq.end());
-	return calc_median2(meq, 0.5);*/
-	return median(qual_);
+	const size_t logicalLength = std::min(sequence_length_, qual_.size());
+	if (logicalLength == 0) { return 0; }
+	vector<qual_score> logicalQualities(qual_.begin(), qual_.begin() + logicalLength);
+	return median(logicalQualities);
+}
+
+double DNA::getAccumError() {
+	if (accumulated_error_ == 0.) {
+		const size_t logicalLength = std::min(sequence_length_, qual_.size());
+		for (size_t i = 0; i < logicalLength; ++i) {
+			const int boundedQuality = std::max(0, std::min(maxSAqualP, static_cast<int>(qual_[i])));
+			accumulated_error_ += SAqualP[boundedQuality];
+		}
+	}
+	if (!std::isfinite(accumulated_error_)) {
+		accumulated_error_ = 5.;
+	}
+	return accumulated_error_;
 }
 
 /*float DNA::qualWinfloat_hybr(int W, float T, int W2, float T2, int& reason){//not used
@@ -534,23 +531,28 @@ float DNA::binomialFilter(int maxErr, float alpha) {
 }
 
 float DNA::qualWinfloat(uint W, float T, int& reason) {
-	//if (T==0.f){return true;}
 	int AQS = 0;
 	int TotQ = 0;
-	int upTs = int(T) * int(W);
-	uint QS = this->length();//static_cast<unsigned int> (qual_.size());
+	const uint QS = static_cast<uint>(std::min(sequence_length_, qual_.size()));
+	if (QS == 0 || qual_.empty()) { return 0.f; }
 	if (W >= QS) { W = QS; } // too short
+	if (W == 0) { return 0.f; }
+	const float threshold = T * static_cast<float>(W);
 
 	//1st loop to ini window
 	for (size_t i = 0; i < size_t(W); i++) {
 		AQS += qual_[i];
 	}
 	TotQ = AQS;
+	if (static_cast<float>(AQS) < threshold) {
+		reason = 1;
+		return 0.f;
+	}
 
 	for (size_t i = W; i < (size_t)QS; i++) {
 		AQS += qual_[i] - qual_[i - W];
 		TotQ += qual_[i];
-		if (AQS < upTs) {
+		if (static_cast<float>(AQS) < threshold) {
 			reason = 1;	return 0.f;
 		}
 	}
@@ -560,8 +562,10 @@ float DNA::qualWinfloat(uint W, float T, int& reason) {
 
 int DNA::qualAccumulate(double d) {
 	unsigned int i(0); double accErr(0.0);
-	for (; i < this->length(); i++) {
-		accErr += SAqualP[qual_[i]];
+	const size_t logicalLength = std::min(sequence_length_, qual_.size());
+	for (; i < logicalLength; i++) {
+		const int boundedQuality = std::max(0, std::min(maxSAqualP, static_cast<int>(qual_[i])));
+		accErr += SAqualP[boundedQuality];
 		if (accErr >= d) { break; }
 	}
 
@@ -575,34 +579,34 @@ std::mutex ntcnt_mutex;
 std::vector<std::mutex> qsc_mutexes;
 std::vector<std::mutex> ntcnt_mutexes;*/
 
-void DNA::ntSpecQualScores(vector<long>& qsc, vector<long>& ntcnt) {
-	size_t sql = sequence_.length();
+void DNA::ntSpecQualScores(vector<uint64_t>& qsc, vector<uint64_t>& ntcnt) {
+	const size_t sql = std::min(sequence_length_, std::min(sequence_.length(), qual_.size()));
 
-	if (qsc.size() < sql) {
-		qsc.resize(sql, 0);
+	if (qsc.size() < 6) {
+		qsc.resize(6, 0);
 	}
-	if (ntcnt.size() < sql) {
-		ntcnt.resize(sql, 0);
+	if (ntcnt.size() < 6) {
+		ntcnt.resize(6, 0);
 	}
-	for (uint i = 0; i < sql; i++) {
-		short p = NT_POS[(int)sequence_[i]];
-		qsc[p] += qual_[i];
+	for (size_t i = 0; i < sql; i++) {
+		const short p = NT_POS[static_cast<unsigned char>(sequence_[i])];
+		qsc[p] += static_cast<uint64_t>(std::max<int>(0, qual_[i]));
 		ntcnt[p]++;
 	}
 }
 
-void DNA::ntSpecQualScoresMT(vector<long>& qsc, vector<long>& ntcnt) {
-	size_t sql = sequence_.length();
+void DNA::ntSpecQualScoresMT(vector<uint64_t>& qsc, vector<uint64_t>& ntcnt) {
+	const size_t sql = std::min(sequence_length_, std::min(sequence_.length(), qual_.size()));
 
-	if (qsc.size() < sql) {
-		qsc.resize(sql, 0);
+	if (qsc.size() < 6) {
+		qsc.resize(6, 0);
 	}
-	if (ntcnt.size() < sql) {
-		ntcnt.resize(sql, 0);
+	if (ntcnt.size() < 6) {
+		ntcnt.resize(6, 0);
 	}
-	for (uint i = 0; i < sql; i++) {
-		short p = NT_POS[(int)sequence_[i]];
-		qsc[p] += qual_[i];
+	for (size_t i = 0; i < sql; i++) {
+		const short p = NT_POS[static_cast<unsigned char>(sequence_[i])];
+		qsc[p] += static_cast<uint64_t>(std::max<int>(0, qual_[i]));
 		ntcnt[p]++;
 	}
 }
@@ -691,12 +695,12 @@ bool DNA::cutSeq(int start, int stop, bool pseudo) {
 	if (pseudo) {
 		if (stop == -1) {//|| stop <= (int) sequence_length_) {
 			sequence_length_ = start;
+			invalidateQualityCaches();
 			return true;
 		}
 	}
 
-	// this is to account for any already maybe incurred pseudo cuttings
-	int seqLDiff = int(sequence_.length() - sequence_length_);
+	const size_t oldLogicalLength = std::min(sequence_length_, sequence_.length());
 
 	string se = sequence_;
 	if (stop == -1) {
@@ -713,7 +717,11 @@ bool DNA::cutSeq(int start, int stop, bool pseudo) {
 	//Quali
 	qual_.erase(qual_.begin() + start, qual_.begin() + stop);
 
-	sequence_length_ = sequence_.length() - seqLDiff;
+	const size_t logicalStart = std::min(static_cast<size_t>(start), oldLogicalLength);
+	const size_t logicalStop = std::min(static_cast<size_t>(stop), oldLogicalLength);
+	const size_t removedLogical = logicalStop > logicalStart ? logicalStop - logicalStart : 0;
+	sequence_length_ = std::min(sequence_.length(), oldLogicalLength - removedLogical);
+	invalidateQualityCaches();
 
 	return true;
 }
@@ -790,14 +798,19 @@ void DNA::reset() {
 }
 
 void DNA::reverse_compliment(bool reset) {
+	const size_t logicalLength = std::min(sequence_length_, std::min(sequence_.size(), qual_.size()));
+	sequence_.resize(logicalLength);
+	qual_.resize(logicalLength);
+	sequence_length_ = logicalLength;
 	reverseTS(sequence_);
 	std::reverse(qual_.begin(), qual_.end());
 	reversed_ = !reversed_;
+	invalidateQualityCaches();
 	if (!reset) {
 		return;
 	}
 	accumulated_error_ = 0.; good_quality_ = false; mid_quality_ = false;
-	avg_qual_ = -1.f; quality_sum_ = 0; tempFloat = 0.f;
+	tempFloat = 0.f;
 
 }
 
@@ -809,7 +822,7 @@ int DNA::matchSeqRev(const string& PrSt, int Err, int searchSpace,
 	if (start == 0) {
 		start = PrL; //default seed set to 5
 	}
-	int SeL = (int)sequence_.size();
+	int SeL = static_cast<int>(std::min(sequence_length_, sequence_.size()));
 	//int wantSc = PrL - Err;
 	int pos(SeL - start), Prp(0), c_err(0), endPos(-1), c_points(0), point_aim(1);
 	vector<int> potentialMatches(0);
@@ -1408,20 +1421,26 @@ void DNAunique::incrementSampleCounter(int sample_id) {
 	if (it == occurence.end()) {
 		occurence.emplace_back(sample_id, static_cast<sample_count_t>(1));
 	}
-	else if (it->second < std::numeric_limits<sample_count_t>::max()) {
+	else {
+		if (it->second == std::numeric_limits<sample_count_t>::max()) {
+			throw std::overflow_error("Dereplication sample count overflow");
+		}
 		++(it->second);
 	}
 	invalidateTotalSumCache();
 #endif
 }
-void DNAunique::incrementSampleCounterBy(int sample_id, long count) {
-	if (sample_id < 0 || count <= 0) {
+void DNAunique::incrementSampleCounterBy(int sample_id, uint64_t count) {
+	if (sample_id < 0 || count == 0) {
 		return;
 	}
 	auto it = findOccurrenceEntry(sample_id);
 	if (it == occurence.end()) {
 		occurence.emplace_back(sample_id, count);
 	}	else {
+		if (it->second > std::numeric_limits<sample_count_t>::max() - count) {
+			throw std::overflow_error("Dereplication sample count overflow");
+		}
 		it->second += count;
 	}
 	invalidateTotalSumCache();
@@ -1444,13 +1463,13 @@ void DNAunique::incrementSampleCounterBy(int sample_id, long count) {
 	return myvec;
 }*/
 
-bool sortDescending(int i, int j) { return (i > j); }//descending sort
-vector<int>  DNAunique::getDerepMapSort(size_t wh) {
-	vector<int> vals;
+bool sortDescending(uint64_t i, uint64_t j) { return (i > j); }//descending sort
+vector<uint64_t> DNAunique::getDerepMapSort(size_t wh) {
+	vector<uint64_t> vals;
 	vals.reserve(occurence.size());
 	for (const auto& entry : occurence) {
 		if (entry.second == 0) { continue; }
-		vals.push_back(static_cast<int>(entry.second));
+		vals.push_back(entry.second);
 	}
 	if (wh > vals.size()) { wh = vals.size(); }
 	if (vals.size() <= 1 || wh == 0) {
@@ -1496,7 +1515,7 @@ void DNAunique::transferOccurence(const shared_ptr<DNAunique> dna_unique) {
 			occurence.push_back(entry);
 		}
 		else if (it->second > (std::numeric_limits<sample_count_t>::max() - entry.second)) {
-			it->second = std::numeric_limits<sample_count_t>::max();
+			throw std::overflow_error("Dereplication sample count overflow while merging occurrences");
 		}
 		else {
 			it->second += entry.second;
@@ -1506,7 +1525,7 @@ void DNAunique::transferOccurence(const shared_ptr<DNAunique> dna_unique) {
 }
 
 
-void DNAunique::writeMap(ofstream& os, const string& hd, vector<int>& counts_per_sample, const vector<int>& combiID, vector<uint64_t>& combined_counts, vector<int>& touched_groups) {
+void DNAunique::writeMap(ofstream& os, const string& hd, vector<uint64_t>& counts_per_sample, const vector<int>& combiID, vector<uint64_t>& combined_counts, vector<int>& touched_groups) {
 	if (occurence.empty()) { return; }
 	uint64_t total_count(0);
 
@@ -1537,23 +1556,18 @@ void DNAunique::writeMap(ofstream& os, const string& hd, vector<int>& counts_per
 		for (const auto& entry : occurence) {
 			if (entry.second == 0) { continue; }
 			const uint64_t rawCount = entry.second;
-			int count = rawCount > static_cast<uint64_t>(std::numeric_limits<int>::max())
-				? std::numeric_limits<int>::max()
-				: static_cast<int>(rawCount);
-			total_count += count;
+			total_count += rawCount;
 			os << "\t";
-			os << entry.first << ":" << count;
+			os << entry.first << ":" << rawCount;
 		}
 	}
 
 	//counts non-combined sample counts
 	for (const auto& entry : occurence) {
 		if (entry.second == 0 || entry.first < 0 || static_cast<size_t>(entry.first) >= counts_per_sample.size()) { continue; }
-		const int add = entry.second > static_cast<sample_count_t>(std::numeric_limits<int>::max())
-			? std::numeric_limits<int>::max()
-			: static_cast<int>(entry.second);
-		if (counts_per_sample[entry.first] > (std::numeric_limits<int>::max() - add)) {
-			counts_per_sample[entry.first] = std::numeric_limits<int>::max();
+		const uint64_t add = entry.second;
+		if (counts_per_sample[entry.first] > (std::numeric_limits<uint64_t>::max() - add)) {
+			throw std::overflow_error("Dereplication map count overflow");
 		}
 		else {
 			counts_per_sample[entry.first] += add;
@@ -1571,7 +1585,10 @@ uint64_t DNAunique::totalSum() {
 	if (!total_sum_cache_valid_) {
 		total_sum_cache_ = 0;
 		for (const auto& xx : occurence) {
-			total_sum_cache_ += static_cast<uint64_t>(xx.second);
+			if (total_sum_cache_ > std::numeric_limits<uint64_t>::max() - xx.second) {
+				throw std::overflow_error("Dereplication total count overflow");
+			}
+			total_sum_cache_ += xx.second;
 		}
 		total_sum_cache_valid_ = true;
 	}
@@ -1585,7 +1602,7 @@ uint64_t DNAunique::totalSum() {
 void DNAunique::addToQualSum(qual_accum_t& target, qual_accum_t value) {
 	const qual_accum_t maxVal = std::numeric_limits<qual_accum_t>::max();
 	if (target > (maxVal - value)) {
-		target = maxVal;
+		throw std::overflow_error("Dereplication quality accumulation overflow");
 	}
 	else {
 		target += value;

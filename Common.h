@@ -34,6 +34,8 @@ string spaceX(unsigned int k);
 int digitsInt(int x);
 int digitsFlt(float x);
 string intwithcommas(int value);
+string intwithcommas(int64_t value);
+string intwithcommas(uint64_t value);
 // itos was removed but kept as a thin wrapper to std::to_string for backward compatibility.
 // Replace calls to itos(...) with std::to_string(...) across the codebase when convenient.
 inline std::string itos(int number) { return std::to_string(number); }
