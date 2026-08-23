@@ -2687,12 +2687,14 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extra
 
 	int start(-1), stop(d->length());
 	int QS = d->length();
-	int limit = max(QS >> 1, QS - 250);
+	const int legacyLimit = max(QS >> 1, QS - 250);
+	int limit = legacyLimit;
 	int limit2 = 50;
 	if (true) {
 		limit = min(QS - 1, max(((int)((float)d->length() * 0.75)), 250));
 		limit2 = (d->length() - 100);
 	}
+	limit = min(limit, legacyLimit);
 	if (primerID >= 0 && (size_t)primerID < PrimerR_RC.size()) {
 		const int revPrimerLen = static_cast<int>(PrimerR_RC[primerID].length());
 		if (revPrimerLen > 0) {
