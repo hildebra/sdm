@@ -2696,7 +2696,8 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extra
 	if (primerID >= 0 && (size_t)primerID < PrimerR_RC.size()) {
 		const int revPrimerLen = static_cast<int>(PrimerR_RC[primerID].length());
 		if (revPrimerLen > 0) {
-			const int maxSearchSpace = max(0, QS - revPrimerLen - 1);
+			const int maxTailAfterPrimer = 30;
+			const int maxSearchSpace = max(0, QS - revPrimerLen - 1 - maxTailAfterPrimer);
 			limit = min(limit, maxSearchSpace);
 		}
 	}
