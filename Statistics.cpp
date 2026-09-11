@@ -379,12 +379,12 @@ void ReportStats::printStats2(ostream& give, float remSeqs, int pair) {
     }
     if (pair == 0) {
         if (bMedianCalcs) {
-            const unsigned int lengthQ05 = static_cast<unsigned int>(calc_median(rstat_VSmed, 0.05f));
-            const unsigned int lengthQ50 = static_cast<unsigned int>(calc_median(rstat_VSmed, 0.50f));
-            const unsigned int lengthQ95 = static_cast<unsigned int>(calc_median(rstat_VSmed, 0.95f));
-            const unsigned int qualityQ05 = static_cast<unsigned int>(calc_median(rstat_VQmed, 0.05f));
-            const unsigned int qualityQ50 = static_cast<unsigned int>(calc_median(rstat_VQmed, 0.50f));
-            const unsigned int qualityQ95 = static_cast<unsigned int>(calc_median(rstat_VQmed, 0.95f));
+            const unsigned int lengthQ05 = static_cast<unsigned int>(calc_median(rstat_VSmed, 0.05));
+            const unsigned int lengthQ50 = static_cast<unsigned int>(calc_median(rstat_VSmed, 0.50));
+            const unsigned int lengthQ95 = static_cast<unsigned int>(calc_median(rstat_VSmed, 0.95));
+            const unsigned int qualityQ05 = static_cast<unsigned int>(calc_median(rstat_VQmed, 0.05));
+            const unsigned int qualityQ50 = static_cast<unsigned int>(calc_median(rstat_VQmed, 0.50));
+            const unsigned int qualityQ95 = static_cast<unsigned int>(calc_median(rstat_VQmed, 0.95));
             give << "5%/50%/95% quantiles Pair 1";
             if (rstat_totReads == 0) {
                 give << "\n     - sequence Length : " << "0/0/0"
@@ -452,23 +452,8 @@ void ReportStats::addRepStats(ReportStats& RepoStat) {
 }
 //calculate median value from data stored as histogram-vector
 // for median use perc = 0.5f
-float ReportStats::calc_median(vector<uint64_t>& in, float perc) {
-    uint64_t total = 0;
-    for (uint64_t count : in) {
-        total += count;
-    }
-    if (total == 0) { return 0.f; }
-    const double boundedPercentile = std::max(0.0, std::min(1.0, static_cast<double>(perc)));
-    const uint64_t threshold = std::max<uint64_t>(1, static_cast<uint64_t>(std::ceil(total * boundedPercentile)));
-    uint64_t cumulative = 0;
-    for (unsigned int i = 0; i < in.size(); i++) {
-        cumulative += in[i];
-        if (cumulative >= threshold) {
-            return (float)i;
-        }
-    }
-
-    return 0.f;
+float ReportStats::calc_median(vector<uint64_t>& in, double perc) {
+    return Statistics::calc_median(in, perc);
 }
 void ReportStats::add_median2histo(vector<uint64_t>& in, vector<uint64_t>& histo)
 {
@@ -526,7 +511,7 @@ void ReportStats::addMedian2Histo(const uint in, vector<uint64_t>& histo)
 
 
 
-void GAstats::addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int missedGAs) {
+void GAstats::addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int missedGAs, int barcodeOffset) {
     totalRds++; totalGAs += static_cast<uint64_t>(GA.size());
     totalRdLen += dn->length();
     if (missedGAs > 0) { missGAs += static_cast<uint64_t>(missedGAs); }
@@ -538,8 +523,8 @@ void GAstats::addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int
     }
     inccorrectPrimers+=incP;
     totalGALen += totL;
-    int idx = dn->getBCnumber();
-    if ((idx + 1) > GAperBC.size()) {
+    const int idx = dn->getBCnumber() < 0 ? -1 : dn->getBCnumber() - barcodeOffset;
+    if (idx >= 0 && static_cast<size_t>(idx + 1) > GAperBC.size()) {
         GAperBC.resize(idx + 1, 0); CNTperBC.resize(idx + 1, 0);
         GALENperBC.resize(idx + 1, 0); rdLENperBC.resize(idx + 1, 0);
         GAfailsPerBC.resize(idx + 1, 0);
@@ -834,14 +819,16 @@ void Statistics::addMedian2Histo(unsigned int in, vector<uint64_t> &histo) {
     histo[in] += 1;
 }
 
-inline float Statistics::calc_median(vector<uint64_t> &in, float perc) {
+float Statistics::calc_median(vector<uint64_t> &in, double perc) {
     uint64_t total = 0;
     for (uint64_t count : in) {
         total += count;
     }
     if (total == 0) { return 0.f; }
     const double boundedPercentile = std::max(0.0, std::min(1.0, static_cast<double>(perc)));
-    const uint64_t threshold = std::max<uint64_t>(1, static_cast<uint64_t>(std::ceil(total * boundedPercentile)));
+    const double rank = std::ceil(total * boundedPercentile);
+    const uint64_t threshold = rank >= static_cast<double>(total) ? total
+        : std::max<uint64_t>(1, static_cast<uint64_t>(rank));
     uint64_t cumulative = 0;
     for (unsigned int i=0; i<in.size(); i++){
         cumulative += in[i];

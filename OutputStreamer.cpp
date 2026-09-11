@@ -479,7 +479,7 @@ OutputStreamer::~OutputStreamer() {
 	}
 	if (paired_sync_skipped_counter_ > 0) {
 		cerr << "Warning: skipped " << paired_sync_skipped_counter_.load()
-			<< " paired FASTQ write attempts to keep R1/R2 synchronized." << endl;
+			<< " paired write attempts to keep R1/R2 synchronized." << endl;
 	}
 	cdbg("Subfilters deleted, streams closed\n");
 	//for (size_t x = 0; x < merger.size(); x++) { delete merger[x]; } merger.clear(); 
@@ -806,132 +806,75 @@ void OutputStreamer::writeAllStoredDNA2t() {
 #endif
 
 
+bool OutputStreamer::writeDemultiRecords(int idx, const string& first, const string& second,
+	uint64_t bases, bool merged) {
+	if (idx < 0 || (first.empty() && second.empty())) { return false; }
+	std::lock_guard<std::mutex> guard(dmltMTX);
+	auto& counter = merged ? BPwrittenInSRmerg : BPwrittenInSR;
+	const uint64_t written = counter.load();
+	// Admit whole records/pairs and count both mates. Each destination has its
+	// own per-run budget; an exhausted merged budget cannot fall back to R1/R2.
+	if (demultiBPperSR > 0 && (written >= demultiBPperSR || bases > demultiBPperSR - written)) {
+		return false;
+	}
+	if (merged) {
+		if (static_cast<size_t>(idx) >= demultiMergeFiles.size() || !demultiMergeFiles[idx]) { return false; }
+		*demultiMergeFiles[idx] << first;
+	} else {
+		if (static_cast<size_t>(idx) >= demultiSinglFiles.size()) { return false; }
+		const auto& streams = demultiSinglFiles[idx];
+		if ((!first.empty() && (streams.empty() || !streams[0])) ||
+			(!second.empty() && (streams.size() < 2 || !streams[1]))) { return false; }
+		if (!first.empty()) { *streams[0] << first; }
+		if (!second.empty()) { *streams[1] << second; }
+	}
+	counter += bases;
+	return true;
+}
+
 void OutputStreamer::write2Demulti(const shared_ptr<DNA>& d1, const shared_ptr<DNA>& d2, int BCoffset,
 	int curThread) {
-	if (!this->Demulti2Fls()) {
+	if (!Demulti2Fls() || !d1) { return; }
+	if (isPEseq() < 2) {
+		write2Demulti(d1, 0, BCoffset);
 		return;
 	}
-
-	bool demultFini = demultiBPperSR > 0 && BPwrittenInSR.load() > demultiBPperSR;
-	bool demultMrgFini = demultiBPperSR > 0 && BPwrittenInSRmerg.load() > demultiBPperSR;
-	if (demultFini && demultMrgFini) {
-		return;
-	}
-	int idx = d1->getBCnumber() - BCoffset; //correct for BC offset as well..
-
-	if (idx < 0) {
-		return;
-	}
-	// guard against out-of-range indexes
-	if ((size_t)idx >= demultiSinglFiles.size()) {
-		return;
-	}
-	bool green1(d1->isGreenQual());
-	bool green2(false);
-	if (d2 != nullptr) {
-		green2 = d2->isGreenQual();
-	}
-	bool mergeWr(false);
-
-
-
-	//merging attempts/prep, requires paired reads
-    if (this->isPEseq() == 2 &&
-		(green1 || green2) && b_merge_pairs_demulti_ && d1->merge_seed_pos_ >= 0) {
-		shared_ptr<DNA> dna_merged = nullptr;
-		// perform merge outside locks
-		if (curThread >= 0 && (size_t)curThread < mergers.size() && mergers[curThread]) {
-			dna_merged = mergers[curThread]->merge(d1, d2);
-		}
-		if (dna_merged) {
-			// prepare merged output without holding dmltMTX
-			dna_merged->prepareWrite(fastQoutVer);
-			string mergedStr = dna_merged->writeFastQ();
-			// write under lock to avoid races with generate/close
-			{
-				std::lock_guard<std::mutex> guard(dmltMTX);
-				if (idx >= 0 && (size_t)idx < demultiMergeFiles.size() && demultiMergeFiles[idx] != nullptr) {
-					*(demultiMergeFiles[idx]) << mergedStr;
-					mergeWr = true;
-				}
-			}
-			BPwrittenInSRmerg += d1->length();
+	const int idx = d1->getBCnumber() - BCoffset;
+	if (idx < 0) { return; }
+	const bool green1 = d1->isGreenQual();
+	const bool green2 = d2 && d2->isGreenQual();
+	if (d2 && (green1 || green2) && b_merge_pairs_demulti_ && d1->merge_seed_pos_ >= 0 &&
+		curThread >= 0 && static_cast<size_t>(curThread) < mergers.size() && mergers[curThread]) {
+		auto merged = mergers[curThread]->merge(d1, d2);
+		if (merged && getFilters(curThread)->checkMergedDNA(merged)) {
+			merged->prepareWrite(fastQoutVer);
+			writeDemultiRecords(idx, merged->writeFastQ(), "", merged->length(), true);
+			return;
 		}
 	}
-	if (mergeWr) {
-		return;
-	}
-
-	//check for paired reads
-	if ((onlyCompletePairsDemulti && (!green1 || !green2))) {
-		return;
-	}
-	/*
-	string x = d2->getShortId();
-	if (x.find("M04428:252:000000000-BM3M5:1:2106:11089:1656") != string::npos) {
-		bool x = true; // DEBUG
-	}
-	/**/
-	string dn1(""), dn2("");
+	if (onlyCompletePairsDemulti && (!green1 || !green2)) { return; }
+	string first, second;
+	uint64_t bases = 0;
 	if (green1) {
-		//cout << "trouble" << endl;
 		d1->prepareWrite(fastQoutVer);
-		//dmltMTX.lock();
-		BPwrittenInSR += d1->length();
-		//dmltMTX.unlock();
-		d1->writeFastQ(dn1, false);
+		d1->writeFastQ(first, false);
+		if (!first.empty()) { bases += d1->length(); }
 	}
 	if (green2) {
-		//cout << "trouble" << endl;
 		d2->prepareWrite(fastQoutVer);
-		//dmltMTX.lock();
-		//dmltMTX.unlock();
-		d2->writeFastQ(dn2, false);
+		d2->writeFastQ(second, false);
+		if (!second.empty()) { bases += d2->length(); }
 	}
-	//cerr << dn2 << "WEW";
-	//move them closer together..
-	dmltMTX.lock();
-	*(demultiSinglFiles[idx][0]) << dn1;
-	//cdbg("write2Demulti4"+itos(idx) + "X "+itos(demultiSinglFiles[idx].size())+"Y"+ dn2);
-	*(demultiSinglFiles[idx][1]) << dn2;
-	dmltMTX.unlock();
-
-
+	writeDemultiRecords(idx, first, second, bases, false);
 }
 
-void OutputStreamer::write2Demulti(const shared_ptr<DNA>& d, int p, int BCoffset) {//this->getBCoffset()
-	if (!this->Demulti2Fls()) {
-		return;
-	}
-    if (demultiBPperSR > 0 && BPwrittenInSR.load() > demultiBPperSR) {
-		return;
-	}
-	int idx = d->getBCnumber() - BCoffset; //correct for BC offset as well..
-
-	if (idx < 0 || !d->isGreenQual()) {
-		return;
-	}
-	if ((size_t)idx >= demultiSinglFiles.size()) {
-		return;
-	}
-	if (p < 0 || p > 1) {
-		return;
-	}
-
-	// prepare output string without holding locks
+void OutputStreamer::write2Demulti(const shared_ptr<DNA>& d, int p, int BCoffset) {
+	if (!Demulti2Fls() || !d || !d->isGreenQual() || p < 0 || p > 1) { return; }
 	d->prepareWrite(fastQoutVer);
-	string outStr = d->writeFastQ(false);
-	// now atomically check and write under lock to avoid TOCTOU/use-after-free
-	{
-		std::lock_guard<std::mutex> guard(dmltMTX);
-		if ((size_t)idx < demultiSinglFiles.size() && demultiSinglFiles[idx].size() > (size_t)p && demultiSinglFiles[idx][p] != nullptr) {
-			*(demultiSinglFiles[idx][p]) << outStr;
-			BPwrittenInSR += d->length();
-		}
-	}
-
+	const string record = d->writeFastQ(false);
+	writeDemultiRecords(d->getBCnumber() - BCoffset, p == 0 ? record : "",
+		p == 1 ? record : "", d->length(), false);
 }
-
 
 void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil,
 	std::ios_base::openmode writeStatus, bool demulti2gz) {
@@ -1080,41 +1023,80 @@ bool  OutputStreamer::saveForWrite(const shared_ptr<DNA>& d, int Pair, int thr, 
 
 void OutputStreamer::writeForWrite(const shared_ptr<DNA>& d1, int Pair1, int Cstream1,
 	const shared_ptr<DNA>& d2, int Pair2, int Cstream2) {
+	writeForWriteImpl(d1, Pair1, Cstream1, d2, Pair2, Cstream2);
+}
+
+bool OutputStreamer::writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int Cstream1,
+	const shared_ptr<DNA>& d2, int Pair2, int Cstream2, const string* mergedFastq) {
+	const bool mergedOutput = mergedFastq != nullptr;
+	if (mergedOutput && (!d1 || mergedFastq->empty())) { return false; }
+	const bool writeFastq = BWriteFastQ || mergedOutput;
+	// Suppressed output is common in dereplication: avoid formatting and locks.
+	if (Cstream1 >= 100 && Cstream2 >= 100) { return false; }
+	const bool isStrictPairedWrite = (!mergedOutput && pairedSeq > 1 && Pair1 > 0 && Pair1 < 3 && Pair2 > 0 && Pair2 < 3);
+	if (isStrictPairedWrite) {
+		// Primary suppression must not discard a green mate when its partner
+		// qualifies for secondary output: the whole pair also passes that tier.
+		if (Cstream1 == 100 && Cstream2 == 1 && d1 && d1->isGreenQual()) { Cstream1 = 1; }
+		if (Cstream2 == 100 && Cstream1 == 1 && d2 && d2->isGreenQual()) { Cstream2 = 1; }
+		if (!d1 || !d2 || d1->length() == 0 || d2->length() == 0 ||
+			Cstream1 < 0 || Cstream2 < 0 || Cstream1 >= 100 || Cstream2 >= 100) {
+			paired_sync_skipped_counter_++;
+			return false;
+		}
+		// A pair belongs to the less stringent of its two quality tiers.
+		Cstream1 = Cstream2 = std::max(Cstream1, Cstream2);
+	}
+	std::shared_lock<std::shared_mutex> epochGuard(outputEpochMTX);
 	thread_local string fastqTmp1;
 	thread_local string fastqTmp2;
-	const bool isStrictPairedFastqWrite = (BWriteFastQ && pairedSeq > 1 && Pair1 > 0 && Pair1 < 3 && Pair2 > 0 && Pair2 < 3);
+	const bool isStrictPairedFastqWrite = writeFastq && isStrictPairedWrite;
 	if (isStrictPairedFastqWrite) {
-		if (!d1 || !d2) { paired_sync_skipped_counter_++; return; }
 		fastqTmp1.clear(); fastqTmp2.clear();
 		d1->writeFastQ(fastqTmp1);
 		d2->writeFastQ(fastqTmp2);
 		if (fastqTmp1.empty() || fastqTmp2.empty()) {
 			paired_sync_skipped_counter_++;
-			return;
+			return false;
+		}
+	}
+
+	thread_local string seqTmp1, seqTmp2, qualTmp1, qualTmp2;
+	if (!writeFastq) {
+		seqTmp1.clear(); seqTmp2.clear(); qualTmp1.clear(); qualTmp2.clear();
+		if (d1) {
+			d1->writeSeq(seqTmp1, b_oneLinerFasta);
+			if (BWriteQual) { d1->writeQual(qualTmp1, b_oneLinerFasta); }
+		}
+		if (d2) {
+			d2->writeSeq(seqTmp2, b_oneLinerFasta);
+			if (BWriteQual) { d2->writeQual(qualTmp2, b_oneLinerFasta); }
+		}
+		if (isStrictPairedWrite && (seqTmp1.empty() || seqTmp2.empty())) {
+			paired_sync_skipped_counter_++;
+			return false;
 		}
 	}
 
 	for (;;) {
-		std::shared_lock<std::shared_mutex> epochGuard(outputEpochMTX);
 		std::shared_ptr<dualOfBufStream> localFqPair;
 		std::shared_ptr<ostr> localFq1, localFq2, localSeq1, localSeq2, localQual1, localQual2;
 		bool rotate = false;
 		{
 			std::lock_guard<std::mutex> streamGuard(sqfqostrMTX);
-			if (Cstream1 >= 100 && Cstream2 >= 100) { return; }
-			if (maxRdsOut > 0 && TotalReadsWritten >= maxRdsOut) { return; }
-			if (maxReadsPerOFile > 0 && ReadsWritten >= maxReadsPerOFile) {
-				rotate = true;
-			}
-			else {
+			if (Cstream1 >= 100 && Cstream2 >= 100) { return false; }
+			if (maxRdsOut > 0 && TotalReadsWritten >= maxRdsOut) { return false; }
+			{
 				const bool p1Valid = Pair1 > 0;
 				const bool p2Valid = Pair2 > 0;
-				if (BWriteFastQ && pairedSeq > 1 && Pair1 < 3 && Cstream1 >= 0 &&
+				if (writeFastq && isStrictPairedWrite && Cstream1 >= 0 &&
 					static_cast<size_t>(Cstream1) < fqPairFile.size()) {
-					if (isStrictPairedFastqWrite && Cstream1 != Cstream2) { return; }
 					localFqPair = fqPairFile[Cstream1];
 				}
-				if (BWriteFastQ) {
+				if (mergedOutput) {
+					if (!of_merged_fq.empty()) { localFq1 = of_merged_fq[0]; }
+				}
+				else if (writeFastq) {
 					if (Cstream1 >= 0 && static_cast<size_t>(Cstream1) < fqFile.size() && p1Valid &&
 						static_cast<size_t>(Pair1 - 1) < fqFile[Cstream1].size()) {
 						localFq1 = fqFile[Cstream1][Pair1 - 1];
@@ -1143,35 +1125,49 @@ void OutputStreamer::writeForWrite(const shared_ptr<DNA>& d1, int Pair1, int Cst
 					}
 				}
 
+				if (isStrictPairedWrite && ((writeFastq && !localFqPair) ||
+					(!writeFastq && (!localSeq1 || !localSeq2 ||
+						((localQual1 || localQual2) && (!localQual1 || !localQual2 ||
+							qualTmp1.empty() || qualTmp2.empty())))))) {
+					paired_sync_skipped_counter_++;
+					return false;
+				}
 				const bool willWrite = (localFqPair && d1 && d2) || (localFq1 && d1) ||
 					(localFq2 && d2) || (localSeq1 && d1) || (localSeq2 && d2);
 				if (!willWrite) {
 					if (isStrictPairedFastqWrite) { paired_sync_skipped_counter_++; }
-					return;
+					return false;
 				}
-				++ReadsWritten;
-				++TotalReadsWritten;
+				if (maxReadsPerOFile > 0 && ReadsWritten >= maxReadsPerOFile) {
+					rotate = true;
+				} else {
+					++ReadsWritten;
+					++TotalReadsWritten;
+				}
 			}
 		}
 
 		if (rotate) {
 			epochGuard.unlock();
-			std::unique_lock<std::shared_mutex> rotationGuard(outputEpochMTX);
-			std::lock_guard<std::mutex> incrementGuard(fileIncMTX);
-			if (maxReadsPerOFile > 0 && ReadsWritten >= maxReadsPerOFile) {
-				incrementOutputFile();
+			{
+				std::unique_lock<std::shared_mutex> rotationGuard(outputEpochMTX);
+				std::lock_guard<std::mutex> incrementGuard(fileIncMTX);
+				if (maxReadsPerOFile > 0 && ReadsWritten >= maxReadsPerOFile &&
+					(maxRdsOut == 0 || TotalReadsWritten < maxRdsOut)) {
+					incrementOutputFile();
+				}
 			}
+			epochGuard.lock();
 			continue;
 		}
 
 		if (localFqPair) {
-			if (!isStrictPairedFastqWrite) {
-				fastqTmp1.clear(); fastqTmp2.clear();
-				d1->writeFastQ(fastqTmp1);
-				d2->writeFastQ(fastqTmp2);
-			}
 			localFqPair->write2(fastqTmp1, fastqTmp2);
-			return;
+			return true;
+		}
+		if (mergedOutput) {
+			*localFq1 << *mergedFastq;
+			return true;
 		}
 		if (localFq1 && d1) {
 			fastqTmp1.clear(); d1->writeFastQ(fastqTmp1); *localFq1 << fastqTmp1;
@@ -1179,95 +1175,65 @@ void OutputStreamer::writeForWrite(const shared_ptr<DNA>& d1, int Pair1, int Cst
 		if (localFq2 && d2) {
 			fastqTmp2.clear(); d2->writeFastQ(fastqTmp2); *localFq2 << fastqTmp2;
 		}
-		if (localSeq1 && d1) {
-			*localSeq1 << d1->writeSeq(b_oneLinerFasta);
-			if (localQual1) { *localQual1 << d1->writeQual(b_oneLinerFasta); }
+		if (!writeFastq) {
+			// Each stream's own lock protects its bytes, but all related records
+			// must share this lock to keep R1/R2 and FASTA/QUAL in the same order.
+			std::lock_guard<std::mutex> streamGuard(sqfqostrMTX);
+			if (localSeq1 && d1) {
+				*localSeq1 << seqTmp1;
+				if (localQual1) { *localQual1 << qualTmp1; }
+			}
+			if (localSeq2 && d2) {
+				*localSeq2 << seqTmp2;
+				if (localQual2) { *localQual2 << qualTmp2; }
+			}
 		}
-		if (localSeq2 && d2) {
-			*localSeq2 << d2->writeSeq(b_oneLinerFasta);
-			if (localQual2) { *localQual2 << d2->writeQual(b_oneLinerFasta); }
-		}
-		return;
+		return true;
 	}
 }
 
 bool OutputStreamer::saveForWrite_merge(shared_ptr<DNAunique> d,
 	string newHeader, int curThread, bool elseWriteD1) {
-	// CHECK WHERE TO IMPLEMENT BEST
-// MERGE DNA1 AND DNA2
+	if (!d) { return false; }
 	shared_ptr<DNA> d2 = d->getPair();
 	shared_ptr<DNAunique> dna_merged = d->getMerge();
-	bool didMerge(false);
 
 	if (!dna_merged && d2 != nullptr) {
-		findSeedForMerge(d, d2, 0);
+		findSeedForMerge(d, d2, curThread);
 		if (d->merge_seed_pos_ >= 0) {
 			shared_ptr<DNA> tdM = mergers[curThread]->merge(d, d2);
-			if (tdM != nullptr) {
-				dna_merged = make_shared<DNAunique>(tdM, -1);
-			}
+			if (tdM) { dna_merged = make_shared<DNAunique>(tdM, -1); }
 		}
-		d->attachMerge(dna_merged);
 	}
-	if (dna_merged) {
-		// write out merged DNA
-		if (newHeader != "") {
-			dna_merged->setNewID(newHeader);
-		}
-		dna_merged->prepareWrite(fastQoutVer);
-     thread_local string mergedFastqTmp;
-		mergedFastqTmp.clear();
-		dna_merged->writeFastQ(mergedFastqTmp);
-       if (of_merged_fq.size() > 0 && of_merged_fq[0]) {
-			*(of_merged_fq[0]) << mergedFastqTmp;
-		}
-		return true;
+	// Prepare both cached and newly constructed seeds at their full length.
+	if (dna_merged && !getFilters(curThread)->checkMergedDNA(dna_merged, true)) { dna_merged.reset(); }
+	d->attachMerge(dna_merged);
+	if (!dna_merged) {
+		if (!elseWriteD1 || !getFilters(curThread)->checkMergedLength(d)) { return false; }
+		dna_merged = d;
 	}
-	if (!elseWriteD1) {//not passed? not my problem..
-		return false;
+	if (!newHeader.empty()) { dna_merged->setNewID(newHeader); }
+	dna_merged->prepareWrite(fastQoutVer);
+	if (!BWriteFastQ) {
+		// The selected merged OTU belongs in the requested main FASTA/QUAL.
+		// Reuse normal output accounting, rotation, and serialization.
+		return writeForWriteImpl(dna_merged, 1, 0, nullptr, -1, 100);
 	}
-	//actually it is still my problem...
-	d->prepareWrite(fastQoutVer);
-  thread_local string mergedFastqTmp;
+	thread_local string mergedFastqTmp;
 	mergedFastqTmp.clear();
-	d->writeFastQ(mergedFastqTmp);
-       if (of_merged_fq.size() > 0 && of_merged_fq[0]) {
-			*(of_merged_fq[0]) << mergedFastqTmp;
-		}
-
-	return false;
+	dna_merged->writeFastQ(mergedFastqTmp);
+	return writeForWriteImpl(dna_merged, 1, 0, nullptr, -1, 100, &mergedFastqTmp);
 }
 
 
 void OutputStreamer::findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, int thrPos) {
-   if (dna1 == nullptr || dna2 == nullptr) {
-		total_read_preMerge_++;
-		return;
-	}
-	if (dna1->length() == 0 || dna2->length() == 0) {
-		total_read_preMerge_++;
-		return;
-	}
-	if (thrPos < 0 || (size_t)thrPos >= mergers.size() || mergers[thrPos] == nullptr) {
-		total_read_preMerge_++;
-		return;
-	}
-	bool didMerge = mergers[thrPos]->findSeedForMerge(dna1, dna2);
-	/*if (merger[thrPos]->findSeed(dna1->getSequence(), dna2->getSequence())) {
-		didMerge = true;
-		dna1->merge_seed_pos_ = (int) merger[thrPos]->result.seed.pos1;
-		dna1->merge_offset_ = merger[thrPos]->result.offset1;
-		dna2->merge_seed_pos_ = (int) merger[thrPos]->result.seed.pos2;
-		dna2->merge_offset_ = merger[thrPos]->result.offset2;
-		dna2->reversed_merge_ = merger[thrPos]->result.seed.is2reversed;
-	}
-	*/
-	total_read_preMerge_++;
-	if (didMerge) {
-		merged_counter_++;
-	}
-	//mergStatMTX.lock(); 	mergStatMTX.unlock(); 
-	return;
+    if (dna1) { dna1->clearMergeSeed(); }
+    if (dna2) { dna2->clearMergeSeed(); }
+    ++total_read_preMerge_;
+    if (!dna1 || !dna2 || thrPos < 0 || static_cast<size_t>(thrPos) >= mergers.size() || !mergers[thrPos]) {
+        return;
+    }
+    if (mergers[thrPos]->findSeedForMerge(dna1, dna2)) { ++merged_counter_; }
 }
 
 void OutputStreamer::writeSelectiveStream(shared_ptr<DNA> d, int Pair, int FS) {
@@ -1304,22 +1270,20 @@ void OutputStreamer::writeSelectiveStream(shared_ptr<DNA> d, int Pair, int FS) {
 
 }
 void OutputStreamer::writeNonBCReads(const shared_ptr<DNA>& d, const shared_ptr<DNA>& d2) {
-	if (fqNoBCFile.size() == 2) {
-		if (!d->getBarcodeDetected() && !d2->getBarcodeDetected()) {
-			if ((!d->getBarcodeDetected() && d2->getBarcodeDetected()) ||
-				(d->getBarcodeDetected() && !d2->getBarcodeDetected())) {
-				cerr << "Barcode only set in 1 reads.. something wrong!\n";
-			}
-			//nobcostrmMTX.lock();
-			string d1s, d2s;
-			d->writeFastQ(d1s);
-			d2->writeFastQ(d2s);
-			dmltMTX.lock();
-			*(fqNoBCFile[0]) << d1s;
-			*(fqNoBCFile[1]) << d2s;
-			dmltMTX.unlock();
-			//nobcostrmMTX.unlock();
-		}
+	if (fqNoBCFile.empty() || !d || d->getBarcodeDetected()) { return; }
+	if (pairedSeq > 1 && (!d2 || d2->getBarcodeDetected())) { return; }
+	string d1s, d2s;
+	d->prepareWrite(fastQoutVer);
+	d->writeFastQ(d1s);
+	if (pairedSeq > 1) {
+		d2->prepareWrite(fastQoutVer);
+		d2->writeFastQ(d2s);
+		if (d1s.empty() || d2s.empty()) { return; }
+	}
+	std::lock_guard<std::mutex> guard(dmltMTX);
+	*(fqNoBCFile[0]) << d1s;
+	if (!d2s.empty()) {
+		*(fqNoBCFile[fqNoBCFile.size() == 1 ? 0 : 1]) << d2s;
 	}
 }
 
@@ -1383,11 +1347,11 @@ void OutputStreamer::attachDereplicator(shared_ptr<Dereplicate> de) {
 		dereplicator->addDNA(tdn);
 	}
 }*/
-void OutputStreamer::dereplicateDNA(const shared_ptr<DNA>& tdn, const shared_ptr<DNA>& tdn2) {
+void OutputStreamer::dereplicateDNA(const shared_ptr<DNA>& tdn, const shared_ptr<DNA>& tdn2, int curThread) {
 	if (false || !b_doDereplicate) {
 		return;
 	}
-	dereplicator->addDNA(tdn, tdn2);
+	dereplicator->addDNA(tdn, tdn2, getFilters(curThread));
 	if (tdn->isDereplicated()) {
 		//drpMTX.lock();
 		cntDerep++;
@@ -1493,14 +1457,16 @@ void OutputStreamer::openOFstream(const string opOF, std::ios_base::openmode wrM
 	}
 }
 void OutputStreamer::openNoBCoutstrean(const string inS) {
-	vector<string> tfnaout = splitByCommas(inS);
-	//bool doMC = Nthrds >= 1;
-    std::lock_guard<std::mutex> guard(sqfqostrMTX);
-	fqNoBCFile.resize(2);
-	fqNoBCFile[0].reset();
-	fqNoBCFile[0] = std::make_shared<ostr>(tfnaout[0], wrMode, doTIO);
-	fqNoBCFile[1].reset();
-	fqNoBCFile[1] = std::make_shared<ostr>(tfnaout[1], wrMode, doTIO);
+	const vector<string> paths = splitByCommas(inS);
+	if (paths.empty() || paths.size() > (pairedSeq > 1 ? 2u : 1u) ||
+		std::any_of(paths.begin(), paths.end(), [](const string& path) { return path.empty(); })) {
+		throw std::runtime_error("No-barcode output requires one path for single reads, or one or two paths for paired reads.");
+	}
+	std::lock_guard<std::mutex> guard(sqfqostrMTX);
+	fqNoBCFile.clear();
+	for (const string& path : paths) {
+		fqNoBCFile.push_back(std::make_shared<ostr>(path, wrMode, doTIO));
+	}
 }
 
 void OutputStreamer::openOFstreamFQpair(const string opOF, const string opOF2, std::ios_base::openmode wrMode,
@@ -1694,6 +1660,12 @@ void OutputStreamer::openSeveralOutstreams(OptContainer* cmdArgs, shared_ptr<Rea
 	}
 }
 
+bool OutputStreamer::singleSeedFasta() const {
+	const auto path = locCmdArgs->find("-o_fna");
+	return MFil->doOptimalClusterSeq() && !BWriteFastQ && path != locCmdArgs->end() &&
+		!path->second.empty() && splitByCommas(path->second).size() == 1;
+}
+
 void OutputStreamer::openOutStreams(OptContainer* cmdArgs, int fileIt,
 	std::ios_base::openmode wrMode_i,
 	string fileExt, int forceFmt) {
@@ -1768,7 +1740,7 @@ void OutputStreamer::openOutStreams(OptContainer* cmdArgs, int fileIt,
 		return;
 	}
 	BWriteFastQ = false;
-	if (pairedSeq == 1) {
+	if (pairedSeq == 1 || singleSeedFasta()) {
 #ifdef DEBUG
 		cerr << " fasta singleton output " << endl;
 #endif
@@ -1797,26 +1769,34 @@ void OutputStreamer::openOutStreams(OptContainer* cmdArgs, int fileIt,
 		cerr << " fasta paired output " << endl;
 #endif
 
-		vector<string> tfnaout = splitByCommas((*cmdArgs)["-o_fna"]);
-		if (tfnaout.size() != 2) {
-			cerr << "Paired sequences given as input, requires paired output file (2 files separated by \",\"). Given output file = " << (*cmdArgs)["-o_fna"] << endl; exit(57);
+		// Open each mate and its singleton through the existing stream helpers,
+		// including matching QUAL files when requested.
+		auto openPairedFiles = [&](const string& paths, int tier, int format) {
+			const vector<string> files = splitByCommas(paths);
+			if (files.size() != 2 || files[0].empty() || files[1].empty()) {
+				throw std::runtime_error("Paired FASTA/QUAL output requires two comma-separated paths: " + paths);
+			}
+			for (int mate = 0; mate < 2; ++mate) {
+				openOFstream(applyFileIT(files[mate] + fileExt, fileIt), wrMode,
+					tier, mate, "paired", false, format);
+				openOFstream(applyFileIT(files[mate] + fileExt + SingletonFileDescr, fileIt), wrMode,
+					tier, mate + 2, "singleton", true, format);
+			}
+			if (tier == 0 && format == 1) { leadingOutf = applyFileIT(files[0] + fileExt, fileIt); }
+		};
+		openPairedFiles((*cmdArgs)["-o_fna"], 0, 1);
+		setQualWrite(false);
+		if (!(*cmdArgs)["-o_qual"].empty()) {
+			openPairedFiles((*cmdArgs)["-o_qual"], 0, 2);
+			setQualWrite(true);
 		}
-
-		openOFstreamFNA(applyFileIT(tfnaout[0] + fileExt, fileIt).c_str(), wrMode, 0, 0, "paired 1st");
-		leadingOutf = applyFileIT(tfnaout[0] + fileExt, fileIt);
-
-		openOFstreamFNA(applyFileIT(tfnaout[1] + fileExt, fileIt).c_str(), wrMode, 0, 1, "paired 2nd");
-		openOFstreamFNA(applyFileIT(tfnaout[0] + fileExt + SingletonFileDescr, fileIt).c_str(), wrMode, 0, 2, "Singleton 1", true);
-		openOFstreamFNA(applyFileIT(tfnaout[1] + fileExt + SingletonFileDescr, fileIt).c_str(), wrMode, 0, 3, "Singleton 2", true);
-		/*setFilePos(sFile,sFilePos);
-		setFilePos(sFile2,sFile2Pos);
-		setFilePos(sFileS,sFileSPos);
-		setFilePos(sFileS2,sFileS2Pos);*/
-		if (cmdArgs->find("-o_fna2") != cmdArgs->end() && (*cmdArgs)["-o_fna2"].length() > 1) { //write fastq
-			tfnaout = splitByCommas((*cmdArgs)["-o_fna2"]);
-
-			openOFstreamFNA(applyFileIT(tfnaout[0] + fileExt, fileIt).c_str(), wrMode, 1, 0, "additional paired 1st", true);
-			openOFstreamFNA(applyFileIT(tfnaout[1] + fileExt, fileIt).c_str(), wrMode, 1, 1, "additional paired 2nd", true);
+		if (!(*cmdArgs)["-o_fna2"].empty()) {
+			openPairedFiles((*cmdArgs)["-o_fna2"], 1, 1);
+			if (!(*cmdArgs)["-o_qual2"].empty()) {
+				openPairedFiles((*cmdArgs)["-o_qual2"], 1, 2);
+				setQualWrite(true);
+			}
 		}
+		else { b_writeYellowQual = false; }
 	}
 }

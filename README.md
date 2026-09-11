@@ -181,14 +181,14 @@ The `-options` file contains tab-separated `setting<TAB>value` lines. Lines begi
 - `RejectSeqWithoutFwdPrim` defaults to `T`; `RejectSeqWithoutRevPrim` defaults to `F`.
 - `ExtensivePrimerChecks` enables additional primer matching checks when set to `T`.
 - `TechnicalAdapter` supplies an adapter sequence to remove.
-- `TrimStartNTs` removes leading nucleotides; `TruncateSequenceLength` limits final length (`-1` disables it).
+- `TrimStartNTs` removes leading nucleotides; `TruncateSequenceLength` limits ordinary filtered reads and unmerged dereplication output (`-1` disables it). As in the historical workflow, a smaller positive cap lowers the effective absolute `minSeqLength` for those ordinary reads; this adjustment is now independent of option-file line order. Merged sequences retain the configured minimum and are not capped. HQ mate files retain full length for subsequent merging, and seed extension ignores the truncation setting for all its outputs.
 - `fastqVersion` accepts `auto` or a numeric version recognized by sdm.
 - `PEheaderPairFmt` controls paired-end output header formatting.
 
 ### Paired reads, dereplication, and adapters
 
 - `AmpliconShortPE`, `CheckForMixedPairs`, and `CheckForReversedSeqs` accept `T` or `F`.
-- `derepSrchLen` sets the dereplication search length. If absent, it defaults to `minSeqLength`.
+- `-derepSrchLen` on the command line takes precedence over `derepSrchLen` in the option file. If neither is set, the search length defaults to a positive `minSeqLength`, otherwise 150. A value of `-1` uses the full sequence.
 - With `-illuminaClip 1`, provide adapter sequences through `illuminaFwd`, `illuminaRev`, `illuminaSngUni`, and `illuminaSngIdx` as needed.
 
 ## Output modes
@@ -198,7 +198,7 @@ The `-options` file contains tab-separated `setting<TAB>value` lines. Lines begi
 | `-o_fna <file>` | FASTA output. |
 | `-o_qual <file>` | Quality output paired with FASTA output. |
 | `-o_fastq <file>` | FASTQ output; takes precedence over `-o_fna` and `-o_qual`. |
-| `-o_fna2`, `-o_qual2`, `-o_fastq2` | Output for the second read. |
+| `-o_fna2`, `-o_qual2`, `-o_fastq2` | Additional output for reads passing the less stringent filter tier. |
 | `-o_demultiplex <path>` | Write individual demultiplexed files. |
 | `-o_demultiplex_gz <0|1>` | Gzip demultiplexed output. |
 | `-o_dereplicate <file>` | Write dereplicated DNA reads. |
@@ -206,6 +206,21 @@ The `-options` file contains tab-separated `setting<TAB>value` lines. Lines begi
 | `-log <file|nolog>` | Set the demultiplexing log destination or disable logging. |
 
 Additional output controls include `-o_qual_offset`, `-oneLineFastaFormat`, `-maxReadsPerOutput`, `-pairedDemulti`, and `-pairedRD_HD_out`.
+
+`-maxReadsPerOutput` counts a single read, a read pair, or a merged read as one output record group. The file generation and its count persist across successive input files. `-XfirstReadsWritten` uses the same counting rule for the total output limit.
+
+`-DemultiBPperSR` caps emitted bases for demultiplexed output; `0` means unlimited. Both mates count toward the ordinary-output budget, and merged output has an independent budget of the same size. Reads and pairs are admitted whole, so a budget can retain fewer bases than its limit. A merged read exceeding its budget is skipped without falling back to paired output. Counts must be nonnegative whole numbers; this option accepts scientific notation within the unsigned 32-bit range.
+
+Dereplicated FASTQ qualities, including merged consensus qualities, average the observations covering each base. Replacing a representative preserves this evidence, and absorbing subgroups combines their quality evidence with their occurrence counts. Final dereplication output is opened only when it is written, so a missing input cannot truncate an existing result during option setup.
+
+Dereplication batches updates into 64 independently locked hash tables. Updates for one sequence key remain serialized, including sample counts, quality accumulation, and representative selection; unrelated keys can proceed concurrently. This particularly helps workloads with many actively repeated sequence groups. One dominant sequence still shares one lock. Worker batches retain pending reads until the dereplicator flushes them, including when a worker exits. Output snapshots include all merge-position subgroups, preserve the live groups, and refresh ordinary dereplication files on each snapshot; per-sequencing-run output remains cumulative. Buffered output failures are checked through close, and a replacement abundance map is promoted only after successful writing.
+
+Multithreaded dereplication does not guarantee insertion order or byte-identical results between runs. As before, scheduling can change the chosen representative and whether a failed read arrives before the first passing read for its group; the latter can affect abundance counts. Equal-abundance output records may also change order. Use one worker when repeatability is required. `-derep_reserve` remains the total requested reservation, divided across the tables.
+
+
+For paired output, give two comma-separated filenames to `-o_fna` or `-o_fastq`, and to `-o_qual` when requesting separate qualities. Concurrent writers keep R1/R2 and their QUAL records in matching order, including across output-file rotation. Mates with different passing quality tiers are written together to the less stringent tier when that output is available. No-barcode output accepts one filename for single reads, or one interleaved filename or two separate filenames for paired reads.
+
+If input parsing or a worker fails, all submitted workers finish before the error is returned and their buffers and output objects are released.
 
 ## Common workflows
 
@@ -258,7 +273,7 @@ sdm -i_fastq reads.fastq -o_fastq subset.fastq -XfirstReadsRead 10000 -XfirstRea
 - `-strictPositiveQualsOut <0|1>` — require positive output quality values.
 - `-specificReads <file>` and `-excludeFile <file>` — select named reads.
 - `-length_hist <file>` and `-qual_hist <file>` — write length and quality histograms.
-- `-merg_readpos <file>` and `-qual_readpos <file>` — write merge and quality position reports.
+- `-merg_readpos <file>` and `-qual_readpos <file>` — request optional merge and quality position reports. Collection is disabled unless at least one report is requested. Positions are zero-based in the original mate orientation; reports support unequal mate lengths and concurrent merging.
 - `-logLvsQ <file|1>` — write length-versus-quality data.
 
 ### Performance
@@ -271,14 +286,18 @@ sdm -i_fastq reads.fastq -o_fastq subset.fastq -XfirstReadsRead 10000 -XfirstRea
 
 - `-merge_pairs_filter`, `-merge_pairs_seed`, and `-merge_pairs_demulti` — enable pair merging in the corresponding workflow.
 - `-merge_pairs_derep <0|1>` — merge pairs while dereplicating.
+
 - `-derep_reserve <n>`, `-derepPerSR <0|1>`, `-derep_format <text>`, and `-derepSrchLen <n>` — tune dereplication.
 - `-OTU_fallback <file>` and `-OTU_fallback_refclust <file>` — fallback OTU FASTA sequences.
 - `-otu_matrix <file>` — OTU matrix output.
 
+Merging uses the retained overlap evidence from both mates, after physical primer/barcode removal, without reversing or shortening the input reads in place. The resulting consensus is filtered with the configured quality and sequence checks. Primer/barcode removal is preserved across read-through overlaps; keeping primers or barcodes retains them in the merged amplicon. `TruncateSequenceLength` does not cap merged output, including merged dereplication and demultiplexed output. The configured `minSeqLength` is checked again after quality trimming before merged output is written. A rejected merge falls back to the existing eligible mate-output path. Seed extension consumes already processed HQ mates and preserves the full consensus of the selected pair without repeating quality trimming or 5′/barcode/primer cuts. `TruncateSequenceLength` is ignored for all seed-extension outputs, including FASTQ, FASTA, unmerged mates and fallback seeds; minimum/maximum length checks still apply to merged seeds. Dereplication HQ mates retain their full length so that a clustering length cap cannot remove their overlap. If HQ files were generated with the truncating behavior in 3.44–3.45, regenerate them from the original reads before rerunning seed extension. With `-merge_pairs_seed 1 -o_fna OTU.fna`, paired input produces merged seeds directly in the main `OTU.fna` (and `-o_qual`, if requested), using the OTU identifier without a mate suffix. A seed without an eligible merge uses its selected R1 or fallback sequence in that file. With two FASTA output paths, merged seeds go to the first path; FASTQ seed output retains its separate merged file. Representative scoring is unchanged.
+
+
 ### Specialized processing
 
 - `-GoldenAxe <0|1>` — enable GoldenAxe processing for PacBio concatenated reads.
-- `-GoldenAxeMinAmpli <n>` and `-GoldenAxeMaxAmpli <n>` — constrain accepted GoldenAxe amplicon counts.
+- `-GoldenAxeMinAmpli <n>` and `-GoldenAxeMaxAmpli <n>` — constrain accepted GoldenAxe amplicon counts; `-1` disables the corresponding bound. GoldenAxe requires forward and reverse primers for each sample; their index tables may differ.
 - `-illuminaClip <0|1>` — enable Illumina adapter clipping.
 
 ## Complete command reference

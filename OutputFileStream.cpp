@@ -549,14 +549,18 @@ void finalizeOutputFile(
     if (!stream) {
         return;
     }
-    if (auto* finalizable = dynamic_cast<FinalizableOutput*>(stream.get())) {
+    finalizeOutputFile(*stream, filename);
+}
+
+void finalizeOutputFile(std::ostream& stream, const std::string& filename) {
+    if (auto* finalizable = dynamic_cast<FinalizableOutput*>(&stream)) {
         finalizable->finalize();
         return;
     }
 
-    stream->flush();
-    bool failed = !stream->good();
-    if (auto* file = dynamic_cast<std::ofstream*>(stream.get())) {
+    stream.flush();
+    bool failed = !stream.good();
+    if (auto* file = dynamic_cast<std::ofstream*>(&stream)) {
         file->close();
         failed = failed || file->fail();
     }

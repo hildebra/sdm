@@ -5,9 +5,6 @@
 
 void mergeStats::printHisto(string File) {
 	int maxVS = max((int)matchFwd.size(), (int)matchRev.size());
-	if (maxVS <= 0) { return; }
-	cout << "Print Merge error log of S="<< matchFwd.size()<<endl;
-	if (matchFwd.size() == 0 && matchRev.size() == 0) { return; }
 	prepStats();
 	ofstream temp;
 	temp.open(File.c_str(), ios::out);
@@ -29,7 +26,6 @@ void mergeStats::printHisto(string File) {
 
 }
 void mergeStats::prepStats() {
-	if (matchFwd.size() == 0) {	return;	}
 	percFwd.resize(matchFwd.size(), 0.f); percRev.resize(mismatchRev.size(), 0.f);
 	maxF = 0.f; maxR = 0.f;
 	for (size_t i = 0; i < matchFwd.size(); i++) {
@@ -76,7 +72,6 @@ void mergeStats::logDistri(int p1, int p2, int overlap, bool same) {
 
 
 void qualStats::printHisto(string File) {
-	if (r1.size() == 0 && r2.size() == 0) { return; }
 	ofstream temp;
 	temp.open(File.c_str(), ios::out);
 	if (!temp) { cerr << "Could not open outstream to read merger stat file:\n" << File << endl; exit(478); }
@@ -86,11 +81,11 @@ void qualStats::printHisto(string File) {
 	for (size_t i = 0; i < (size_t)maxVS; i++) {
 		temp << i <<"\t";
 		if (i < r1.size()) {
-			temp <<  (float(int(r1[i])) /((float)N1[i]))  << "\t";
+			temp <<  (N1[i] ? static_cast<double>(r1[i]) / N1[i] : 0.0)  << "\t";
 		}
 		else { temp << "\t"; }
 		if (i < r2.size()) {
-			temp << (float(int(r2[i])) / ((float)N2[i])) << "\n";
+			temp << (N2[i] ? static_cast<double>(r2[i]) / N2[i] : 0.0) << "\n";
 		}
 		else { temp << "\n"; }
 	}
@@ -98,14 +93,14 @@ void qualStats::printHisto(string File) {
 
 	temp.close();
 }
-void qualStats::logQuals(vector<qual_score> q1, vector<qual_score> q2) {
+void qualStats::logQuals(const vector<qual_score>& q1, const vector<qual_score>& q2) {
 	if (r1.size() < q1.size()) { r1.resize(q1.size(), 0);N1.resize(q1.size(), 0);}
 	if (r2.size() < q2.size()) { r2.resize(q2.size(), 0); N2.resize(q2.size(), 0);}
 	for (size_t i = 0; i < q1.size(); i++) {
-		r1[i] += (long)q1[i]; N1[i]++;
+		r1[i] += static_cast<uint64_t>(std::max<int>(0, q1[i])); N1[i]++;
 	}
 	for (size_t i = 0; i < q2.size(); i++) {
-		r2[i] += (long)q2[i]; N2[i]++;
+		r2[i] += static_cast<uint64_t>(std::max<int>(0, q2[i])); N2[i]++;
 	}
 }
 
@@ -117,21 +112,29 @@ void qualStats::logQuals(vector<qual_score> q1, vector<qual_score> q2) {
 
 
 
-qual_score ReadMerger::getMergedQual(qual_score q1, qual_score q2,bool same) {
-	auto p1 = qualToProb(q1);
-	auto p2 = qualToProb(q2);
-
-	//        std::cout << "p1: " << probToQual(p1) << "   p2: " << probToQual(p2) << "   p_new: ";
-	double p_new(0);
-	if (same) {
-		p_new = mergeQProbabilities(p1, p2);
-	} else {
-		p_new = mismatchQProbability(p1, p2);
-	}
-	qual_score q_new = int(-10 * log10(p_new) + 0.5);//+0.5: round
-//        std::cout << probToQual(p_new) << std::endl;
-	return fastMin(q_new, (qual_score)40); //TODO figure out cap
-//        return q_new;
+qual_score ReadMerger::getMergedQual(qual_score q1, qual_score q2, bool same) {
+    static const auto table = [] {
+        vector<qual_score> values((maxSAqualP + 1) * (maxSAqualP + 1) * 2, 0);
+        ReadMerger calculator;
+        for (int left = 0; left <= maxSAqualP; ++left) {
+            for (int right = 0; right <= maxSAqualP; ++right) {
+                const double p1 = qualToProb(static_cast<qual_score>(left));
+                const double p2 = qualToProb(static_cast<qual_score>(right));
+                for (int match = 0; match < 2; ++match) {
+                    const double probability = match
+                        ? calculator.mergeQProbabilities(p1, p2)
+                        : calculator.mismatchQProbability(p1, p2);
+                    const double quality = -10 * log10(probability) + 0.5;
+                    values[(left * (maxSAqualP + 1) + right) * 2 + match] =
+                        static_cast<qual_score>(std::clamp(quality, 0.0, 40.0));
+                }
+            }
+        }
+        return values;
+    }();
+    const int left = std::clamp<int>(q1, 0, maxSAqualP);
+    const int right = std::clamp<int>(q2, 0, maxSAqualP);
+    return table[(left * (maxSAqualP + 1) + right) * 2 + static_cast<int>(same)];
 }
 
  inline double ReadMerger::mismatchQProbability(double p1, double p2) {
@@ -409,233 +412,165 @@ bool ReadMerger::findSeed(std::string& sequence1, std::string& sequence2, MergeR
 */
 
 bool ReadMerger::findSeedForMerge(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2) {
-	bool didMerge(false);
-	if (dna1->length() < 20 || dna2->length() < 20) {//complete garbage sequence.. just ignore
-		return false;
-	}
-	MergeResult res;
-	if (findSeed(dna1->getSequence(), dna2->getSequence(), res) ) {
-		dna1->merge_seed_pos_ = (int)res.seed.pos1;
-		dna1->merge_offset_ = res.offset1;
-		dna2->merge_seed_pos_ = (int)res.seed.pos2;
-		dna2->merge_offset_ = res.offset2;
-		dna2->reversed_merge_ = res.seed.is2reversed;
-		return true;
-	}
-	return false;
+    if (dna1) { dna1->clearMergeSeed(); }
+    if (dna2) { dna2->clearMergeSeed(); }
+    if (!dna1 || !dna2 || dna1->mem_length() < 20 || dna2->mem_length() < 20 ||
+        dna1->getQual().size() != dna1->mem_length() ||
+        dna2->getQual().size() != dna2->mem_length()) {
+        return false;
+    }
+    // Logical mate-quality trims retain the original overlap evidence. Both
+    // seed search and construction use this same backing sequence, after any
+    // physical barcode/primer cuts. The consensus is filtered separately.
+    MergeResult res;
+    if (!findSeed(dna1->getSequence(), dna2->getSequence(), res)) {
+        return false;
+    }
+    dna1->merge_seed_pos_ = static_cast<int>(res.seed.pos1);
+    dna1->merge_offset_ = res.offset1;
+    dna2->merge_seed_pos_ = static_cast<int>(res.seed.pos2);
+    dna2->merge_offset_ = res.offset2;
+    dna2->reversed_merge_ = res.seed.is2reversed;
+    return true;
 }
 
 shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) {
-	if (read1->merge_seed_pos_ == -1 || read2->merge_seed_pos_ == -1) {
-		return nullptr;
-	}
-	//if (read1->QualCtrl.MaxAmb || read2->QualCtrl.MaxAmb) {return nullptr;}
-	//merg2MTX.lock();
-	if (b_takeStats) {
-		qS.logQuals(read1->getQual(), read2->getQual());
-	}
+    if (!read1 || !read2 || read1->merge_seed_pos_ < 0 || read2->merge_seed_pos_ < 0 ||
+        read1->merge_offset_ < 0 || read2->merge_offset_ < 0) {
+        return nullptr;
+    }
+    const string& seq1 = read1->getSequence();
+    const string& storedSeq2 = read2->getSequence();
+    const auto& qual1 = read1->getQual();
+    const auto& qual2 = read2->getQual();
+    const size_t len1 = seq1.size(), len2 = storedSeq2.size();
+    const size_t start1 = static_cast<size_t>(read1->merge_offset_);
+    const size_t start2 = static_cast<size_t>(read2->merge_offset_);
+    if (len1 == 0 || len2 == 0 || qual1.size() != len1 || qual2.size() != len2 ||
+        (start1 != 0 && start2 != 0) || start1 >= len2 || start2 >= len1) {
+        return nullptr;
+    }
+    const size_t overlapStart = max(start1, start2);
+    const size_t overlapEnd = min(start1 + len1, start2 + len2);
+    if (overlapEnd <= overlapStart) { return nullptr; }
 
+    const bool reversed = read2->reversed_merge_;
+    // Dereplication shares a merger across workers. Scratch storage must be
+    // local to a worker, and neither input's bases nor qualities may be changed.
+    thread_local string reverseSeq2;
+    std::string_view seq2 = storedSeq2;
+    if (reversed) {
+        reverseSeq2 = storedSeq2;
+        reverseComplement(reverseSeq2.data(), static_cast<int>(reverseSeq2.size()));
+        seq2 = reverseSeq2;
+    }
+    const auto quality2 = [&](size_t pos) {
+        return qual2[reversed ? len2 - 1 - pos : pos];
+    };
 
-	if (read2->reversed_merge_) {
-		read2->reverse_compliment(false);
-	}
-	// This checks if there are dovetails. When read 2 is reverse transcribed and read1 is offset, 
-	//then the only constellation is that there are dovetails
-	const string& Seq1 = read1->getSequence();
-	const string& Seq2 = read2->getSequence();
-	const vector<qual_score>& Qual1 = read1->getQual();
-	const vector<qual_score>& Qual2 = read2->getQual();
-	size_t seq1_length = Seq1.length();
-	size_t seq2_length = Seq2.length();
+    // For inward-facing mates, R1's 5' end and R2's 5' end delimit the
+    // amplicon. Exclude read-through outside those ends, including primers or
+    // barcodes already removed from the other mate. Forward overlaps use the union.
+    const size_t outputStart = reversed ? start1 : 0;
+    const size_t outputEnd = reversed ? start2 + len2 : max(start1 + len1, start2 + len2);
+    if (outputEnd <= outputStart) { return nullptr; }
+    string sequence(outputEnd - outputStart, 'N');
+    vector<qual_score> qualities(sequence.size());
+    int errors = 0, mismatchQualSum = 0;
 
-	int offset1 = read1->merge_offset_;
-	int offset2 = read2->merge_offset_;
+    for (size_t pos = outputStart; pos < outputEnd; ++pos) {
+        const bool in1 = pos >= start1 && pos - start1 < len1;
+        const bool in2 = pos >= start2 && pos - start2 < len2;
+        const size_t out = pos - outputStart;
+        if (!in1 && !in2) { return nullptr; }
+        if (!in2) {
+            sequence[out] = seq1[pos - start1];
+            qualities[out] = qual1[pos - start1];
+        } else if (!in1) {
+            sequence[out] = seq2[pos - start2];
+            qualities[out] = quality2(pos - start2);
+        } else {
+            const size_t p1 = pos - start1, p2 = pos - start2;
+            const char base1 = seq1[p1], base2 = seq2[p2];
+            const qual_score q1 = qual1[p1], q2 = quality2(p2);
+            const bool same = base1 == base2;
+            qualities[out] = getMergedQual(q1, q2, same);
+            if (same) {
+                sequence[out] = base1;
+            } else {
+                ++errors;
+                mismatchQualSum += min(q1, q2);
+                const bool canonical1 = canonicalDNA(base1), canonical2 = canonicalDNA(base2);
+                sequence[out] = (q1 >= q2)
+                    ? ((canonical1 || !canonical2) ? base1 : base2)
+                    : ((canonical2 || !canonical1) ? base2 : base1);
+            }
 
-	bool overlap_only = read2->reversed_merge_ && offset1;
+        }
+    }
+    if (b_takeStats.load(std::memory_order_relaxed)) {
+        // Consensus construction remains parallel. Commit one read's statistics
+        // together, since dereplication shares this merger between workers.
+        std::lock_guard<std::mutex> guard(statsMutex);
+        qS.logQuals(qual1, qual2);
+        for (size_t pos = max(outputStart, overlapStart); pos < min(outputEnd, overlapEnd); ++pos) {
+            const size_t p1 = pos - start1, p2 = pos - start2;
+            const size_t originalP2 = reversed ? len2 - 1 - p2 : p2;
+            mS.logDistri(static_cast<int>(p1), static_cast<int>(originalP2),
+                static_cast<int>(overlapEnd - overlapStart), seq1[p1] == seq2[p2]);
+        }
+    }
+    auto merged = make_shared<DNA>();
+    merged->setSequence(std::move(sequence));
+    merged->setQual(std::move(qualities));
+    merged->setHeader(read1->getId());
+    merged->getEssentialsFts(read1);
+    if (reversed && read2->getRevPrimDetect()) { merged->setRevPrimCut(); }
+    const qual_score meanMismatch = errors == 0 ? 0
+        : static_cast<qual_score>(round(static_cast<double>(mismatchQualSum) / errors));
+    merged->setMergeErrors(errors, meanMismatch);
+    read1->setMergeErrors(errors, meanMismatch);
+    read2->setMergeErrors(errors, meanMismatch);
+    merged->stripLeadEndN();
+    merged->setMergeLength(merged->length());
+    read1->setMergeLength(merged->length());
+    read2->setMergeLength(merged->length());
+    return merged;
+}
 
-	//offset1 >= 0 & read1->merge_offset_>0
-	//offset1 > 0 
-	int offset = int(read2->merge_seed_pos_ - read1->merge_seed_pos_);
+namespace {
+template<class T> void addHistogram(vector<T>& target, const vector<T>& source) {
+    target.resize(max(target.size(), source.size()), 0);
+    for (size_t i = 0; i < source.size(); ++i) { target[i] += source[i]; }
+}
+}
 
-	size_t overlap =
-		(offset >= 0 ) * min(seq2_length - offset1, seq1_length)
-		+ (offset < 0) * min(seq1_length - offset2, seq2_length);
-
-
-	//	overlap =
-	//		(offset >= 0) * int(std::min(sequence2.length() - offset, sequence1.length())) +
-	//		(offset < 0) * int(std::min(sequence1.length() + offset, sequence2.length()));
-
-
-	size_t overlap_start = (!overlap_only * ((bool)read1->merge_offset_) * offset1 +
-		((bool)offset2) * offset2) + overlap_only * overlap;
-
-
-	const size_t new_length = !overlap_only * max(read1->merge_offset_ + seq1_length, read2->merge_offset_ + seq2_length) + overlap_only * overlap;
-
-	//        std::cout << "newlength> " << new_length << std::endl;
-    // use std::string instead of manual new[] buffer
-	std::string new_seq;
-	new_seq.assign(new_length, 'N');
-	std::vector<qual_score> new_qual(new_length);
-
-	int pos1 = 0;
-	int pos2 = 0;
-	int pos_overlap = 0;
-
-	//        std::cout << "overlap start: " << overlap_start << std::endl;
-			// merge first part of read (before overlap
-	if (!overlap_only) {
-		//can I copy over r1 or r2 into first part?
-		//this is for the head
-        if (read1->merge_offset_) {
-			new_seq.replace(0, read1->merge_offset_, Seq2.c_str(), read1->merge_offset_);
-            std::copy_n(Qual2.begin(), read1->merge_offset_, new_qual.begin());
-			//            overlap_start = read1->merge_offset_;
-		}
-        else if (read2->merge_offset_) {
-			new_seq.replace(0, read2->merge_offset_, Seq1.c_str(), read2->merge_offset_);
-            std::copy_n(Qual1.begin(), read2->merge_offset_, new_qual.begin());
-			//            overlap_start = read2->merge_offset_;
-		}
-		//this is for the tail
-		size_t tail_start = overlap + overlap_start;
-		if ((overlap + overlap_start) < (size_t)read1->merge_offset_ + seq1_length) {
-			pos1 = int(read2->merge_offset_ + overlap);
-			for (size_t i = tail_start; pos1 < (int)seq1_length && i < new_length; i++, ++pos1) {
-				new_seq[i] = Seq1[pos1];
-				new_qual[i] = Qual1[pos1];
-			}
-		}
-		else {//read to tail
-			pos2 = int(read1->merge_offset_ + overlap);
-			for (size_t i = tail_start; i < new_length; i++, ++pos2) {
-				new_seq[i] = Seq2[pos2];
-				new_qual[i] = Qual2[pos2];
-			}
-		}
-	}
-	//        std::cout << "head: " << std::endl;
-	//        std::cout << std::string(new_seq) << std::endl;
-
-			// merge overlap
-	pos1 = (int)read2->merge_offset_;
-	pos2 = (int)read1->merge_offset_;
-	pos_overlap = int(overlap_only ? 0 : overlap_start);
-
-	//        std::cout << "overlap: " << overlap<< std::endl;
-	//        std::cout << "pos1: " << pos1 << std::endl;
-	//        std::cout << "pos2 " << pos2 << std::endl;
-	//        std::cout << "pos_overlap " << pos_overlap << std::endl;
-
-	//        std::cout << "s1ov " << std::string_view(Seq1.c_str() + pos1, overlap) << std::endl;
-	//        std::cout << "s2ov " << std::string_view(Seq2.c_str() + pos2, overlap) << std::endl;
-
-
-	//also log quality along read
-
-	int errInOverlap(0);
-	int summedMismathcQ(0);
-
-	for (size_t i = 0; i < overlap; i++, pos1++, pos2++, pos_overlap++) {
-		//            std::cout << "___" << std::endl;
-		char S1 = Seq1[pos1];
-		char S2 = Seq2[pos2];
-
-
-		bool sameNT = S1 == S2;
-
-		//logging.. tmp
-		if (b_takeStats) {
-			mS.logDistri(pos1, (int)Qual2.size() - pos2, (int)overlap, sameNT);
-		}
-
-		new_qual[pos_overlap] = getMergedQual(
-			Qual1[pos1], Qual2[pos2], sameNT);
-		if (sameNT) {
-			// same base at overlap position i
-			new_seq[pos_overlap] = S1;
-
-		}
-		else { //Oh oh..
-			errInOverlap++;
-			summedMismathcQ += min(Qual1[pos1],Qual2[pos2]);
-
-			bool S1canonical = canonicalDNA(S1);
-			bool S2canonical = canonicalDNA(S2);
-
-			// Different base -> take the higher qual one
-			// here qualities: the bigger the better (as opposed to probabilities)
-			if (Qual1[pos1] >= Qual2[pos2]){
-				if (S1canonical || !S2canonical) {
-					new_seq[pos_overlap] = S1;
-				} else {
-					new_seq[pos_overlap] = S2;
-				}
-				//if (S1canonical || (!S1canonical && !S2canonical))) {
-				// Qual read1 is better at overlap position i
-				
-			} else {//if (S2canonical) {
-				// Qual read2 is better at overlap position i
-				if (S2canonical || !S1canonical) {
-					new_seq[pos_overlap] = S2;
-				}
-				else {
-					new_seq[pos_overlap] = S1;
-				}
-				//new_seq[pos_overlap] = S2;
-			}
-			//else {
-		//		new_seq[pos_overlap] = 'N';
-			//}
-		}
-		//            std::cout << "s1: " << Seq1[pos1] << " q: " << (int)Qual1[pos1] << "  -  s2: " << Seq2[pos2] << " q: " << (int)Qual2[pos2] << "  new: " << new_seq[pos_overlap] << " q: " << (int)new_qual[pos_overlap] << std::endl;
-	}
-
-	//        std::cout << "overlap: " << std::endl;
-	//        std::cout << std::string(new_seq) << std::endl;
-
-			// merge last part
-
-
-	//        std::cout << "inmerge seq1:\n" << Seq1 << std::endl;
-
-	//        std::cout << "tail: " << std::endl;
-	//        std::cout << "new: " << std::string(new_seq) << std::endl;
-
-    //        std::string merged_sequence(new_seq);
-	//        std::string test = "IAMATESTSTRING";
-
-	shared_ptr<DNA> merged_read = make_shared<DNA>();
-	merged_read->setSequence(new_seq);
-	merged_read->setQual(move(new_qual));
-	merged_read->setNewID(read1->getId());// +"_merged");
-	merged_read->getEssentialsFts(read1);
-
-
- qual_score meanMisMatchQ = 0;
-	if (errInOverlap > 0) {
-		meanMisMatchQ = (qual_score)round((float)summedMismathcQ / (float)errInOverlap);
-	}
-	merged_read->setMergeErrors(errInOverlap, meanMisMatchQ);
-	read1->setMergeErrors(errInOverlap, meanMisMatchQ);
-	read2->setMergeErrors(errInOverlap, meanMisMatchQ);
-
-	merged_read->setMergeLength(merged_read->length());
-	read1->setMergeLength(merged_read->length());
-	read2->setMergeLength(merged_read->length());
-
-	//backtranslate to make sure correct read again
-	if (read2->reversed_merge_) {
-		read2->reverse_compliment(false);
-	}
-
-	//filter for Ns
-	merged_read->stripLeadEndN();
-	if (merged_read->numNonCanonicalDNA(true)) {
-		merged_read= nullptr;
-	}
-	//merg2MTX.unlock();
-
-	return merged_read;
+void ReadMerger::addRMstats(ReadMerger* other) {
+    if (!other || other == this) { return; }
+    std::scoped_lock guard(statsMutex, other->statsMutex);
+    addHistogram(mS.matchFwd, other->mS.matchFwd);
+    addHistogram(mS.matchRev, other->mS.matchRev);
+    addHistogram(mS.mismatchFwd, other->mS.mismatchFwd);
+    addHistogram(mS.mismatchRev, other->mS.mismatchRev);
+    addHistogram(qS.r1, other->qS.r1);
+    addHistogram(qS.r2, other->qS.r2);
+    addHistogram(qS.N1, other->qS.N1);
+    addHistogram(qS.N2, other->qS.N2);
+}
+void ReadMerger::printMergeHisto() {
+    std::lock_guard<std::mutex> guard(statsMutex);
+    mS.printLogs();
+}
+void ReadMerger::printMergeHisto(string file, string) {
+    std::lock_guard<std::mutex> guard(statsMutex);
+    mS.printHisto(file);
+}
+void ReadMerger::printQualHisto(string file, string) {
+    std::lock_guard<std::mutex> guard(statsMutex);
+    qS.printHisto(file);
+}
+void ReadMerger::restStats() {
+    std::lock_guard<std::mutex> guard(statsMutex);
+    mS = mergeStats();
+    qS = qualStats();
 }

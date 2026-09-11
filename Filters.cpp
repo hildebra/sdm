@@ -10,6 +10,27 @@
 //*******************************************
 
 namespace {
+	uint64_t parseOutputCount(const string& value, const char* option, bool allowScientific = false) {
+		try {
+			if (value.empty() || value[0] == '-' || value.find_first_of(" \t\r\n") != string::npos) {
+				throw std::invalid_argument("invalid count");
+			}
+			size_t consumed = 0;
+			if (allowScientific) {
+				const long double count = std::stold(value, &consumed);
+				if (consumed != value.size() || !std::isfinite(count) || count < 0 ||
+					count > std::numeric_limits<uint>::max() || std::floor(count) != count) {
+					throw std::invalid_argument("invalid count");
+				}
+				return static_cast<uint64_t>(count);
+			}
+			const uint64_t count = std::stoull(value, &consumed);
+			if (consumed != value.size()) { throw std::invalid_argument("invalid count"); }
+			return count;
+		} catch (const std::exception&) {
+			throw std::runtime_error(string(option) + " requires a nonnegative whole number within range: " + value);
+		}
+	}
 	enum class FailureReasonBit : uint32_t {
 		PrimerFwd = 1u << 0,
 		PrimerRev = 1u << 1,
@@ -75,7 +96,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	bOneFileSample(false), curBCnumber(-1), BCoffset(0),
 	bAdditionalOutput(false), b2ndRDBcPrimCk(false),
 	bRevRdCk(false),
-	min_l(0), alt_min_l(0), min_l_p(-1.f), alt_min_l_p(-1.f),
+	min_l(0), min_l_merged(0), alt_min_l(0), min_l_p(-1.f), alt_min_l_p(-1.f),
 	maxReadLength(0), norm2fiveNTs(false),
 	max_l(10000), min_q(0.f), alt_min_q(0.f),
 	BcutPrimer(true), alt_BcutPrimer(true), bPrimerR(false),
@@ -171,13 +192,10 @@ Filters::Filters(OptContainer* cmdArgs1) :
 
 	//delimit output file size to X reads
 	if (cmdArgs->find("-maxReadsPerOutput") != cmdArgs->end()) {
-		maxReadsPerOFile = std::stoull((*cmdArgs)["-maxReadsPerOutput"]);
+		maxReadsPerOFile = parseOutputCount((*cmdArgs)["-maxReadsPerOutput"], "-maxReadsPerOutput");
 	}
 	if (cmdArgs->find("-DemultiBPperSR") != cmdArgs->end()) {
-		stringstream ss((*cmdArgs)["-DemultiBPperSR"]);
-		double d = 0;
-		ss >> d;
-		demultiBPperSR = (uint)d;
+		demultiBPperSR = static_cast<uint>(parseOutputCount((*cmdArgs)["-DemultiBPperSR"], "-DemultiBPperSR", true));
 	}
 	//important for fastq format
 	if (cmdArgs->find("-i_qual_offset") != cmdArgs->end()) {
@@ -210,10 +228,10 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		Bcheck4illuAdapts = true;
 	}
 	if ((*cmdArgs)["-XfirstReadsWritten"] != "") {
-		firstXreadsW = std::stoull((*cmdArgs)["-XfirstReadsWritten"]);
+		firstXreadsW = parseOutputCount((*cmdArgs)["-XfirstReadsWritten"], "-XfirstReadsWritten");
 	}
 	if ((*cmdArgs)["-XfirstReadsRead"] != "") {
-		firstXreadsR = std::stoull((*cmdArgs)["-XfirstReadsRead"]);
+		firstXreadsR = parseOutputCount((*cmdArgs)["-XfirstReadsRead"], "-XfirstReadsRead");
 	}
 
 
@@ -223,7 +241,8 @@ Filters::Filters(OptContainer* cmdArgs1) :
 
 	//***************************************
 	//read options
-	bool derepSrchLenSet(false);
+	const bool explicitDerepSearchLength = cmdArgs->contains("-derepSrchLen");
+	bool derepSrchLenSet = explicitDerepSearchLength;
 	ifstream opt;
 	opt.open(optF.c_str(), ios::in);
 	if (!opt || optF == "") {
@@ -268,7 +287,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		} else if (strcmp(segs.c_str(), "maxSeqLength") == 0) {
 			maxL = atoi(segs2.c_str());
 		} else if (strcmp(segs.c_str(), "derepSrchLen") == 0) {
-			(*cmdArgs)["-derepSrchLen"] = segs2;
+			if (!explicitDerepSearchLength) { (*cmdArgs)["-derepSrchLen"] = segs2; }
 			derepSrchLenSet = true;
 		} else if (strcmp(segs.c_str(), "minAvgQuality") == 0) {
 			if (addMod) {
@@ -455,7 +474,6 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		}
 		else if (segs == "TruncateSequenceLength") {
 			TruncSeq = atoi(segs2.c_str());
-			if (TruncSeq != -1 && TruncSeq < (int)minL) { minL = (float)TruncSeq; }
 		}
 		else if (segs == "AmpliconShortPE") {
 			if (segs2 == "T") {
@@ -496,14 +514,20 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	if (b2ndRDBcPrimCk) {
 		cerr << "Checking for switched pairs.\n";
 	}
-	if (!derepSrchLenSet && minL>0) {
-		(*cmdArgs)["-derepSrchLen"] = to_string((int)minL);
+	// Historically the ordinary-read minimum was reduced to the truncation cap.
+	// Resolve this after parsing so option order cannot change the result; merged
+	// sequences and seed extension still use the configured, uncapped minimum.
+	const float filteredMinL = !b_optiClusterSeq && TruncSeq > 0 && minL > 1.f
+		? std::min(minL, (float)TruncSeq) : minL;
+	if (!derepSrchLenSet && filteredMinL > 0) {
+		(*cmdArgs)["-derepSrchLen"] = to_string((int)filteredMinL);
 		cout << "Setting dereplication search length to minSeqLength: " << (*cmdArgs)["-derepSrchLen"] << endl; 
 	}
 
 	opt.close();
 	//set in filter object
-	this->setSeqLength(minL, maxL);
+	this->setSeqLength(filteredMinL, maxL);
+	min_l_merged = minL > 1.f ? (int)minL : min_l;
 	this->setPrimerErrs(PrimerErrs);
 	this->setTagErrs(TagErrs);
 	this->removePrimer(!keepPrimer);
@@ -654,7 +678,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	bOneFileSample(of->bOneFileSample), curBCnumber(BCnumber), BCoffset(of->BCoffset),
 	bAdditionalOutput(of->bAdditionalOutput), b2ndRDBcPrimCk(of->b2ndRDBcPrimCk),
 	bRevRdCk(of->bRevRdCk),
-	min_l(of->min_l), alt_min_l(of->alt_min_l), min_l_p(of->min_l_p), alt_min_l_p(of->alt_min_l_p),
+	min_l(of->min_l), min_l_merged(of->min_l_merged), alt_min_l(of->alt_min_l), min_l_p(of->min_l_p), alt_min_l_p(of->alt_min_l_p),
 	maxReadLength(0), norm2fiveNTs(of->norm2fiveNTs),
 	max_l(of->max_l), min_q(of->min_q), alt_min_q(of->alt_min_q),
 
@@ -882,7 +906,7 @@ UClinks* Filters::ini_SeedsReadsDerep(UClinks* ucl, shared_ptr<ReadSubset>& RDSs
 			FALL->setupFna((*cmdArgs)["-OTU_fallback"]);
 			ucl->setupDefSeeds(FALL, SampleID);
 		}
-		ucl->activateMerger();
+		ucl->activateMerger(!(*cmdArgs)["-merg_readpos"].empty() || !(*cmdArgs)["-qual_readpos"].empty());
 	}
 	else if (this->doSubselReads()) {
 		//this will select a list of reads and distribute these into multiple files
@@ -891,7 +915,7 @@ UClinks* Filters::ini_SeedsReadsDerep(UClinks* ucl, shared_ptr<ReadSubset>& RDSs
 	else if (this->doDereplicate()) {
 		Dere = make_shared<Dereplicate>(cmdArgs, this);
 		//	ReadMerger* merg = DBG_NEW ReadMerger(); //create special object for these functions
-		Dere->activateMerger();
+		Dere->activateMerger(!(*cmdArgs)["-merg_readpos"].empty() || !(*cmdArgs)["-qual_readpos"].empty());
 	}
 	return ucl;
 }
@@ -979,11 +1003,8 @@ bool Filters::setcmdArgsFiles() {
 
 
 	if ((*cmdArgs)["-o_dereplicate"] != "") {
-		//check if file could exist
-		ofstream temp;
-		temp.open((*cmdArgs)["-o_dereplicate"].c_str(), ios::out);
-		if (!temp) { cerr << "Could not open outstream to dereplicated sequences:\n" << (*cmdArgs)["- o_dereplicate"] << endl; exit(78); }
-		temp.close();
+		// The real writer checks the output path after input processing.
+		// Preflight must not create or truncate an existing result.
 		bDoDereplicate = true;
 	}
 
@@ -1052,6 +1073,7 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 	}
 	if (tdn[0]->length() < 100) { return retDNA; }
 	int idx = tdn[0]->getBCnumber();
+	if (idx >= 0) { idx -= BCoffset; }
 
 	///first check if amplicon wrongly oriented..
 	isReversedAmplicon(tdn[0]);
@@ -1084,10 +1106,22 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 	if (idx < 0) {
 		tdn[0]->failed();	//retDNA.push_back(tdn[0]);
 		//this->addGAstats(tdn[0], retDNA);
-		GAstatistics->addBaseGAStats(tdn[0], retDNA, 0);
+		GAstatistics->addBaseGAStats(tdn[0], retDNA, 0, BCoffset);
 
 		return retDNA;
 	}
+	if (static_cast<size_t>(idx) >= PrimerIdx.size() ||
+        static_cast<size_t>(idx) >= PrimerIdxRev.size() ||
+        PrimerIdx[idx] < 0 || PrimerIdxRev[idx] < 0 ||
+        static_cast<size_t>(PrimerIdx[idx]) >= PrimerL.size() ||
+        static_cast<size_t>(PrimerIdxRev[idx]) >= PrimerR_RC.size()) {
+        throw std::runtime_error("GoldenAxe requires forward and reverse primers for each sample.");
+    }
+    const string& forwardPrimer = PrimerL[PrimerIdx[idx]];
+    const string& reversePrimer = PrimerR_RC[PrimerIdxRev[idx]];
+    if (forwardPrimer.empty() || reversePrimer.empty()) {
+        throw std::runtime_error("GoldenAxe requires non-empty forward and reverse primers.");
+    }
 	shared_ptr<DNA> dn = tdn[0];
 
 	int limitF = 0;
@@ -1105,12 +1139,12 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 			limitF = limitF2;
 		}
 		else {
-			limitF = dn->matchSeq(PrimerL[PrimerIdx[idx]], PrimerErrs, SearchL + limitR, limitR);
+			limitF = dn->matchSeq(forwardPrimer, PrimerErrs, SearchL + limitR, limitR);
 		}
 		if (limitF < 0) { break; }
-		limitF2 = dn->matchSeq(PrimerL[PrimerIdx[idx]], PrimerErrs, SearchL + limitF + 10, limitF + 10);
+		limitF2 = dn->matchSeq(forwardPrimer, PrimerErrs, SearchL + limitF + 10, limitF + 10);
 		//records reverse-searched primer positions
-		limitR = dn->matchSeq(PrimerR_RC[PrimerIdx[idx]], PrimerErrs, SearchL + limitF, limitF + 1);
+		limitR = dn->matchSeq(reversePrimer, PrimerErrs, SearchL + limitF, limitF + 1);
 
 		if (limitF2 > 0 && limitF2 < limitR) {//something went wrong.. couldn't detect correct reverse primer?
 			limitF2 = -1;
@@ -1138,13 +1172,13 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 	int missedGAs(0);
 	for (size_t i = 0; i < posF.size(); i++) {
 		retDNA.push_back(
-            dn->getDNAsubseq((int)posF[i], (int)(posR[i] + PrimerR_RC[PrimerIdx[idx]].length()),
+            dn->getDNAsubseq((int)posF[i], (int)(posR[i] + reversePrimer.length()),
                 dn->getId() + "_" + itos((int)i))
 		);
 		BCintoHead(idx, retDNA.back(), "", -1, false, true);
 
 		if (i > 0) {
-			int disGAs = posF[i] - posR[i - 1] - (int)PrimerR[PrimerIdx[idx]].length();
+			int disGAs = posF[i] - posR[i - 1] - (int)reversePrimer.length();
 			if (disGAs > 12) {
 				//cerr << ("disGA:"+itos(disGA));
 				//std::cout << "disGA" << " ";
@@ -1172,7 +1206,7 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 		retDNA.resize(0);
 	}
 	//this->addGAstats(dn, retDNA);
-	GAstatistics->addBaseGAStats(dn, retDNA, missedGAs);
+	GAstatistics->addBaseGAStats(dn, retDNA, missedGAs, BCoffset);
 	//GAstatistics->addMissedGAs(missedGAs);
 
 	return retDNA;
@@ -1310,6 +1344,7 @@ void Filters::updateMaxSeqL(int x) {
 		maxReadLength = x;
 		if (min_l_p != -1.f) {
 			min_l = (int)((float)maxReadLength * min_l_p);
+			min_l_merged = min_l;
 		}
 	}
 }
@@ -1322,6 +1357,7 @@ void Filters::setSeqLength(float minL, int maxL) {
 		min_l = -1;
 		min_l_p = minL;
 	}
+	min_l_merged = min_l;
 	max_l = maxL;
 	if (max_l < 0) {
 		max_l = (uint)1e9; //100 mil should be good enough for infinite length
@@ -1394,12 +1430,46 @@ bool Filters::betterSeed(shared_ptr<DNAunique> d1,
 
 //DNA qual_ check, and some extra parameters
 //should be safe to call from different threads
+bool Filters::checkMergedLength(const shared_ptr<DNA>& d) {
+    if (!d || d->length() == 0) { return false; }
+    return !check_lengthXtra(d, 0, -1, true) && !d->isYellowQual() && !d->isFailed();
+}
+
+bool Filters::checkMergedDNA(const shared_ptr<DNA>& d, bool alreadyProcessed) {
+    if (!d) { return false; }
+    if (alreadyProcessed) {
+        // Seed extension consumes processed HQ mates. Rank their full consensus,
+        // without repeating quality trims or physical primer/barcode removal.
+        // Neither a cached trim nor the shared TruncateSequenceLength setting
+        // may shorten a seed. Minimum/maximum sequence lengths still apply.
+        d->resetTruncation();
+        d->setYellowQual(false);
+        d->setPassed(false);
+        if (!checkMergedLength(d)) { return false; }
+        d->setPassed(true);
+        return true;
+    }
+    if (d->length() == 0) { return false; }
+    // Consensus quality must be evaluated independently of either mate's
+    // quality tier. Barcode assignment and completed physical cuts are retained.
+    d->setYellowQual(false);
+    d->setPassed(false);
+    if (!b_doFilter) {
+        d->setPassed(true);
+        return true;
+    }
+    int tagIdx = d->getBCnumber() - BCoffset;
+    if (tagIdx < 0 && PrimerIdx.size() <= 1) { tagIdx = 0; }
+    return checkYellowAndGreen(d, 0, tagIdx, false, FilteringContext::MergedRead) && d->isGreenQual();
+}
+
 bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 	int& tagIdx, bool doSeeding, FilteringContext filteringContext) {
 	int pair = max(0, pairPre);//corrects for -1 (undefined pair_) to set to 0
 	const int statsPair = std::min(std::max(pair, 0), (int)collectStatistics.size() - 1);
 	auto& stats = *collectStatistics[statsPair];
 	const bool shouldCommitDiagnostics = filteringContext == FilteringContext::FinalFiltering;
+	const bool isMerged = filteringContext == FilteringContext::MergedRead;
 	bool success = true;
 	bool canUsePrimerIdx = true;
 	bool forwardSearchAttempted = false;
@@ -1464,7 +1534,7 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		canUsePrimerIdx = false;
 	}
 
-	if (canUsePrimerIdx && BextensivePrimerChecks) {
+	if (!isMerged && canUsePrimerIdx && BextensivePrimerChecks) {
 		if (checkIfRevPrimerHits(d, PrimerIdx[tagIdx], 0, bShortAmplicons)) {
 			d->reverse_compliment(false);
 		}
@@ -1474,20 +1544,20 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
        if (pair == 1) {//pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
 			bool revCheck = false;
 			reverseSearchAttempted = true;
-			cutPrimerRev(d, PrimerIdxRev[tagIdx], revCheck, false);
-			if (bShortAmplicons) {//also check other end of primer..
+			cutPrimerRev(d, PrimerIdxRev[tagIdx], revCheck, false, !isMerged);
+			if (bShortAmplicons || isMerged) {//also check other end of primer..
 				forwardSearchAttempted = true;
-				cutPrimer(d, PrimerIdx[tagIdx], revCheck, pair);
+				cutPrimer(d, PrimerIdx[tagIdx], revCheck, pair, false, !isMerged);
 			}
 		}
 		else {//pair 0 or -1
 			bool fwdRC = false;
 			forwardSearchAttempted = true;
-			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, BextensivePrimerChecks);
-			if (bShortAmplicons) {//also check other end of primer.. also use for PacBio amplicons
+			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, BextensivePrimerChecks, !isMerged);
+			if (bShortAmplicons || isMerged) {//also check other end of primer.. also use for PacBio amplicons
                bool revRC = true;
 				reverseSearchAttempted = true;
-				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, BextensivePrimerChecks);
+				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, BextensivePrimerChecks, !isMerged);
 				//case for 1) long read 2) look for both primers 3) rev required
 			}
 		}
@@ -1505,7 +1575,7 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		}
 		//conditions for failing read on not finding rev primer
 		if (bRequireRevPrim && !d->getRevPrimDetect()
-			&& (pair != 0 || isPaired() == 1)  //only pair2 or 1-read-PacBio will fail
+			&& (pair != 0 || isPaired() == 1 || isMerged)  //only pair2 or 1-read-PacBio will fail
 			) {//failed to find reverse primer
 			if (alt_bRequireRevPrim) {
 				d->QualCtrl.PrimerRevFail = true;
@@ -1525,12 +1595,10 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		return success && !d->isFailed();
 	}
 
-	//if seq needs to be cut, than here
-	if (TruncSeq > 0) {
-		d->cutSeqPseudo(TruncSeq);
-	}
+	// The historical cap limits ordinary reads, not full merged consensus.
+	if (!isMerged) { applyLengthLimit(d); }
 
-	if (check_lengthXtra(d)) {
+	if (check_lengthXtra(d, 0, -1, isMerged)) {
 		markFailed(d->QualCtrl.maxL ? FailureReasonBit::MaxLength : FailureReasonBit::MinLength);
 	}
 
@@ -1541,7 +1609,7 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		if (maxAccumQP > 0.0) {
 			int cP = d->qualAccumulate(maxAccumQP);
 			const PrimaryAltThresholdResult accumLengthResult = evaluatePrimaryAlt(
-				check_lengthXtra(d, 0, cP),
+				check_lengthXtra(d, 0, cP, isMerged),
 				alt_maxAccumQP > 0.0,
 				true);
 			if (accumLengthResult.primaryFailed) {
@@ -1550,7 +1618,7 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 				bool altLengthFails = true;
 				if (alt_maxAccumQP > 0.0) {
 					cP = d->qualAccumulate(alt_maxAccumQP);
-					altLengthFails = check_lengthXtra(d, 0, cP);
+					altLengthFails = check_lengthXtra(d, 0, cP, isMerged);
 				}
 				const PrimaryAltThresholdResult altAccumResult = evaluatePrimaryAlt(true, alt_maxAccumQP > 0.0, altLengthFails);
 				if (altAccumResult.shouldFail()) {//check if passes alt
@@ -1629,6 +1697,12 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		}
 	}
 
+	// A merged read may become too short only after consensus-quality trimming.
+	// Validate the full consensus against the configured minimum.
+	if (isMerged && !d->isFailed() && check_lengthXtra(d, 0, -1, true)) {
+		markFailed(d->QualCtrl.maxL ? FailureReasonBit::MaxLength : FailureReasonBit::MinLengthAfterTrim);
+	}
+
 	auto commitDiagnostics = [&]() {
 		if (!shouldCommitDiagnostics) {
 			return;
@@ -1663,7 +1737,7 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 
 	//adapter removed, quality filtering done. If no map is provided, that is all that is needed
 	if (!bDoMultiplexing) {
-		if (TrimStartNTs > 0) {
+		if (!isMerged && TrimStartNTs > 0) {
            const size_t readLen = d->length();
 			if (readLen <= (unsigned int)TrimStartNTs) {
 				d->QualCtrl.minL = true;
@@ -1676,6 +1750,9 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 			//remove start NTs
 			if (!d->isFailed()) {
 				d->cutSeq(0, TrimStartNTs);
+                if (check_lengthXtra(d)) {
+                    markFailed(d->QualCtrl.maxL ? FailureReasonBit::MaxLength : FailureReasonBit::MinLengthAfterTrim);
+                }
 			}
 
 		}
@@ -1967,7 +2044,7 @@ int Filters::detectCutBC(const shared_ptr<DNA>& d, bool isPair1) {
 	}
 	if ((isPair1 && !bDoBarcode) || (!isPair1 && !bDoBarcode2)) {
 		d->setBCnumber(0, BCoffset);
-		return BCoffset; //not failed, just not requested
+		return 0; // Local index; setBCnumber already applied the global offset.
 	}
 
 	//ok, really start looking for BC in seq
@@ -2558,7 +2635,7 @@ bool Filters::checkIfPrimerHits(shared_ptr<DNA> d, int primerID, int pair) {
 }
 
 //cuts primers, tags
-bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, bool extensivePrimerCheck) {
+bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, bool extensivePrimerCheck, bool recordVariants) {
 	//only adapted to singular BC
 	if (PrimerL.size() == 0 || PrimerL[0].length() == 0) { return true; }
 	if (d->getFwdPrimDetect()) {
@@ -2618,7 +2695,7 @@ bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, boo
 			else {
 				variantStart = d->matchSeqRev(PrimerL_RC[primerID], primerVariantMaxMismatches_, limit2, startSearch);
 			}
-			recordPrimerVariant(d, PrimerL[primerID], variantStart, RC, PrimerVariantTracker::PrimerDirection::Forward);
+			if (recordVariants) { recordPrimerVariant(d, PrimerL[primerID], variantStart, RC, PrimerVariantTracker::PrimerDirection::Forward); }
 			//statAddition.PrimerFail++;
 			return false;
 		}
@@ -2626,7 +2703,7 @@ bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, boo
 			d->setYellowQual(true);
 		}
 	}
-	recordPrimerVariant(d, PrimerL[primerID], start, RC, PrimerVariantTracker::PrimerDirection::Forward);
+	if (recordVariants) { recordPrimerVariant(d, PrimerL[primerID], start, RC, PrimerVariantTracker::PrimerDirection::Forward); }
 	//remove everything before/after primer cut
 	if (!BcutPrimer) {
 		if (!RC) { d->cutSeq(0, start); }
@@ -2679,7 +2756,7 @@ bool Filters::findPrimer(shared_ptr<DNA> d, int primerID, bool RC, int pair) {
 	}
 	return true;
 }
-bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extraCheck) {
+bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extraCheck, bool recordVariants) {
 	//const string& se = d->getSequence();
 	if (d->getRevPrimDetect() || PrimerR.size() == 0) {
 		return true;
@@ -2725,12 +2802,12 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extra
 		else {
 			variantStart = d->matchSeq(PrimerR[primerID], primerVariantMaxMismatches_, limit2, 0, extraCheck);
 		}
-		recordPrimerVariant(d, PrimerR[primerID], variantStart, RC, PrimerVariantTracker::PrimerDirection::Reverse);
+		if (recordVariants) { recordPrimerVariant(d, PrimerR[primerID], variantStart, RC, PrimerVariantTracker::PrimerDirection::Reverse); }
 		//d->QualCtrl.PrimerRevFail = true;
 		return false;
 	}
 
-	recordPrimerVariant(d, PrimerR[primerID], start, RC, PrimerVariantTracker::PrimerDirection::Reverse);
+	if (recordVariants) { recordPrimerVariant(d, PrimerR[primerID], start, RC, PrimerVariantTracker::PrimerDirection::Reverse); }
 
 	if (!BcutPrimer) { //found it, but no cut
 		if (!RC) { d->cutSeq(0, start); }
@@ -4556,9 +4633,7 @@ void Filters::addStats(Filters* fil, vector<int>& idx) {
 			statAddition[i]->addStats(fil->statAddition[i], idx);
 		}
 	}
-	maxReadsPerOFile = fil->maxReadsPerOFile;
-	ReadsWritten = fil->writtenReads();//the idea here is to have a number of reads in CURRENT file, not total reads
-	OFileIncre = fil->getFileIncrementor();
+	// Worker statistics do not own output counters or file generations.
 
 	GAstatistics->addStats(fil->GAstatistics);
 	mergeStats->addStats(fil->mergeStats);

@@ -154,6 +154,7 @@ public:
 		return MFil;
 	}
 	int isPEseq() { return pairedSeq; }
+	bool singleSeedFasta() const;
 	//ofstream::app, ios_base::out
 	void openOutStreams(OptContainer* cmdArgs, int, std::ios_base::openmode, string = "", int = -1);
 	void openSeveralOutstreams(OptContainer* cmdArgs, shared_ptr<ReadSubset>, std::ios_base::openmode);
@@ -179,7 +180,7 @@ public:
 	void attachDereplicator(shared_ptr<Dereplicate> de);
 	//void dereplicateDNA(shared_ptr<DNA>);
 	//dereplicate DNA by looking in dereplicator for 100% id seq. is treadsafe
-  void dereplicateDNA(const shared_ptr<DNA>&, const shared_ptr<DNA>&);
+  void dereplicateDNA(const shared_ptr<DNA>&, const shared_ptr<DNA>&, int curThread = 0);
 	//debug function to look closer at nonBC reads, threadsafe
     void writeNonBCReads(const shared_ptr<DNA>& d, const shared_ptr<DNA>& d2);
 	void setReadLimit(uint64_t x) { maxRdsOut = x; }
@@ -207,11 +208,14 @@ public:
 	uint64_t getReadsWritten() { return TotalReadsWritten.load(); }
 
 	void attachBenchmark(Benchmark* bench) { _benchmark = bench; }
-	void activateReadMerger(int sz) {
+	void addMergeStatsTo(ReadMerger& target) {
+		for (const auto& merger : mergers) { target.addRMstats(merger.get()); }
+	}
+	void activateReadMerger(int sz, bool collectStats = false) {
        if (sz > (int)mergers.size()) { mergers.resize(sz); }
 		for (size_t x = 0; x < (size_t)sz; x++) {
 			mergers[x].reset();
-			mergers[x] = std::make_shared<ReadMerger>();
+			mergers[x] = std::make_shared<ReadMerger>(collectStats);
 		}
 	}
 	//void attachReadMerger(ReadMerger* merg) { if (merger.size() > 0 && merger.back() == nullptr) { merger.back() = merg; } else { merger.push_back(merg); } }
@@ -222,6 +226,9 @@ public:
 
 
 private:
+	bool writeDemultiRecords(int idx, const string& first, const string& second, uint64_t bases, bool merged);
+	bool writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int Cstream1,
+		const shared_ptr<DNA>& d2, int Pair2, int Cstream2, const string* mergedFastq = nullptr);
 	void setwriteMode(std::ios_base::openmode wm) { wrMode = wm; }
 	inline void setFilePos(ofstream& str, streamoff& pos) {
 		str.seekp(0, ios_base::end);	pos = str.tellp();

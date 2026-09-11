@@ -22,3 +22,6 @@ void finalizeOutputFile(
     std::unique_ptr<std::ostream>& stream,
     const std::string& filename);
 
+
+// Also accepts stack-owned streams, including dereplication output files.
+void finalizeOutputFile(std::ostream& stream, const std::string& filename);

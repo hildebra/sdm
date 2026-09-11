@@ -28,7 +28,8 @@ class Filters : public std::enable_shared_from_this<Filters> {
 public:
 	enum class FilteringContext {
 		Seeding,
-		FinalFiltering
+		FinalFiltering,
+		MergedRead
 	};
 
 	Filters(OptContainer*);
@@ -42,6 +43,13 @@ public:
 		shared_ptr<Dereplicate>& Dere);// , ReadMerger* merg);
 	//checks some basic parameters of DNA quality in UClinks seed finding..
 	void miniCheckDNA(shared_ptr<DNA> d, shared_ptr<DNA> d2);
+	// alreadyProcessed selects full-length HQ seed preparation, with length limits only.
+	bool checkMergedDNA(const shared_ptr<DNA>& d, bool alreadyProcessed = false);
+	bool checkMergedLength(const shared_ptr<DNA>& d);
+    void applyLengthLimit(const shared_ptr<DNA>& d) const {
+        // Seed extension reuses the filtering options, but emits full-length seeds.
+        if (d && !b_optiClusterSeq && TruncSeq > 0) { d->cutSeqPseudo(TruncSeq); }
+    }
 
 
 	Filters* newFilterPerBCgroup(const vector<int>);
@@ -132,6 +140,7 @@ public:
 	uint64_t maxReadsOutput() { return maxReadsPerOFile; }
 	uint getDemultiBPperSR() { return demultiBPperSR; }
 	void setWrittenReads(uint64_t x) { ReadsWritten = x; }
+	void copyOutputState(Filters& source) { ReadsWritten = source.writtenReads(); OFileIncre = source.getFileIncrementor(); }
 	int getFileIncrementor() { return OFileIncre; }
 	uint64_t getReadsWritten() { return ReadsWritten.load(); }
 	void incrementFileIncrementor() { OFileIncre++; ReadsWritten = 0; }//
@@ -283,12 +292,13 @@ public:
 
 
 protected:
-	bool check_lengthXtra(const shared_ptr<DNA>& d, int hindrance = 0, int leng = -1) {
+	bool check_lengthXtra(const shared_ptr<DNA>& d, int hindrance = 0, int leng = -1, bool merged = false) {
 		if (leng == -1) {
 			leng = d->length();
 		}
-		if (min_l > 0) {
-			if (leng - hindrance < min_l) {
+		const int minimum = merged ? min_l_merged : min_l;
+		if (minimum > 0) {
+			if (leng - hindrance < minimum) {
 				d->QualCtrl.minL = true;
 				if (leng - hindrance >= alt_min_l) {
 					d->setYellowQual(true);
@@ -309,8 +319,8 @@ protected:
 		if (min_l == 0) { return false; }
 		return leng - hindrance < min_l;
 	}
-	bool cutPrimer(shared_ptr<DNA> d, int primerID, bool&, int, bool = false);
-	bool cutPrimerRev(shared_ptr<DNA> d, int primerID, bool&, bool = false);
+	bool cutPrimer(shared_ptr<DNA> d, int primerID, bool&, int, bool = false, bool recordVariants = true);
+	bool cutPrimerRev(shared_ptr<DNA> d, int primerID, bool&, bool = false, bool recordVariants = true);
 	void recordPrimerVariant(const shared_ptr<DNA>& d, const string& primer, int start, bool reverseComplement,
 		PrimerVariantTracker::PrimerDirection direction);
 
@@ -368,7 +378,7 @@ protected:
 	void reverse_all_BC();
 
 	//filter related
-	int min_l, alt_min_l;
+	int min_l, min_l_merged, alt_min_l; // Merged output keeps the configured minimum before the ordinary-read cap.
 	float min_l_p, alt_min_l_p;
 	int maxReadLength;//stats
 	bool norm2fiveNTs; //change IUPAC code to 5 bases (ACTGN)

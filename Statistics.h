@@ -63,7 +63,7 @@ public:
 
     void calcSummaryStats(float remSeqs, unsigned int min_l, float min_q);
 
-    static float calc_median(vector<uint64_t> &in, float perc);
+    static float calc_median(vector<uint64_t> &in, double perc);
 
     static void addMedian2Histo(unsigned int in, vector<uint64_t> &histo);
 
@@ -138,7 +138,7 @@ public:
     bool getbLvsQlogs();
     //void addDNAStatsMT(shared_ptr<DNA> d, data_MT *data);
     void calcSummaryStats(float remSeqs, unsigned int min_l, float min_q);
-    float calc_median(vector<uint64_t>& in, float perc);
+    float calc_median(vector<uint64_t>& in, double perc);
     void add_median2histo(vector<uint64_t>& in, vector<uint64_t>& histo);
     void addMedian2Histo(unsigned int in, vector<uint64_t>& histo);
     void addMeanStats(uint64_t NT, uint64_t Qsum, float AccErr);
@@ -284,7 +284,7 @@ public:
     void printBCtabs(ostream& give); //stats per BC
     void printBCAmpliNdistribution(ostream& give); //distribution of lengths of BCs
     void printBCAmpliLdistribution(ostream& give); //distribution of lengths of BCs
-    void addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int missedGAs);
+    void addBaseGAStats(shared_ptr<DNA> dn, vector<shared_ptr<DNA>> GA, int missedGAs, int barcodeOffset = 0);
     uint64_t totalRds, totalGAs; //total reads, total amplicons
     uint64_t inccorrectPrimers, missGAs;
     double totalRdLen, totalGALen; //length in bp

@@ -168,7 +168,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //      R1/R2/MID acquisition, legacy mate-ID normalization, and malformed synchronized-input rejection.
 //3.43: 22.7.26: enforced synchronized paired reads, completed 64-bit counters, and fixed quality/trim logic.
 
-static const char* sdm_version = "3.43";
+//3.44: 11.9.26: sharded dereplication; corrected counts, snapshots, and merged-read filtering/qualities.
+//      Fixed length/option handling, output finalization, and GoldenAxe primer/sample indexing.
+
+//3.45: 11.9.26: emit full selected merged seeds in the main OTU FASTA; avoid repeated seed quality trimming.
+//3.46: restore full-length HQ intermediates and ignore TruncateSequenceLength for all seed-extension outputs.
+//3.47: restore historical truncation scope: full merged outputs and legacy ordinary-read minimum adjustment.
+static const char* sdm_version = "3.47";
 static const char* sdm_status = "beta";
 
 

@@ -391,6 +391,13 @@ public:
     int merge_offset_ = -1;
     bool reversed_merge_ = false;
 
+    void clearMergeSeed() {
+        merge_seed_pos_ = -1;
+        seed_length_ = -1;
+        merge_offset_ = -1;
+        reversed_merge_ = false;
+    }
+
     void getEssentialsFts(shared_ptr<DNA> oD) {
         FtsDetected.forward = oD->FtsDetected.forward;
         FtsDetected.reverse = oD->FtsDetected.reverse;
@@ -526,7 +533,7 @@ public:
     //string sequence_;    string id_;
     void Count2Head(bool);
     bool betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2);
-    void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, int, bool);
+    void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, int, bool, bool collectMergedQualities = true);
     void incrementSampleCounter(int sample_id);
     void writeMap(ofstream& os, const string&, vector<uint64_t>&, const vector<int>&, vector<uint64_t>&, vector<int>&);
     //inline int getCount() { return count_; }
@@ -556,6 +563,8 @@ public:
     void writeFastQ(string&, bool = true);
 
     void saveMem();
+    shared_ptr<DNAunique> cloneForOutput() const;
+    void sumMergeQualities(const shared_ptr<DNAunique>& other);
 
     void attachPair(shared_ptr<DNAunique> dna_unique);
     shared_ptr<DNAunique> getPair(void);
@@ -589,6 +598,7 @@ private:
     }
 
     void promoteQualitiesToSums(bool releaseRawQualities);
+    std::vector<qual_accum_t> quality_coverage_per_base_;
 
     read_occ::iterator findOccurrenceEntry(int sample_id);
     read_occ::const_iterator findOccurrenceEntry(int sample_id) const;
@@ -596,6 +606,8 @@ private:
     shared_ptr<DNAunique> pair_;
 
     shared_ptr<DNAunique> merge_;
+    // Retain accepted consensus evidence if the chosen representative loses its merge.
+    shared_ptr<DNAunique> merge_quality_evidence_;
 
     // to calculate mean
     qual_score derep_fastq_offset_;
@@ -609,8 +621,7 @@ private:
 
 class DNAuniqSet {
 public:
-    DNAuniqSet() :bestDNU(nullptr), bestSet(false), bestHasMerge(false), totalCnts(0),
-        cntsAdded2best(false) {}
+    DNAuniqSet() = default;
     ~DNAuniqSet() {}
 
     void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
@@ -622,16 +633,15 @@ public:
     const map<int, shared_ptr<DNAunique>>::iterator end();
     const map<int, shared_ptr<DNAunique>>::iterator begin();
     size_t size() { return DNUs.size(); }
-    void setBest(bool addCnts);
-    shared_ptr<DNAunique> best(bool addCnts);
+    uint64_t totalSum() const;
+    void setBest(bool addCnts, bool collectQualities = true);
+    shared_ptr<DNAunique> best(bool addCnts, bool collectQualities = true);
 
     mutex lockMTX;
 private:
     map<int, shared_ptr<DNAunique>> DNUs;
     shared_ptr<DNAunique> bestDNU;
-    bool bestSet; bool bestHasMerge;
-    int totalCnts;
-    int cntsAdded2best;
+
 };
 
 // Hash map from sequence string to DNAuniqSet (store by value)

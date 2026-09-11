@@ -8,6 +8,8 @@
 #endif
 
 #include <cstdio>
+#include <mutex>
+#include <atomic>
 #include <vector>
 #include <string_view>
 #include <iostream>
@@ -54,9 +56,9 @@ struct mergeStats {
 };
 struct qualStats {
 	qualStats() :r1(0), r2(0),N1(0),N2(0) {}
-	vector<long> r1, r2;
-	vector<long> N1,N2;
-	void logQuals(vector<qual_score> q1, vector<qual_score> q2);
+	vector<uint64_t> r1, r2;
+	vector<uint64_t> N1,N2;
+	void logQuals(const vector<qual_score>& q1, const vector<qual_score>& q2);
 	void printHisto(string File);
 };
 
@@ -119,7 +121,8 @@ private:
 
 	mergeStats mS;
 	qualStats qS;
-	bool b_takeStats;
+	std::atomic<bool> b_takeStats;
+	std::mutex statsMutex;
 
 
 
@@ -130,14 +133,12 @@ public:
 	ReadMerger(bool collStats=false):b_takeStats(collStats){}
 	~ReadMerger() { cdbg("Destroyed Read Merger.. "); }
 
-	//empty dummy for now
-	void addRMstats(ReadMerger*) {}
-
-	void printMergeHisto() { mS.printLogs(); }
-	void printQualHisto(string File,string SRb="") { qS.printHisto(File); }
-	void printMergeHisto(string File, string SRb = "") { mS.printHisto(File); }
-	void restStats() { mS = mergeStats(); qS = qualStats(); }
-	void setStatsTaken(bool b) { b_takeStats = b; }
+	void addRMstats(ReadMerger* other);
+	void printMergeHisto();
+	void printQualHisto(string File, string SRb = "");
+	void printMergeHisto(string File, string SRb = "");
+	void restStats();
+	void setStatsTaken(bool b) { b_takeStats.store(b, std::memory_order_relaxed); }
 
 	void reverseStringInPlace(char *str, int len);
 

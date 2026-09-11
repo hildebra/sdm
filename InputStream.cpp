@@ -382,7 +382,7 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 	*/
 
 	double dAccuE = dx->getAccumError(); double rAccuE = rx->getAccumError();
-	double AccErrRatio = pointFiveRatio(dAccuE, rAccuE,0.25);
+	double AccErrRatio = pointFiveRatio(rAccuE, dAccuE,0.25);
 
 	double dQ=dx->getAvgQual(); double rQ=rx->getAvgQual();
 	if (d2 != nullptr) { dQ += d2->getAvgQual();  }
@@ -416,7 +416,7 @@ bool whoIsBetter(shared_ptr<DNA> d1, shared_ptr<DNA> d2, shared_ptr<DNA> dM,
 	if (!forSeed && dMerge && rMerg) {
 		double dMLDIFF = (double) abs(avgMergeLen - d1->getMergeLength());
 		double rMLDIFF = (double) abs(avgMergeLen - r1->getMergeLength());
-		mergeLenDevRatio = (dMLDIFF+ avgMergeLen) / (rMLDIFF+ avgMergeLen);
+		mergeLenDevRatio = (rMLDIFF + std::max(1.0, avgMergeLen)) / (dMLDIFF + std::max(1.0, avgMergeLen));
 		//mergeLenDeviation = (double)(rMLDIFF - dMLDIFF) / (double)(avgMergeLen + 1e-12); //positive if d is closer to average merge length, negative if r is closer
 	}
 

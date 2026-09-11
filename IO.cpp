@@ -337,7 +337,7 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 		MD->writeNonBCReads(tdn[0], tdn[1]);
 	}
 	if (MD->doDeriplicate()) {
-		MD->dereplicateDNA(tdn[0], tdn[1]);
+		MD->dereplicateDNA(tdn[0], tdn[1], curThread);
 	}
 
     // Test
@@ -466,19 +466,20 @@ bool read_sequences(OutputStreamer* MD,
 		tmpBlockSize *= taskBatchMultiplier;
 	}
 	cdbg("read_seq check3 ");
-	vector<multi_tmp_lines*> tmpStrHolders(Nthreads, nullptr);	
+	vector<unique_ptr<multi_tmp_lines>> tmpStrHolders(Nthreads);	
 	vector<string>tmpLines2(4, empty);
 	vector<vector<string>> tmpLines(3, tmpLines2);
 	for (size_t ii = 0; ii < Nthreads; ii++) {
-		multi_tmp_lines* tmpO = DBG_NEW multi_tmp_lines(); // will be deleted inside multi_read_paired_STRready function
-		tmpO->tmp.resize(tmpBlockSize, tmpLines);
-		tmpStrHolders[ii] = tmpO;
+		tmpStrHolders[ii] = make_unique<multi_tmp_lines>();
+		tmpStrHolders[ii]->tmp.resize(tmpBlockSize, tmpLines);
 	}
 
     //object holding converted DNA.. not longer used
 	//vector<shared_ptr<DNA>> tdn(3, nullptr);
 	cdbg("read_seq check4 ");
 	//doMC = false;//DEBUG
+	std::exception_ptr failure;
+	try {
 	while ( cont ) {
 		//decide on MC or single core submission route
 		if (doMC) { // multithreading
@@ -515,7 +516,7 @@ bool read_sequences(OutputStreamer* MD,
             //step 1: read block from input into tmp buffer
 			{
 				Instr::ScopedTimer st(Instr::GETDNALINES);
-				cont = IS->getDNAlines(tmpStrHolders[thrCnt], tmpBlockSize, MIDuse);
+				cont = IS->getDNAlines(tmpStrHolders[thrCnt].get(), tmpBlockSize, MIDuse);
 			}
 
 			// If we read any records into the tmp buffer, submit them for processing.
@@ -528,7 +529,7 @@ bool read_sequences(OutputStreamer* MD,
 					{
 						Instr::ScopedTimer st_async(Instr::ASYNC_SUBMIT);
 						slots[thrCnt].job = ThreadPool::instance().submit(multi_read_paired_STRready,
-							tmpStrHolders[thrCnt], MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
+							tmpStrHolders[thrCnt].get(), MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
 						}
 					slots[thrCnt].inUse = true;
 				}
@@ -540,11 +541,11 @@ bool read_sequences(OutputStreamer* MD,
 			if (thrCnt >= Nthreads) { thrCnt = 0; }
            if (!cont) { break; }
 		} else {//single thread
-           cont = IS->getDNAlines(tmpStrHolders[thrCnt], tmpBlockSize, MIDuse);
+           cont = IS->getDNAlines(tmpStrHolders[thrCnt].get(), tmpBlockSize, MIDuse);
 			// If we read any records into the tmp buffer, process them even if cont==false (partial final block).
 			if (tmpStrHolders[thrCnt]->size() > 0) {
 				//fastqVer = IS->fastQscore();
-				bool cont2 = multi_read_paired_STRready(tmpStrHolders[thrCnt], MIDuse, 
+				bool cont2 = multi_read_paired_STRready(tmpStrHolders[thrCnt].get(), MIDuse, 
 					MD, 0, keepPairedHD, fastqVer);
 			}
 			if (!cont && tmpStrHolders[thrCnt]->size() == 0) { break; }
@@ -552,32 +553,32 @@ bool read_sequences(OutputStreamer* MD,
 			//}
 		}
 	}
-	cdbg("read_seq check5 ");
-
-	//last jobs 
-
-
- // get all slots (single wrap-around pass starting at thrCnt)
-	if (!slots.empty()) {
-		for (size_t i = 0; i < slots.size(); ++i) {
-			size_t x = (static_cast<size_t>(thrCnt) + i) % slots.size();
-			if (slots[x].inUse == true) {
-				if (slots[x].job.valid()) {
-					cont = slots[x].job.get();
-				}
-				slots[x].inUse = false;
-			}
-		}
+	}
+	catch (...) {
+		failure = std::current_exception();
 	}
 
-	
+	// A packaged-task future does not join on destruction. Keep the input buffers
+	// and OutputStreamer alive until every submitted worker has finished, even
+	// when input parsing, submission, or another worker has already failed.
+	for (size_t i = 0; i < slots.size(); ++i) {
+		const size_t x = (static_cast<size_t>(thrCnt) + i) % slots.size();
+		if (slots[x].job.valid()) {
+			try {
+				(void)slots[x].job.get();
+			}
+			catch (...) {
+				if (!failure) { failure = std::current_exception(); }
+			}
+		}
+		slots[x].inUse = false;
+	}
+	if (failure) { std::rethrow_exception(failure); }
+
 	//close shop
 	//MD->revConstellationCnts(revConstellation);
 	MD->closeOutStreams();
 
-	for (size_t ii = 0; ii < Nthreads; ii++) {
-		delete tmpStrHolders[ii];
-	}
 	cdbg("read_seq check6 ");
 
 	// Print instrumentation results
@@ -601,11 +602,8 @@ bool readCmdArgs(int argc, char* argv[]){
 	};
 	for (int i=1; i<argc; i+=2){ //parsing of cmdline args
 		string theNxtSt = string(argv[i+1]);
-		if (theNxtSt.empty() || theNxtSt[0] != '-'){
-			cmdArgs->set(string(argv[i]), theNxtSt);
-		} else {
-			cmdArgs->set(string(argv[i]), "T");
-		}
+		// Arguments are key/value pairs; retain negative numeric values such as -1.
+		cmdArgs->set(string(argv[i]), theNxtSt);
 	}
 	
 	
@@ -614,7 +612,6 @@ bool readCmdArgs(int argc, char* argv[]){
 	setDefault("-GoldenAxe", "0");
 	setDefault("-GoldenAxeMinAmpli", "0");
 	setDefault("-GoldenAxeMaxAmpli", "0");
-	setDefault("-derepSrchLen", "150");
 	setDefault("-DNAseedSelectionClassic", "0");
 	setDefault("-i_MID_fastq", "");
 	//set to default (empty)
@@ -745,12 +742,9 @@ bool readCmdArgs(int argc, char* argv[]){
 	if (cmdArgs->find("-qual_hist") == cmdArgs->end()) {
 		cmdArgs->set("-qual_hist", ofile1 + string("_qualHist.txt"));
 	}
-	if (cmdArgs->find("-merg_readpos") == cmdArgs->end()) {
-		cmdArgs->set("-merg_readpos", ofile1 + string("_mergRpos.txt"));
-	}
-	if (cmdArgs->find("-	qual_readpos") == cmdArgs->end()) {
-		cmdArgs->set("-qual_readpos", ofile1 + string("_qualRpos.txt"));
-	}
+	// Position reports are optional: collect only when an output is requested.
+	setDefault("-merg_readpos", "");
+	setDefault("-qual_readpos", "");
 
 		//-length_hist   -qual_hist
 
@@ -814,10 +808,10 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 	string outFile = (*cmdArgs)["-o_fna"];
 	
 	//special sdm functions ini
-	UClinks *ucl = nullptr; // Seed extension ?
+	unique_ptr<UClinks> ucl; // Own seed state through every exit path.
 	shared_ptr<ReadSubset> RDSset (nullptr);  //read subset filtered out?
 	shared_ptr<Dereplicate> dereplicator (nullptr); //dereplication of b_derep_as_fasta_ input?
-	ucl = mainFilter->ini_SeedsReadsDerep(ucl, RDSset, dereplicator); // actual prep
+	ucl.reset(mainFilter->ini_SeedsReadsDerep(nullptr, RDSset, dereplicator)); // actual prep
 	//needs to attach to existing file sometimes
 	std::ios_base::openmode writeStatus = ios_base::out;
 	bool shortStats = false;
@@ -864,7 +858,12 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 	}
 
 	//set up a read merger for each thread..
-	bool detailedMergeStats(false);
+	const bool detailedMergeStats = !(*cmdArgs)["-merg_readpos"].empty() || !(*cmdArgs)["-qual_readpos"].empty();
+	ReadMerger positionStats;
+	auto printPositionStats = [&] {
+		if (!(*cmdArgs)["-merg_readpos"].empty()) { positionStats.printMergeHisto((*cmdArgs)["-merg_readpos"]); }
+		if (!(*cmdArgs)["-qual_readpos"].empty()) { positionStats.printQualHisto((*cmdArgs)["-qual_readpos"]); }
+	};
 
 
     //---------------------------------
@@ -971,7 +970,7 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 		//OutputStreamer also contains subfilters for MC processing and logging of reads
 		OutputStreamer* OutStreamer = DBG_NEW OutputStreamer(filter, cmdArgs, 
 			writeStatus, RDSset, threads,"");
-		OutStreamer->attachDereplicator(dereplicator);OutStreamer->activateReadMerger(threads);
+		OutStreamer->attachDereplicator(dereplicator);OutStreamer->activateReadMerger(threads, detailedMergeStats && !mainFilter->doDereplicate());
 		OutStreamer->setBPwrittenInSR(accumBPwrite);OutStreamer->setBPwrittenInSRmerg(accumBPwriteMerg);	
 		OutStreamer->attachBenchmark(sdm_benchmark);filter->setMultiDNA(OutStreamer);
 		if (maxReadsWr > 0) {
@@ -1063,11 +1062,13 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 		}
 
         mainFilter->addStats(filter, files.idx[i]);
+        mainFilter->copyOutputState(*filter);
         // Print out merged read count (move to stort stats)
 
 		//OutStreamer.reset();
 		totalReadsWrite += OutStreamer->getReadsWritten();
 		
+		if (detailedMergeStats && !mainFilter->doDereplicate()) { OutStreamer->addMergeStatsTo(positionStats); }
 		delete OutStreamer;
 		delete filter;
     }//uFX
@@ -1127,7 +1128,7 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
         OutputStreamer* MDx = DBG_NEW OutputStreamer(mainFilter, cmdArgs, 
 			ios::out, RDSset,0);
 		//ReadMerger* DerepM = DBG_NEW ReadMerger(false);
-		MDx->activateReadMerger(1);
+		MDx->activateReadMerger(1, detailedMergeStats);
         mainFilter->setMultiDNA(MDx);
         ucl->writeNewSeeds(MDx, mainFilter, false);
         
@@ -1139,6 +1140,11 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
         mainFilter->setMultiDNA(MDx );
         ucl->writeNewSeeds(MDx, mainFilter, true, true);
 		*/
+        if (detailedMergeStats) {
+            ucl->addMergeStatsTo(positionStats);
+            MDx->addMergeStatsTo(positionStats);
+            printPositionStats();
+        }
         delete MDx;
 		//delete DerepM;
 		printConvertedSummary();
@@ -1165,15 +1171,7 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 
 		dereplicator->printMergeStats(subfile((*cmdArgs)["-merg_readpos"], finalSRblock),
 			subfile((*cmdArgs)["-qual_readpos"], finalSRblock));
-		/*if (merger[0] != nullptr) {
-			ReadMerger* cMerg = DBG_NEW ReadMerger();
-			for (size_t x = 0; x < merger.size(); x++) {
-				cMerg->addRMstats(merger[x]);
-			}
-			cMerg->printMergeHisto(subfile((*cmdArgs)["-merg_readpos"], lastSRblock.back()));
-			cMerg->printQualHisto(subfile((*cmdArgs)["-qual_readpos"], lastSRblock.back()));
-			delete cMerg;
-		}*/
+
 
 
 #ifdef DEBUG
@@ -1183,6 +1181,8 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 #ifdef DEBUG
     cerr << "Logging almost finished" << endl;
 #endif
+
+    if (detailedMergeStats && !mainFilter->doDereplicate()) { printPositionStats(); }
 
     if ((*cmdArgs)["-log"] == "nolog") {
 		printConvertedSummary();
@@ -1416,7 +1416,7 @@ void printCmdsHelp(){//actually these are flags
 		 << " -derep_reserve <n>             Reserve capacity for dereplication\n"
 		 << " -derepPerSR <0|1>              Dereplicate per sample/read\n"
 		 << " -derep_format <text>           Dereplication output format\n"
-		 << " -derepSrchLen <n>              Dereplication search length (default: 150)\n"
+		 << " -derepSrchLen <n>              Dereplication search length (default: minSeqLength, otherwise 150)\n"
 		 << " -merge_pairs_filter/-merge_pairs_seed/-merge_pairs_demulti <0|1> Enable pair merging\n"
 		 << " -merge_pairs_derep <0|1>       Merge pairs during dereplication\n"
 		 << " -noSearchWithMerge <value>     Disable search when pair merging is enabled\n"
@@ -1434,7 +1434,7 @@ void printCmdsHelp(){//actually these are flags
 		 << " -normRdsToFiveNTs <0|1>        Normalize reads to five nucleotides\n"
 		 << " -mocatFix <0|1>                Enable MOCAT compatibility handling\n"
 		 << " -minQueryCov <n>               Minimum query coverage\n"
-		 << " -DemultiBPperSR <n>            Demultiplex base pairs per sample/read\n"
+		 << " -DemultiBPperSR <n>            Demultiplex bases per sequencing run (both mates; 0=unlimited)\n"
 		 << " -binomialFilterBothPairs <0|1> Apply binomial filtering to both pairs\n"
 		 << " -count_chimeras <T|F>          Count chimeric reads\n";
 	cout<<"\nMinimal Example:\n./sdm -i test.fna -map mapping.txt (assuming quality file is \"test.qual_\")\n";

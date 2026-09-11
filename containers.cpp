@@ -20,6 +20,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <algorithm>
 #include <cassert>
 #include <limits>
+#include <filesystem>
+#include "OutputFileStream.h"
 #include <mutex>
 #include "Common.h"
 #include "containers.h"
@@ -226,32 +228,26 @@ void ReadSubset::findMatches(shared_ptr<InputStreamer> IS, OutputStreamer* MD, b
 //*        DEREPLICATE OBJECT
 //*******************************************
 
-std::shared_ptr<Dereplicate::ThreadLocalBatch> Dereplicate::get_or_create_thread_batch() {
-	thread_local std::shared_ptr<ThreadLocalBatch> tls_batch;
-	if (!tls_batch) {
-		tls_batch = std::make_shared<ThreadLocalBatch>();
-	}
-
-	if (tls_batch->owner != this) {
-		if (tls_batch->owner != nullptr && !tls_batch->pending.empty()) {
-			tls_batch->owner->flush_batch(*tls_batch);
-		}
-		tls_batch->owner = this;
-		tls_batch->registered = false;
-	}
-
-	if (!tls_batch->registered) {
-		std::lock_guard<std::mutex> regLock(batch_registry_mtx_);
-		batch_registry_.push_back(tls_batch);
-		tls_batch->registered = true;
-	}
-
-	return tls_batch;
+Dereplicate::ThreadLocalBatch& Dereplicate::get_or_create_thread_batch() {
+ // The registry owns pending work even after a producer exits. The weak
+ // cache detects destruction/address reuse without a reference-count RMW per read.
+ thread_local std::weak_ptr<ThreadLocalBatch> cache;
+ thread_local ThreadLocalBatch* cachedBatch = nullptr;
+ if (cache.expired() || cachedBatch->owner != this) {
+  auto batch = std::make_shared<ThreadLocalBatch>();
+  batch->owner = this;
+  batch->pending.reserve(kThreadBatchFlushThreshold);
+  std::lock_guard<std::mutex> guard(batch_registry_mtx_);
+  batch_registry_.push_back(batch);
+  cache = batch;
+  cachedBatch = batch.get();
+ }
+ return *cachedBatch;
 }
 
-bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending) {
-	auto tracker_it = tracker_.find(pending.srchSeq);
-	if (tracker_it != tracker_.end()) {
+bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending, HashDNA& tracker) {
+	auto tracker_it = tracker.find(pending.srchSeq);
+	if (tracker_it != tracker.end()) {
 		std::unique_ptr<DNAuniqSet>& dnuSet = tracker_it->second;
 		if (!dnuSet) {
 			dnuSet = std::make_unique<DNAuniqSet>();
@@ -263,7 +259,7 @@ bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending) {
 		}
 		else {
 			dna_unique->second->matchedDNA(pending.dna, pending.dna2, pending.dna_merged,
-				pending.sample_id, b_derep_as_fasta_);
+				pending.sample_id, b_derep_as_fasta_, b_merge_pairs_derep_);
 		}
 		return false;
 	}
@@ -272,7 +268,7 @@ bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending) {
 		return true;
 	}
 
-	auto [new_it, freshEntry] = tracker_.try_emplace(pending.srchSeq, nullptr);
+	auto [new_it, freshEntry] = tracker.try_emplace(pending.srchSeq, nullptr);
 	std::unique_ptr<DNAuniqSet>& entry = new_it->second;
 	if (!entry) {
 		entry = std::make_unique<DNAuniqSet>();
@@ -289,7 +285,7 @@ bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending) {
 		}
 		else {
 			dna_unique->second->matchedDNA(pending.dna, pending.dna2, pending.dna_merged,
-				pending.sample_id, b_derep_as_fasta_);
+				pending.sample_id, b_derep_as_fasta_, b_merge_pairs_derep_);
 		}
 	}
 
@@ -297,40 +293,28 @@ bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending) {
 }
 
 void Dereplicate::flush_batch(ThreadLocalBatch& batch) {
-	std::vector<PendingDerepEntry> localPending;
-	if (batch.pending.empty()) {
-		return;
-	}
-	localPending.swap(batch.pending);
-
-	std::unique_lock<std::shared_mutex> trackerLock(drpMTX_);
-	for (size_t i = 0; i < localPending.size(); ++i) {
-		apply_pending_entry_locked(localPending[i]);
+	if (batch.pending.empty()) { return; }
+	uint64_t searchBases = 0;
+	for (const auto& entry : batch.pending) { searchBases += entry.srchSeq.size(); }
+	srch_seq_total_len_.fetch_add(searchBases, std::memory_order_relaxed);
+	srch_seq_count_.fetch_add(batch.pending.size(), std::memory_order_relaxed);
+	struct ClearBatch { ThreadLocalBatch& batch; ~ClearBatch() { batch.pending.clear(); } } clear{batch};
+	thread_local std::vector<std::vector<size_t>> grouped;
+	grouped.resize(shards_.size());
+	for (auto& indices : grouped) { indices.clear(); }
+	for (size_t i = 0; i < batch.pending.size(); ++i) { grouped[batch.pending[i].shard].push_back(i); }
+	for (size_t i = 0; i < shards_.size(); ++i) {
+		if (grouped[i].empty()) { continue; }
+		auto& shard = *shards_[i];
+		std::lock_guard<std::mutex> guard(shard.mutex);
+		for (size_t index : grouped[i]) { apply_pending_entry_locked(batch.pending[index], shard.tracker); }
 	}
 }
 
 void Dereplicate::flush_all_batches() {
-	std::vector<std::shared_ptr<ThreadLocalBatch>> liveBatches;
-	{
-		std::lock_guard<std::mutex> regLock(batch_registry_mtx_);
-		std::vector<std::weak_ptr<ThreadLocalBatch>> compacted;
-		compacted.reserve(batch_registry_.size());
-		for (size_t i = 0; i < batch_registry_.size(); ++i) {
-			std::shared_ptr<ThreadLocalBatch> batch = batch_registry_[i].lock();
-			if (!batch) {
-				continue;
-			}
-			compacted.push_back(batch);
-			if (batch->owner == this) {
-				liveBatches.push_back(batch);
-			}
-		}
-		batch_registry_.swap(compacted);
-	}
-
-	for (size_t i = 0; i < liveBatches.size(); ++i) {
-		flush_batch(*liveBatches[i]);
-	}
+	std::vector<std::shared_ptr<ThreadLocalBatch>> batches;
+	{ std::lock_guard<std::mutex> guard(batch_registry_mtx_); batches = batch_registry_; }
+	for (auto& batch : batches) { flush_batch(*batch); }
 }
 
 Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
@@ -349,7 +333,7 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 		searchWithMerg = false;
 	}
 
-	string baseOF = outfile.substr(0, outfile.find_last_of('.'));
+	string baseOF = std::filesystem::path(outfile).replace_extension().string();
 	mapF = baseOF + ".map";
 	outHQf = baseOF + ".1.hq.fq";
 	outHQf_p2 = baseOF + ".2.hq.fq";
@@ -361,7 +345,15 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 	// Reserve hash map capacity to avoid costly rehashing during heavy dereplication.
 	// Allow user to override via -derep_reserve; default to 500k slots.
 	size_t reserveSize = runtimeOpts.derepReserve;
-	tracker_.reserve(reserveSize);
+// Independent sequence keys can update concurrently. Keep each key in one
+	// shard so occurrence counts, quality evidence, and selection stay atomic.
+	constexpr size_t shardCount = 64;
+	shards_.reserve(shardCount);
+	for (size_t i = 0; i < shardCount; ++i) {
+		auto shard = std::make_unique<Shard>();
+		shard->tracker.reserve(reserveSize / shardCount + (reserveSize % shardCount != 0));
+		shards_.push_back(std::move(shard));
+	}
 
 
 	if (runtimeOpts.hasDereSizeFmt && runtimeOpts.disableUsearchSizeFmt) {
@@ -457,38 +449,62 @@ Dereplicate::~Dereplicate() {
 }
 
 
-bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
-	struct ActiveAddGuard {
-		Dereplicate* owner;
-		explicit ActiveAddGuard(Dereplicate* d) : owner(d) {}
-		~ActiveAddGuard() {
-			if (owner->active_adddna_.fetch_sub(1, std::memory_order_acq_rel) == 1 &&
-				owner->lifecycle_pause_.load(std::memory_order_acquire)) {
-				// notify_all() does not require the mutex to be held; calling it
-				// outside avoids waking finishMap() only for it to immediately
-				// block again reacquiring the same mutex (hurry-up-and-wait).
-				owner->lifecycle_wait_cv_.notify_all();
-			}
-		}
-	};
+Dereplicate::ActiveAddGuard::ActiveAddGuard(Dereplicate& owner, ThreadLocalBatch& batch)
+	: owner(owner), batch(batch) {
 	for (;;) {
-		if (lifecycle_pause_.load(std::memory_order_acquire)) {
-			std::unique_lock<std::mutex> waitLock(lifecycle_wait_mtx_);
-			lifecycle_wait_cv_.wait(waitLock, [this]() {
-				return !lifecycle_pause_.load(std::memory_order_acquire);
-			});
-			continue;
+		if (owner.lifecycle_pause_.load()) {
+			std::unique_lock<std::mutex> lock(owner.lifecycle_wait_mtx_);
+			owner.lifecycle_wait_cv_.wait(lock, [&owner] { return !owner.lifecycle_pause_.load(); });
 		}
-		active_adddna_.fetch_add(1, std::memory_order_acq_rel);
-		if (!lifecycle_pause_.load(std::memory_order_acquire)) {
-			break;
-		}
-		if (active_adddna_.fetch_sub(1, std::memory_order_acq_rel) == 1 &&
-			lifecycle_pause_.load(std::memory_order_acquire)) {
-			lifecycle_wait_cv_.notify_all();
-		}
+		// Sequential consistency pairs this announcement/recheck with the
+		// snapshot's pause/store and activity scan. Either it sees this producer,
+		// or this producer sees the pause before touching any pending entries.
+		batch.active.store(true);
+		if (!owner.lifecycle_pause_.load()) { return; }
+		owner.release_batch_activity(batch);
 	}
-	ActiveAddGuard activeGuard(this);
+}
+
+Dereplicate::ActiveAddGuard::~ActiveAddGuard() { owner.release_batch_activity(batch); }
+
+void Dereplicate::release_batch_activity(ThreadLocalBatch& batch) {
+	batch.active.store(false);
+	if (lifecycle_pause_.load()) {
+		// Synchronize notification with the waiter's predicate check so the
+		// final producer cannot notify just before the waiter goes to sleep.
+		std::lock_guard<std::mutex> lock(lifecycle_wait_mtx_);
+		lifecycle_wait_cv_.notify_all();
+	}
+}
+
+Dereplicate::LifecyclePause::LifecyclePause(Dereplicate& owner)
+	: owner(owner), operationLock(owner.lifecycle_operation_mtx_) {
+	std::unique_lock<std::mutex> lock(owner.lifecycle_wait_mtx_);
+	std::vector<std::shared_ptr<ThreadLocalBatch>> batches;
+	{
+		std::lock_guard<std::mutex> registryLock(owner.batch_registry_mtx_);
+		// Copy before publishing the pause: allocation failure leaves producers running.
+		batches = owner.batch_registry_;
+		owner.lifecycle_pause_.store(true);
+	}
+	// Newly registered producers see the pause before touching their batches.
+	// Release the registry lock before waiting/reacquiring the condition mutex.
+	owner.lifecycle_wait_cv_.wait(lock, [&batches] {
+		return std::all_of(batches.begin(), batches.end(), [](const auto& batch) {
+			return !batch->active.load();
+		});
+	});
+}
+
+Dereplicate::LifecyclePause::~LifecyclePause() {
+	std::lock_guard<std::mutex> lock(owner.lifecycle_wait_mtx_);
+	owner.lifecycle_pause_.store(false);
+	owner.lifecycle_wait_cv_.notify_all();
+}
+
+bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* filter) {
+	ThreadLocalBatch& threadBatch = get_or_create_thread_batch();
+	ActiveAddGuard activeGuard(*this, threadBatch);
 	//1st build hash of DNA
 	if (!dna->getBarcodeDetected()) {
 		return false;
@@ -513,12 +529,16 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 	}*/
 
     // Only attempt to merge if a merger has been activated and pair is present
-	if (searchWithMerg && dna2 != nullptr && dna->merge_seed_pos_ != -1 && merger != nullptr) {
+	if ((searchWithMerg || b_merge_pairs_derep_) && dna2 != nullptr && dna->merge_seed_pos_ != -1 && merger != nullptr) {
 		//MrgPos1 = dna2->merge_seed_pos_;
 		dna_merged = merger->merge(dna, dna2);
+        Filters* mergedFilter = filter ? filter : mainFilter;
+        if (dna_merged && !mergedFilter->checkMergedDNA(dna_merged)) {
+            dna_merged.reset();
+        }
 	}
 
-    if (dna_merged){
+    if (dna_merged && searchWithMerg){
 		const std::string_view mergedSeq = dna_merged->getSeqPseudoView();
 		const size_t searchLen = (searchLength == -1)
 			? mergedSeq.size()
@@ -534,23 +554,21 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2) {
 		srchSeqPtr = &srchSeqBuffer;
 	}
 	const string& srchSeq = *srchSeqPtr;
-	srch_seq_total_len_.fetch_add(static_cast<uint64_t>(srchSeq.size()), std::memory_order_relaxed);
-	srch_seq_count_.fetch_add(1, std::memory_order_relaxed);
 
-	std::shared_ptr<ThreadLocalBatch> threadBatch = get_or_create_thread_batch();
-	threadBatch->pending.push_back(PendingDerepEntry{
+	threadBatch.pending.push_back(PendingDerepEntry{
 		srchSeq,
 		dna,
 		dna2,
 		dna_merged,
 		MrgPos1,
 		sample_id,
-		pass
+		pass,
+		robin_hood::hash<string>{}(srchSeq) % shards_.size()
 		});
-	bool flushNow = threadBatch->pending.size() >= kThreadBatchFlushThreshold;
+	bool flushNow = threadBatch.pending.size() >= kThreadBatchFlushThreshold;
 
 	if (flushNow || lifecycle_pause_.load(std::memory_order_acquire)) {
-		flush_batch(*threadBatch);
+		flush_batch(threadBatch);
 	}
 
 	return pass;
@@ -566,22 +584,17 @@ void Dereplicate::BCnamesAdding(Filters* fil) {
 	//cerr << curBCoffset << " Added BC list\n";
 }
 void Dereplicate::reset() {
-	lifecycle_pause_.store(true, std::memory_order_release);
-	{
-		std::unique_lock<std::mutex> lk(lifecycle_wait_mtx_);
-		lifecycle_wait_cv_.wait(lk, [this]() {
-			return active_adddna_.load(std::memory_order_acquire) == 0;
-		});
-	}
+	LifecyclePause pause(*this);
 	flush_all_batches();
+	if (merger) { merger->restStats(); }
 //	for (size_t i = 0; i < Dnas.size(); i++) { delete Dnas[i]; }
 //	Dnas.resize(0);
 	//passedSize = 0; 
 	tmpCnt = 0;
 	//barcode_number_to_sample_id_.resize(0);
-	{
-		std::unique_lock<std::shared_mutex> lk(drpMTX_);
-		tracker_.clear();
+	for (auto& shard : shards_) {
+		std::lock_guard<std::mutex> guard(shard->mutex);
+		shard->tracker.clear();
 	}
 	srch_seq_total_len_.store(0, std::memory_order_release);
 	srch_seq_count_.store(0, std::memory_order_release);
@@ -593,28 +606,25 @@ bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r) {
 }
 
 void Dereplicate::finishMap() {
-	lifecycle_pause_.store(true, std::memory_order_release);
-	{
-		std::unique_lock<std::mutex> lk(lifecycle_wait_mtx_);
-		lifecycle_wait_cv_.wait(lk, [this]() {
-			return active_adddna_.load(std::memory_order_acquire) == 0;
-		});
-	}
+	LifecyclePause pause(*this);
 	flush_all_batches();
 	//at this point we can onl be sure that barcode_number_to_sample_id_ is finished
 	//hence now it the point to add this to map
 	//passedSize = 0; 
 	tmpCnt = 0;
-	{
-		std::unique_lock<std::shared_mutex> lk(drpMTX_);
-		tracker_.clear();
+	for (auto& shard : shards_) {
+		std::lock_guard<std::mutex> guard(shard->mutex);
+		shard->tracker.clear();
 	}
 	srch_seq_total_len_.store(0, std::memory_order_release);
 	srch_seq_count_.store(0, std::memory_order_release);
 	const string tmpMap = mapF + ".tmp";
 	const string bakMap = mapF + ".bak";
 	std::ifstream inputFile(mapF.c_str(), ios::in);
+	if (!inputFile.is_open()) { throw std::runtime_error("Could not open dereplication map: " + mapF); }
+    inputFile.exceptions(ios::badbit);
 	std::ofstream outputFile(tmpMap.c_str(), ios::out | ios::trunc);
+    if (!outputFile.is_open()) { throw std::runtime_error("Could not create temporary dereplication map: " + tmpMap); }
 
 	outputFile << "#SMPLS";
 	bool bCombiSmpl = mainFilter->combineSamples();
@@ -635,47 +645,26 @@ void Dereplicate::finishMap() {
 		}
 	}
 	outputFile << "\n";
-	b_wroteMapHD = true;
+    // Copy explicitly so an empty map is valid and read errors are checked.
+    char buffer[64 * 1024];
+    while (inputFile.read(buffer, sizeof(buffer)) || inputFile.gcount() > 0) {
+        outputFile.write(buffer, inputFile.gcount());
+    }
+    if (!inputFile.eof()) { throw std::runtime_error("Could not read dereplication map: " + mapF); }
+    inputFile.close();
+    finalizeOutputFile(outputFile, tmpMap);
 
-	if (inputFile) {
-		outputFile << inputFile.rdbuf();
-	}
-
-	inputFile.close();
-	outputFile.close();
-
-	bool replaced = false;
-	bool hadOriginal = false;
-	{
-		std::ifstream probe(mapF.c_str(), ios::in);
-		hadOriginal = static_cast<bool>(probe);
-	}
-	if (hadOriginal) {
-		std::remove(bakMap.c_str());
-		if (std::rename(mapF.c_str(), bakMap.c_str()) != 0) {
-			cerr << "Warning: Could not backup existing map file before replace: " << mapF << "\n";
-		}
-	}
-
-	if (std::rename(tmpMap.c_str(), mapF.c_str()) == 0) {
-		replaced = true;
-	}
-	else {
-		cerr << "Warning: Could not promote temporary map file: " << tmpMap << " -> " << mapF << "\n";
-	}
-
-	if (hadOriginal) {
-		if (!replaced) {
-			if (std::rename(bakMap.c_str(), mapF.c_str()) != 0) {
-				cerr << "Warning: Could not restore previous map file from backup: " << bakMap << "\n";
-			}
-		}
-		else {
-			std::remove(bakMap.c_str());
-		}
-	}
-	lifecycle_pause_.store(false, std::memory_order_release);
-	lifecycle_wait_cv_.notify_all();
+    // Never promote an incomplete file or discard the original on rename failure.
+    if (std::rename(mapF.c_str(), bakMap.c_str()) != 0) {
+        throw std::runtime_error("Could not back up dereplication map: " + mapF);
+    }
+    if (std::rename(tmpMap.c_str(), mapF.c_str()) != 0) {
+        const bool restored = std::rename(bakMap.c_str(), mapF.c_str()) == 0;
+        throw std::runtime_error("Could not promote temporary dereplication map: " + tmpMap +
+            (restored ? "; original map restored" : "; original map retained at " + bakMap));
+    }
+    std::remove(bakMap.c_str());
+    b_wroteMapHD = true;
 
 	return;
 }
@@ -684,21 +673,8 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 		throw std::runtime_error("Dereplicate output paths are not initialized before writeDereplDNA().");
 	}
 
-	struct PauseForSnapshot {
-		Dereplicate* owner;
-		explicit PauseForSnapshot(Dereplicate* d) : owner(d) {
-			owner->lifecycle_pause_.store(true, std::memory_order_release);
-			std::unique_lock<std::mutex> lk(owner->lifecycle_wait_mtx_);
-			owner->lifecycle_wait_cv_.wait(lk, [this]() {
-				return owner->active_adddna_.load(std::memory_order_acquire) == 0;
-			});
-			owner->flush_all_batches();
-		}
-		~PauseForSnapshot() {
-			owner->lifecycle_pause_.store(false, std::memory_order_release);
-			owner->lifecycle_wait_cv_.notify_all();
-		}
-	} pauseForSnapshot(this);
+	LifecyclePause pause(*this);
+	flush_all_batches();
 
 	ofstream of, omaps, of2, ofRest, of2p2, of_merged;
 	cerr << "\nEvaluating and writing dereplicated reads..\n";
@@ -725,12 +701,12 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	}), srBlockSafe.end());
 	
 	//set the correct file names for dereplication output files
-	string baseOF = outfile.substr(0, outfile.find_last_of('.'));
+	string baseOF = std::filesystem::path(outfile).replace_extension().string();
 	string baseOF2 = baseOF;	
 	if (b_derepPerSR && srBlockSafe != "") {//if writing out per SRblock, needs different filename for map and 
 		baseOF2 += "." + srBlockSafe;
 	}	
-	string fileSuff = outfile.substr(outfile.find_last_of('.'));
+	string fileSuff = std::filesystem::path(outfile).extension().string();
 	string outfile2 = baseOF2 + fileSuff;
     string outfile_merged = baseOF2 + ".merg" + fileSuff;
 	auto ensureOpen = [](const std::ofstream& stream, const std::string& path, const char* label) {
@@ -740,16 +716,17 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	};
 
 	// OPEN OUTPUT FILE STREAMS
-	omaps.open(mapF.c_str(), ios::app);//| ios::binary
+	const auto cumulativeMode = b_derepPerSR ? ios::app : (ios::out | ios::trunc);
+	omaps.open(mapF.c_str(), cumulativeMode);//| ios::binary
 	ensureOpen(omaps, mapF, "derep map");
 	//actual dereplicated reads as required by clustering algo (uparse, cdhit, dada2,...)
 	of.open(outfile2.c_str(), ios::out);
 	ensureOpen(of, outfile2, "dereplicated output");
 	//reads that did not pass dereplication min number
-	ofRest.open(outRest.c_str(), ios::app);
+	ofRest.open(outRest.c_str(), cumulativeMode);
 	ensureOpen(ofRest, outRest, "dereplicated rest");
 	//copy of high quality read pairs -> needed for Seed extension step
-	of2.open(outHQf.c_str(), ios::app);
+	of2.open(outHQf.c_str(), cumulativeMode);
 	ensureOpen(of2, outHQf, "high-quality output");
 	const bool can_merge_derep = b_merge_pairs_derep_ && (merger != nullptr);
 	if (b_merge_pairs_derep_ && merger == nullptr) {
@@ -760,7 +737,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 		ensureOpen(of_merged, outfile_merged, "merged dereplicated output");
     }
 	if (b_pairedInput) {
-		of2p2.open(outHQf_p2, ios::app);
+		of2p2.open(outHQf_p2, cumulativeMode);
 		ensureOpen(of2p2, outHQf_p2, "high-quality output read2");
 	}
 
@@ -799,24 +776,20 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	}
 	
 	//convert to vector, that can than be written out
-	vector<shared_ptr<DNAunique>> dereplicated_dnas;
-	{
-		std::shared_lock<std::shared_mutex> trackerReadLock(drpMTX_);
-		dereplicated_dnas.reserve(tracker_size_total());
-		for (auto dd = tracker_.begin(); dd != tracker_.end(); ++dd) {
-			assert(dd->second && "Dereplicate tracker contains null DNAuniqSet entry");
-			if (!dd->second) {
-				continue;
-			}
-			shared_ptr<DNAunique> bestEntry = dd->second->best(true);
-			assert(bestEntry && "DNAuniqSet::best returned null for non-empty tracker entry");
-			if (bestEntry) {
-				dereplicated_dnas.push_back(bestEntry);
-			}
+	// Sort small references; materialize only one independent output group at a time.
+	vector<pair<uint64_t, DNAuniqSet*>> dereplicated_dnas;
+	dereplicated_dnas.reserve(tracker_size_total());
+	for (const auto& shard : shards_) {
+		std::lock_guard<std::mutex> guard(shard->mutex);
+		for (auto& entry : shard->tracker) {
+			assert(entry.second && "Dereplicate tracker contains null DNAuniqSet entry");
+			if (!entry.second) { continue; }
+			dereplicated_dnas.emplace_back(entry.second->totalSum(), entry.second.get());
 		}
 	}
 //	bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r) {	return l->getCount() < r->getCount();}
-	sort(dereplicated_dnas.begin(), dereplicated_dnas.end() , DNAuPointerCompare);
+	sort(dereplicated_dnas.begin(), dereplicated_dnas.end(),
+        [](const auto& left, const auto& right) { return left.first > right.first; });
 	size_t passedSize = 0; size_t notPassedSize = 0; size_t passed_hits(0);
 	size_t passedMerge(0);
 	//bool thrHit = false;
@@ -842,10 +815,11 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	ofstream* derepNowOut;
 	//print unique DNAs
 	for (size_t i = 0; i < dereplicated_dnas.size(); i++) {
-		shared_ptr<DNAunique> dna = dereplicated_dnas[i];;
+		shared_ptr<DNAunique> dna = dereplicated_dnas[i].second->best(true, !b_derep_as_fasta_);
+        if (!dna) { continue; }
         total_count ++;
 		dna->Count2Head(b_usearch_fmt);
-		shared_ptr<DNA> dna_merged = nullptr;
+		shared_ptr<DNAunique> dna_merged = nullptr;
 		if ((dereplicate_sample_specific && 
 			dna->pass_deprep_smplSpc(dereplicate_sample_specific_indices)) ||
             pass_deprep_conditions(dna) ) {
@@ -857,7 +831,14 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 
 			//only do merge here, because these are known good dereps already
             if (can_merge_derep && dna->merge_seed_pos_ >= 0) {
-				dna_merged = merger->merge(dna, dna->getPair());
+                dna_merged = dna->getMerge();
+                if (!dna_merged) {
+                    auto consensus = merger->merge(dna, dna->getPair());
+                    if (consensus) { dna_merged = make_shared<DNAunique>(consensus, -1); }
+                    if (dna_merged && !mf->checkMergedDNA(dna_merged)) { dna_merged.reset(); }
+                }
+                if (dna_merged && !mf->checkMergedLength(dna_merged)) { dna_merged.reset(); }
+                if (dna_merged) { dna_merged->setHeader(dna->getId()); }
 			}
 			derepNowOut = &of;
 			if (dna->getMergeLength() > 0) {
@@ -877,8 +858,8 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 			}
 		else {
 			if (dna_merged) {
-				dna_merged->prepareWrite(fastqVer);
-				dna_merged->writeFastQ_derep(of_merged);
+				dna_merged->prepareDerepQualities(fastqVer);
+				dna_merged->writeDerepFastQ(of_merged);
 			} else {
 				dna->prepareDerepQualities(fastqVer);
 				dna->writeDerepFastQ((*derepNowOut));
@@ -890,7 +871,9 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 		//map is written no matter what
 		dna->writeMap(omaps, dna->getId(), counts_per_sample, smplId2comb, map_combined_counts, map_touched_groups);
 
-		//write out full seq + fastq
+		// HQ mates are full-length intermediates for seed extension. Preserve
+        // their overlap even when clustering uses truncated reads; physical
+        // barcode/primer cuts remain in the backing sequence.
 		dna->resetTruncation();
 		dna->prepareWrite(fastqVer);
 		dna->writeFastQ(of2);
@@ -917,7 +900,12 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 //	if (tmpCnt != passedSize) {
 //		cerr << "Counting failed\n" << tmpCnt << " " << passedSize<<endl;
 //	}
-	of.close(); omaps.close();  ofRest.close();
+	finalizeOutputFile(of, outfile2);
+    finalizeOutputFile(omaps, mapF);
+    finalizeOutputFile(ofRest, outRest);
+    finalizeOutputFile(of2, outHQf);
+    if (b_pairedInput) { finalizeOutputFile(of2p2, outHQf_p2); }
+    if (can_merge_derep) { finalizeOutputFile(of_merged, outfile_merged); }
 	float avgSize = passed_hits > 0 ? (float)passedSize / (float)(passed_hits) : 0.f;
     string report = "";
 	auto formatCount64 = [](uint64_t value) {
@@ -953,13 +941,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 		
 		
 	cerr  << report  << endl;
-	if (b_pairedInput) {
-		of2p2.close();
-	}
-	of2.close();
-	if (can_merge_derep) {
-		of_merged.close();
-	}
+
 
 	if (this->b_derepPerSR) {
 		return report;
@@ -1042,7 +1024,7 @@ string additionalFileName2(const string& in){
 }
 
 string subfile(string x, string y) {
-	if (y == "") { return x; }
+	if (x.empty() || y == "") { return x; }
 	size_t pos = x.find_last_of(".");
 	string s = "";
 	if (pos != string::npos) {
@@ -1368,18 +1350,21 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 			if (tmpDNA == NULL) { cont_local = false; break; }//signal that at end of file
 			match2 = IS->getDNA(1);
 
-			//does some basic quality check, such as removing primers, reversing etc
-			fil->miniCheckDNA(tmpDNA, match2);
+            // These are dereplication HQ reads: barcode/primer removal and
+            // orientation have already been applied. Do not cut their 5' ends again.
 
 
 			match = make_shared<DNAunique> (tmpDNA, -1);
 			if (match2 != NULL) {
 				match->attachPair(make_shared<DNAunique>(match2, -1));
-				//merge read
-				merger->findSeedForMerge(match, match2);
-				if (match->merge_seed_pos_ >= 0) {
+                // Report overlap detection separately from final merged filtering.
+                if (merger) {
+                    ++seedMergeAttempts_;
+                    if (merger->findSeedForMerge(match, match2)) { ++seedMergeSuccesses_; }
+                }
+                if (merger && match->merge_seed_pos_ >= 0) {
 					shared_ptr<DNA> dM = merger->merge(match, match2);
-					if (dM != nullptr) {
+					if (dM && fil->checkMergedDNA(dM, true)) {
 						match->attachMerge(make_shared<DNAunique>(dM, -1));
 					}
 				}
@@ -2155,20 +2140,15 @@ void UClinks::writeNewSeeds(OutputStreamer* MD, Filters* fil,
 			string oriH = d->getShortId(); removeSizeStr(oriH);
 			links << newH << "\t" << oriH << endl;
 		}
+		// Emit the selected consensus once, in the requested output format.
+		if (paired == 2 && b_merge_pairs_optiSeed_ && MD->saveForWrite_merge(d, newH, 0, false)) {
+			continue;
+		}
 		//takeOver id_ to allow for later linkup with cluster
-		if (paired == 2) {
-			//first check for readmerging
+		if (paired == 2 && !MD->singleSeedFasta()) {
 			d->setPassed(true);
 			d->setNewID(newH + ".1");
 
-			if (b_merge_pairs_optiSeed_ ){//&& bestDNA2[i] != NULL) {
-				// Route each OTU seed to exactly one output class.  A failed merge
-				// must fall through to paired/singleton output without first writing
-				// R1 to the merged file; a successful merge is already fully written.
-				if (MD->saveForWrite_merge(d, newH, 0, false)) {
-					continue;
-				}
-			}
 
 			int Cstream(100);
 			if (d2 != nullptr) {
@@ -2268,6 +2248,9 @@ void UClinks::printStats(ostream& os){
 	}
 	os << "Found " << numCls << " seeds of " << oriKey.size() << " OTU's in " << uclines << " mappings." << endl;
 	os << "Of these, " << merges << " were merged paired reads.\n";
+    if (seedMergeAttempts_ > 0) {
+        os << seedMergeSuccesses_ << "/" << seedMergeAttempts_ << " seed candidates had a paired-read overlap.\n";
+    }
 
 	//sort vectors
 	std::sort(lengths.begin(), lengths.end());

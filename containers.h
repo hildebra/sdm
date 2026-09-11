@@ -396,7 +396,7 @@ public:
 	~Dereplicate();
 	int getHighestBCoffset() { return (int)barcode_number_to_sample_id_.size(); }
 	//bool addDNA(shared_ptr<DNA> dna);
-	bool addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2);
+	bool addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* filter = nullptr);
 	string writeDereplDNA(Filters* fil, string SRblock);
 	void writeLog(string logF, string rep) {
 		ofstream logx;
@@ -411,7 +411,11 @@ public:
 	bool DerepPerSR() { return b_derepPerSR; }
 	bool mergeDereRead() {return b_merge_pairs_derep_;	}
 	//void attachMerger(ReadMerger* m) {if (merger != nullptr) { delete merger; } merger = m;}
-	void activateMerger() { if (merger == nullptr) { merger = DBG_NEW ReadMerger(); } }
+	void activateMerger(bool collectStats = false) {
+		if (merger == nullptr) { merger = DBG_NEW ReadMerger(collectStats); }
+		else { merger->setStatsTaken(collectStats); }
+	}
+	void addMergeStatsTo(ReadMerger& target) { target.addRMstats(merger); }
 	void printMergeStats(string R1, string R2) {
 		if (merger != nullptr) {
 			if (R1 != "") { merger->printMergeHisto(R1); }
@@ -432,19 +436,20 @@ private:
 		int mergePos;
 		int sample_id;
 		bool pass;
+		size_t shard;
 	};
 
-	struct ThreadLocalBatch {
-		ThreadLocalBatch() : owner(nullptr), registered(false) {}
+	struct alignas(64) ThreadLocalBatch {
+		ThreadLocalBatch() : owner(nullptr) {}
 		std::vector<PendingDerepEntry> pending;
 		Dereplicate* owner;
-		bool registered;
+		std::atomic<bool> active{false};
 	};
 
-	bool apply_pending_entry_locked(const PendingDerepEntry& pending);
+	bool apply_pending_entry_locked(const PendingDerepEntry& pending, HashDNA& tracker);
 	void flush_batch(ThreadLocalBatch& batch);
 	void flush_all_batches();
-	std::shared_ptr<ThreadLocalBatch> get_or_create_thread_batch();
+	ThreadLocalBatch& get_or_create_thread_batch();
 
 	//is the exact derep string fullfilled?
 	inline bool pass_deprep_conditions(shared_ptr<DNAunique>);
@@ -452,7 +457,8 @@ private:
 	//vector<shared_ptr<DNAunique>> Dnas;
 	//vector<shared_ptr<DNAunique>> DNApair;
 	vector<string> barcode_number_to_sample_id_;
-	HashDNA tracker_;
+	struct Shard { std::mutex mutex; HashDNA tracker; };
+	std::vector<std::unique_ptr<Shard>> shards_;
 	//vector<int> counts;
 	string outfile;
 	bool b_usearch_fmt, b_singleLine;
@@ -482,19 +488,35 @@ private:
 
 	Filters* mainFilter;
 
-	mutable std::shared_mutex drpMTX_;
 	mutable std::mutex batch_registry_mtx_;
-	std::vector<std::weak_ptr<ThreadLocalBatch>> batch_registry_;
-	std::atomic<uint32_t> active_adddna_{ 0 };
+	std::vector<std::shared_ptr<ThreadLocalBatch>> batch_registry_;
+	// Lifecycle operations serialize with each other; producers announce activity
+	// on their own cache line so unrelated reads do not contend on one counter.
+	std::mutex lifecycle_operation_mtx_;
+	struct LifecyclePause {
+		explicit LifecyclePause(Dereplicate& owner);
+		~LifecyclePause();
+		Dereplicate& owner;
+		std::unique_lock<std::mutex> operationLock;
+	};
+	struct ActiveAddGuard {
+		ActiveAddGuard(Dereplicate& owner, ThreadLocalBatch& batch);
+		~ActiveAddGuard();
+		Dereplicate& owner;
+		ThreadLocalBatch& batch;
+	};
+	void release_batch_activity(ThreadLocalBatch& batch);
 	std::atomic<uint64_t> srch_seq_total_len_{ 0 };
 	std::atomic<uint64_t> srch_seq_count_{ 0 };
-	std::atomic<bool> lifecycle_pause_{ false };
+	alignas(64) std::atomic<bool> lifecycle_pause_{ false };
 	mutable std::mutex lifecycle_wait_mtx_;
 	mutable std::condition_variable lifecycle_wait_cv_;
 	static constexpr size_t kThreadBatchFlushThreshold = 256;
 
 	inline size_t tracker_size_total() const {
-		return tracker_.size();
+		size_t size = 0;
+		for (const auto& shard : shards_) { size += shard->tracker.size(); }
+		return size;
 	}
 
 	bool searchWithMerg;
@@ -541,7 +563,11 @@ public:
 	void writeOTUmatrix(string outfile);
 	void resetInputUcUp(){ UpUcFnd = false; }
 	void set2UC(){ UPARSE8up = false; }
-	void activateMerger() { if (merger == nullptr) { merger = DBG_NEW ReadMerger(); } }
+	void activateMerger(bool collectStats = false) {
+		if (merger == nullptr) { merger = DBG_NEW ReadMerger(collectStats); }
+		else { merger->setStatsTaken(collectStats); }
+	}
+	void addMergeStatsTo(ReadMerger& target) { target.addRMstats(merger); }
 	//void attachMerger(ReadMerger* merg) {if (merger != nullptr) { delete merger; } merger = merg;}
 	void setRefMode(){ RefDBmode = true; RefDBotuStart = (int)oriKey.size(); }//from now on only count adds or ref DB seqs
 private:
@@ -607,6 +633,8 @@ private:
 	bool RefDBmode;
 	int RefDBotuStart;
 	bool SeedsAreWritten;
+	uint64_t seedMergeAttempts_ = 0;
+	uint64_t seedMergeSuccesses_ = 0;
 	//count matrix related
 	vector < vector <matrixUnit>> OTUmat;
 	unordered_map<string, int> SmplIDs;
