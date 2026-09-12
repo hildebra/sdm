@@ -174,7 +174,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.45: 11.9.26: emit full selected merged seeds in the main OTU FASTA; avoid repeated seed quality trimming.
 //3.46: restore full-length HQ intermediates and ignore TruncateSequenceLength for all seed-extension outputs.
 //3.47: restore historical truncation scope: full merged outputs and legacy ordinary-read minimum adjustment.
-static const char* sdm_version = "3.47";
+//3.48: 12.9.26: automatic 100% prefix dereplication with a fixed-length fast path;
+//      cap merged clustering keys for UPARSE while retaining full merged outputs and HQ mates.
+static const char* sdm_version = "3.48";
 static const char* sdm_status = "beta";
 
 

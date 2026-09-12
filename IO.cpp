@@ -240,6 +240,9 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 			}
 		}
 		//if (isReversed) { tdn[1]->reverse_compliment(); }
+        if (!dualBCs && !read2->sampleBarcode().empty()) {
+            tagIdx2 = curFil->detectCutBC(read2, true);
+        }
 		MD->analyzeDNA(read2, -1, 1, tagIdx2, curThread);
 		ch2 = read2->isGreenQual();
 	}
@@ -421,7 +424,7 @@ bool read_sequences(OutputStreamer* MD,
  //ini blocks of empty strings for later reuse..
 	int tmpBlockSize = runtimeOpts.iniBlockSize;
 
-   qual_score fastqVer = 33;
+   qual_score fastqVer = IS->fastQscore();
 
 	// Probe one block first and adapt batch size for short reads to reduce task scheduling overhead.
 	// This keeps behavior unchanged for longer reads while increasing reads/task when records are tiny.
@@ -431,6 +434,7 @@ bool read_sequences(OutputStreamer* MD,
 		cdbg("task batch size probe");
 		multi_tmp_lines probe(tmpBlockSize);
 		bool probeCont = IS->getDNAlines(&probe, tmpBlockSize, MIDuse, true);
+        fastqVer = IS->fastQscore() == 0 ? 33 : IS->fastQscore();
 		if (probeCont && probe.size() > 0 && probe.tmp[0].size() > 0 && probe.tmp[0][0].size() > 1) {
 			const size_t probeReadLen = probe.tmp[0][0][1].size();
 			if (probeReadLen > 0) {
@@ -614,6 +618,10 @@ bool readCmdArgs(int argc, char* argv[]){
 	setDefault("-GoldenAxeMaxAmpli", "0");
 	setDefault("-DNAseedSelectionClassic", "0");
 	setDefault("-i_MID_fastq", "");
+    setDefault("-cramRef", "");
+    setDefault("-htsBarcode", "inline");
+    if ((*cmdArgs)["-htsBarcode"] != "inline" && (*cmdArgs)["-htsBarcode"] != "BC")
+        throw std::runtime_error("-htsBarcode must be inline or BC");
 	//set to default (empty)
 	setDefault("-OTU_fallback", "");
 	setDefault("-otu_matrix", "");
@@ -654,6 +662,13 @@ bool readCmdArgs(int argc, char* argv[]){
 			}
 			(*cmdArgs)[fmt] = (*cmdArgs)["-i"];
 		}
+        for (const string key : {"-i_sam", "-i_bam", "-i_cram"}) {
+            if (cmdArgs->contains(key)) {
+                if (cmdArgs->contains("-i_fastq") || cmdArgs->contains("-i_fna"))
+                    throw std::runtime_error("Specify only one input format");
+                cmdArgs->set("-i_fastq", cmdArgs->get(key));
+            }
+        }
 		if (cmdArgs->find("-i_fastq")  == cmdArgs->end()){ // fasta + quality format
 			if (cmdArgs->find("-i_fna")  == cmdArgs->end()){
 				//cerr<<"Fasta not supplied. \nPlease give the path to your fasta file as command line argument:\n  -i_fna <yourFastaFile>\n";exit(2);
@@ -1369,6 +1384,9 @@ void printCmdsHelp(){//actually these are flags
 		 << " -i_path <path>                 Directory or path containing input files\n"
 		 << " -i <file>                      Input sequence file; format is autodetected\n"
 		 << " -i_fastq <file>                FASTQ input\n"
+         << " -i_sam/-i_bam/-i_cram <file>   Alignment input (requires HTSlib); -i detects these too\n"
+         << " -cramRef <reference.fa>        Optional CRAM reference; default: none supplied\n"
+         << " -htsBarcode <inline|BC>        Inline barcode (default), or exact BC:Z tag matching\n"
 		 << " -i_fna <file>                  FASTA input\n"
 		 << " -i_qual <file>                 Quality input for FASTA; defaults to <fasta>.qual_\n"
 		 << " -i_MID_fastq <file>            FASTQ file containing MID sequences\n"
@@ -1416,7 +1434,8 @@ void printCmdsHelp(){//actually these are flags
 		 << " -derep_reserve <n>             Reserve capacity for dereplication\n"
 		 << " -derepPerSR <0|1>              Dereplicate per sample/read\n"
 		 << " -derep_format <text>           Dereplication output format\n"
-		 << " -derepSrchLen <n>              Dereplication search length (default: minSeqLength, otherwise 150)\n"
+		 << " -derepSrchLen <n>              Explicit dereplication search length (-1: full logical sequence)\n"
+		 << " -derepPrefix <auto|0|1>        Auto-select, disable, or force 100% prefix matching\n"
 		 << " -merge_pairs_filter/-merge_pairs_seed/-merge_pairs_demulti <0|1> Enable pair merging\n"
 		 << " -merge_pairs_derep <0|1>       Merge pairs during dereplication\n"
 		 << " -noSearchWithMerge <value>     Disable search when pair merging is enabled\n"
@@ -1496,8 +1515,10 @@ void printOptionHelp(){
 	helpOptionFile += "CheckForMixedPairs\tF\n";
 	helpOptionFile += "CheckForReversedSeqs\tF\n";
 	helpOptionFile += "# Paired read identifiers are always validated for synchronization.\n\n";
-	helpOptionFile += "# Dereplication. If omitted, derepSrchLen defaults to minSeqLength.\n";
-	helpOptionFile += "derepSrchLen\t250\n\n";
+	helpOptionFile += "# Dereplication: auto selects prefix matching for variable clustering lengths.\n";
+	helpOptionFile += "derepPrefix\tauto\n";
+	helpOptionFile += "# Explicit positive derepSrchLen retains length-matched keys; -1 uses full logical sequences.\n";
+	helpOptionFile += "#derepSrchLen\t250\n\n";
 	helpOptionFile += "# Set TechnicalAdapter to an adapter sequence to remove it. Do not include\n";
 	helpOptionFile += "# this line when no technical adapter should be removed.\n";
 	helpOptionFile += "# TechnicalAdapter\tTCAG\n\n";
@@ -1521,7 +1542,7 @@ void printMapHelp(){
 		 << " - BarcodeSequence: identify samples from a read barcode (IUPAC bases are supported).\n"
 		 << " - BarcodeSequence plus Barcode2ndPair: identify samples using dual indexes.\n"
 		 << " - SampleIDinHead: identify samples from a matching string in the FASTA/FASTQ header.\n"
-		 << " - In -i_path mode, unique fastqFile or fnaFile entries can identify one sample per file.\n"
+		 << " - In -i_path mode, unique fastqFile, alignmentFile or fnaFile entries can identify one sample per file.\n"
 		 << " Use one identification mode consistently across the mapping file.\n\n";
 	cout << "Recognized columns:\n"
 		 << " Sample identity\n"
@@ -1539,13 +1560,17 @@ void printMapHelp(){
 		 << "  HetSpacerFwd         Forward heterogeneity spacer sequence.\n"
 		 << "  HetSpacerRev         Reverse heterogeneity spacer sequence. Both HetSpacer columns are required to enable explicit spacer handling.\n"
 		 << " Input files (used with -i_path)\n"
-		 << "  fastqFile            Relative FASTQ path.\n"
+		 << "  fastqFile            Relative FASTQ path; comma-separated R1,R2 for paired reads.\n"
+		 << "  alignmentFile        One SAM/BAM/CRAM path; leave fastqFile empty for this sample.\n"
 		 << "  fnaFile              Relative FASTA path.\n"
 		 << "  qualFile             Relative FASTA-quality path; if absent, sdm derives <fasta-base>.qual_.\n"
 		 << "  MIDfqFile            Relative FASTQ path containing MID sequences.\n"
 		 << " Dereplication\n"
 		 << "  derepMin             Empty or a non-negative minimum copy count for this sample.\n\n";
-	cout << "When using -i_path, the mapping file must contain either fastqFile or fnaFile. File paths are resolved relative to -i_path.\n\n";
+	cout << "When using -i_path, the mapping file must contain fastqFile, alignmentFile or fnaFile. File paths are resolved relative to -i_path.\n\n";
+	cout << "With alignmentFile present, each row must fill exactly one of fastqFile or alignmentFile. Both columns may appear in a mixed FASTQ/alignment map.\n";
+	cout << "Alignment rows cannot use MIDfqFile or qualFile. Use a separate run for FASTA inputs.\n";
+	cout << "Paired alignment files must be query-name sorted; singleton files may have any order. Use -cramRef for an external CRAM reference.\n\n";
 	cout << "Examples (tabs are shown as spaces for readability; use real tab characters in the file):\n"
 		 << "# Single barcode\n"
 		 << "#SampleID    BarcodeSequence    ForwardPrimer\n"
@@ -1556,13 +1581,17 @@ void printMapHelp(){
 		 << "sample_1     ACGTACGT           GATCAAGT\n\n"
 		 << "# One sample per FASTQ file with -i_path reads\n"
 		 << "#SampleID    fastqFile\n"
-		 << "sample_1     sample_1.fastq.gz\n";
+		 << "sample_1     sample_1.fastq.gz\n\n"
+		 << "# One sample per SAM/BAM/CRAM file with -i_path reads\n"
+		 << "#SampleID    alignmentFile\n"
+		 << "sample_1     sample_1.bam\n";
 
 }
 void printVersion(){
     cout << "sdm " << sdm_version << " " << sdm_status << endl;
 	cout << "compiled on: " << __DATE__ << " at " << __TIME__ << endl;
 	cout << "compiled with C++ v: " << __cplusplus << endl;
+    cout << "HTSlib: " << HtsInput::version() << endl;
 
 }
 

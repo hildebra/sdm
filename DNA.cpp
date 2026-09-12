@@ -124,8 +124,9 @@ DNA::DNA(const vector<string>& fas) :DNA() {
 }
 
 DNA::DNA(const vector<string>& fq, qual_score fastQver) :DNA() {
+    if (fq.size() == 5) { sample_barcode_ = fq[4]; fastQver = 33; }
 	//string line;
-	if (fq.size() != 4 || fq[0].length() == 0) { delself(); return; }
+	if ((fq.size() != 4 && fq.size() != 5) || fq[0].length() == 0) { delself(); return; }
 	if (fq[0][0] != '@') {
 		throw std::runtime_error("Malformed FASTQ header: " + fq[0]);
 	}
@@ -156,7 +157,8 @@ DNA::DNA(const vector<string>& fq, qual_score fastQver) :DNA() {
 
 // Move-aware constructors (definitions)
 DNA::DNA(vector<string>&& fq, qual_score fastQver) :DNA() {
-	if (fq.size() != 4 || fq[0].length() == 0) { delself(); return; }
+    if (fq.size() == 5) { sample_barcode_ = std::move(fq[4]); fastQver = 33; }
+	if ((fq.size() != 4 && fq.size() != 5) || fq[0].length() == 0) { delself(); return; }
 	if (fq[0][0] != '@') {
 		throw std::runtime_error("Malformed FASTQ header: " + fq[0]);
 	}
@@ -208,31 +210,6 @@ DNA::DNA(vector<string>&& fas) :DNA() {
 	avg_qual_ = -1.f;
 }
 
-/*
-DNA::DNA(FastxRecord* FR, qual_score & minQScore, qual_score & maxQScore, qual_score fastQver) :DNA(){
-	id_ = FR->header.substr(1);
-	sequence_=FR->sequence;
-
-
-	qual_.resize(FR->quality.length(), 0);
-	uint qcnt(0); uint lline = (uint)FR->quality.length();
-	for (; qcnt < lline; qcnt++) {
-		qual_score t((qual_score)FR->quality[qcnt] - fastQver);
-		if (minQScore > t) {
-			minQScore = t;
-			if (minQScore < 0) {
-			}
-		}
-		else if (maxQScore < t) {
-			maxQScore = t;
-		}
-
-
-		qual_[qcnt] = t;
-
-	}
-}
-*/
 
 string DNA::getPositionFreeId() { // remove /1 /2 #1:0 etc
 	string s = id_;
@@ -1367,11 +1344,11 @@ bool DNAunique::betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2) {
 
 void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
 	shared_ptr<DNA> dnaM,
-	int sample_id, bool b_derep_as_fasta_, bool collectMergedQualities) {
+	int sample_id, bool b_derep_as_fasta_, bool collectMergedQualities, bool markDereplicated) {
 	if (dna == nullptr) {
 		return;
 	}
-	dna->setDereplicated();
+	if (markDereplicated) { dna->setDereplicated(); }
    const bool doCounterUpdate = (sample_id >= 0);
 	const bool doQualityUpdate = !b_derep_as_fasta_;
 	const bool doReplacementCheck = dna->isGreenQual();
@@ -2028,8 +2005,8 @@ shared_ptr<DNA> str2DNA(vector<string>&& in, bool keepPairHD, int fastQver, int 
 //*******************************************
 
 
-void DNAuniqSet::addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaM, int MrgPos1, int sample_id, bool b_derep_as_fasta_) {
-	dna->setDereplicated();//dna->setYellowQual(false);
+void DNAuniqSet::addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaM, int MrgPos1, int sample_id, bool b_derep_as_fasta_, bool markDereplicated) {
+	if (markDereplicated) { dna->setDereplicated(); }
 	shared_ptr<DNAunique> new_dna_unique = make_shared<DNAunique>(dna, sample_id);
 	new_dna_unique->saveMem();
 	if (new_dna_unique == nullptr) { return; }
@@ -2065,6 +2042,20 @@ uint64_t DNAuniqSet::totalSum() const {
         total += count;
     }
     return total;
+}
+
+void DNAunique::absorbDerepEvidence(const shared_ptr<DNAunique>& other, bool collectQualities) {
+    if (collectQualities) {
+        sumQualities(other);
+        sumMergeQualities(other);
+    }
+    transferOccurence(other);
+}
+
+void DNAuniqSet::addEvidenceTo(const shared_ptr<DNAunique>& target, bool collectQualities) const {
+    for (const auto& entry : DNUs) {
+        if (entry.second) { target->absorbDerepEvidence(entry.second, collectQualities); }
+    }
 }
 
 shared_ptr<DNAunique> DNAuniqSet::best(bool addCnts, bool collectQualities) {
@@ -2107,10 +2098,6 @@ void DNAuniqSet::setBest(bool addCnts, bool collectQualities) {
         if (!entry.second || entry.first == winner->first) { continue; }
         const int64_t distance = static_cast<int64_t>(entry.first) - winner->first;
         if (!addCnts && distance != -1 && distance != 1) { continue; }
-        if (collectQualities) {
-            bestDNU->sumQualities(entry.second);
-            bestDNU->sumMergeQualities(entry.second);
-        }
-        bestDNU->transferOccurence(entry.second);
+        bestDNU->absorbDerepEvidence(entry.second, collectQualities);
     }
 }

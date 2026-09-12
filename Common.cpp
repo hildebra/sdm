@@ -1,5 +1,6 @@
 #include "Common.h"
 #include "InputFileStream.h"
+#include "HtsInput.h"
 #include <algorithm>
 #include <iomanip>
 #include <cstring>
@@ -363,6 +364,8 @@ string detectSeqFmt(const string inF) {
     for (size_t i = 0; i < tfasP.size(); i++) {
         vector<string> tfas = splitByCommas(tfasP[i]);
         string fileS = normalizeInputPath(tfas[0]);
+        const string htsFormat = HtsInput::detectFormat(fileS);
+        if (!htsFormat.empty()) return htsFormat;
         std::unique_ptr<std::istream> fnax;
         string file_type = "test file";
         string tmp("");

@@ -242,7 +242,8 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	//***************************************
 	//read options
 	const bool explicitDerepSearchLength = cmdArgs->contains("-derepSrchLen");
-	bool derepSrchLenSet = explicitDerepSearchLength;
+	explicitDerepSearchLength_ = explicitDerepSearchLength;
+	const bool explicitDerepPrefix = cmdArgs->contains("-derepPrefix");
 	ifstream opt;
 	opt.open(optF.c_str(), ios::in);
 	if (!opt || optF == "") {
@@ -288,7 +289,9 @@ Filters::Filters(OptContainer* cmdArgs1) :
 			maxL = atoi(segs2.c_str());
 		} else if (strcmp(segs.c_str(), "derepSrchLen") == 0) {
 			if (!explicitDerepSearchLength) { (*cmdArgs)["-derepSrchLen"] = segs2; }
-			derepSrchLenSet = true;
+			explicitDerepSearchLength_ = true;
+        } else if (strcmp(segs.c_str(), "derepPrefix") == 0) {
+            if (!explicitDerepPrefix) { (*cmdArgs)["-derepPrefix"] = segs2; }
 		} else if (strcmp(segs.c_str(), "minAvgQuality") == 0) {
 			if (addMod) {
 				alt_min_q = (float)atof(segs2.c_str());
@@ -519,9 +522,8 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	// sequences and seed extension still use the configured, uncapped minimum.
 	const float filteredMinL = !b_optiClusterSeq && TruncSeq > 0 && minL > 1.f
 		? std::min(minL, (float)TruncSeq) : minL;
-	if (!derepSrchLenSet && filteredMinL > 0) {
+	if (!explicitDerepSearchLength_ && filteredMinL > 1.f) {
 		(*cmdArgs)["-derepSrchLen"] = to_string((int)filteredMinL);
-		cout << "Setting dereplication search length to minSeqLength: " << (*cmdArgs)["-derepSrchLen"] << endl; 
 	}
 
 	opt.close();
@@ -557,6 +559,22 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	}
 }
 
+
+int Filters::fixedDereplicationLength(bool useMergedSearch) const {
+    // Only an absolute minimum and an equal upper bound guarantee fixed keys.
+    if (!b_doFilter || min_l_p >= 0.f || min_l <= 0) { return 0; }
+    const int cap = dereplicationLengthLimit();
+    int upper = max_l > 0 ? max_l : std::numeric_limits<int>::max();
+    if (cap > 0) { upper = std::min(upper, cap); }
+    if (upper != min_l) { return 0; }
+    if (useMergedSearch && pairedSeq != 1) {
+        // Merged products retain their full length, but clustering keys share
+        // the ordinary-read cap. A rejected merge falls back to the R1 key.
+        const int mergedMinimum = cap > 0 ? std::min(min_l_merged, cap) : min_l_merged;
+        if (mergedMinimum != upper) { return 0; }
+    }
+    return upper;
+}
 
 void Filters::addDNAtoCStats(const shared_ptr<DNA>& d, int Pair) {
 	//here should be the only place to count Barcodes!
@@ -705,7 +723,7 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	FQWthr(of->FQWthr), EWthr(of->EWthr),
 	alt_FQWthr(of->alt_FQWthr), alt_EWthr(of->alt_EWthr),
 	PEheaderVerWr(of->PEheaderVerWr), TrimStartNTs(of->TrimStartNTs),
-	TruncSeq(of->TruncSeq),
+	explicitDerepSearchLength_(of->explicitDerepSearchLength_), TruncSeq(of->TruncSeq),
 	iniSpacer(of->iniSpacer), userReqFastqVer(of->userReqFastqVer),
 	userReqFastqOutVer(of->userReqFastqOutVer), maxAccumQP(of->maxAccumQP),
 	alt_maxAccumQP(of->alt_maxAccumQP),
@@ -2034,6 +2052,27 @@ int Filters::findTag(const shared_ptr<DNA>& d, string& presentBC, int& c_err,
 
 //somewhat redundant with findTag function..
 int Filters::detectCutBC(const shared_ptr<DNA>& d, bool isPair1) {
+    if (!d->sampleBarcode().empty()) {
+        // BC is a sample/library tag, already in sequencing orientation. Match
+        // the complete index (or index pair), without scanning or cutting SEQ.
+        int idx = -1;
+        if (!bDoBarcode2) {
+            const auto found = barcodes1_.find(d->sampleBarcode());
+            if (found != barcodes1_.end()) idx = found->second;
+        } else {
+            for (size_t i = 0; i < Barcode.size(); ++i) {
+                if (Barcode[i] + "-" + Barcode2[i] != d->sampleBarcode()) continue;
+                if (idx >= 0) throw std::runtime_error("Ambiguous dual barcode in mapping file");
+                idx = static_cast<int>(i);
+            }
+        }
+        d->setBCnumber(idx, BCoffset);
+        if (idx >= 0) {
+            d->setBarcodeCut(); // No inline barcode remains to search past for primers.
+            BCintoHead(idx, d, d->sampleBarcode(), 0, isPair1);
+        }
+        return idx;
+    }
 	//seq too short for BC
 	if (d->length() < minBCLength1_) {
 		return -1;
@@ -2869,7 +2908,7 @@ bool Filters::readMap() {//core routine to read map info
 	auto countTsvColumns = [](const string& value) {
 		return value.empty() ? 0 : 1 + static_cast<int>(std::count(value.begin(), value.end(), '\t'));
 	};
-	vector<string> terms(16); terms[0] = "SampleID";
+	vector<string> terms(17); terms[0] = "SampleID";
 	terms[1] = "BarcodeSequence"; terms[2] = "LinkerPrimerSequence";
 	terms[3] = "ReversePrimer"; terms[4] = "fastqFile";
 	terms[5] = "fnaFile"; terms[6] = "qualFile";
@@ -2878,6 +2917,7 @@ bool Filters::readMap() {//core routine to read map info
 	terms[11] = "Barcode2ndPair";
 	terms[12] = "HetSpacerFwd"; terms[13] = "HetSpacerRev";
 	terms[14] = "derepMin"; terms[15] = "SequencingRun";
+	terms[16] = "alignmentFile";
 	auto looksLikeMapHeader = [&terms](const string& candidate) {
 		stringstream headerStream(candidate);
 		string field;
@@ -2950,6 +2990,8 @@ bool Filters::readMap() {//core routine to read map info
 	in.clear();
 	in.seekg(0, ios::beg);
 
+	// Keep alignment paths separate until each sample row has been validated.
+	vector<string> alignmentFiles(cnt, "");
 	//extract MAP content
 	cnt = 0;
 	headerSeen = false;
@@ -2976,10 +3018,10 @@ bool Filters::readMap() {//core routine to read map info
 		string segments;
 		stringstream ss;
 		ss << line;
-		int tbcnt = 0;
-
-		//(*cmdArgs)["-i_MID_fastq"]
-		while (getline(ss, segments, '\t')) {
+		// getline alone skips a trailing empty cell, which would shift file/sample indices.
+		for (int tbcnt = 0; tbcnt < ini_ColPerRow; ++tbcnt) {
+			segments.clear();
+			getline(ss, segments, '\t');
 			trim(segments);
 			if (cnt == 0 && headerSeen) { //search for header
 				//Primer, BarcodeSequence, LinkerPrimerSequence
@@ -3000,13 +3042,41 @@ bool Filters::readMap() {//core routine to read map info
 			else { //read data into entries
 				for (uint k = 0; k < terms.size(); k++) {
 					if (termIdx[k] == tbcnt) {
-						extractMap(k, cnt - 1, tbcnt, segments, hasQualityColumn);
+						if (k == 16) { alignmentFiles[cnt - 1] = segments; }
+						else { extractMap(k, cnt - 1, tbcnt, segments, hasQualityColumn); }
 					}
 				}
 			}
-			tbcnt++;
 		}
 		cnt++;
+	}
+
+	if (termIdx[16] != -1) {
+		FastqF.resize(SampleID.size(), "");
+		for (size_t row = 0; row < SampleID.size(); ++row) {
+			const string context = "Mapping sample '" + SampleID[row] + "': ";
+			const auto hasEntry = [row](const vector<string>& entries) {
+				return row < entries.size() && !entries[row].empty();
+			};
+			if (hasEntry(FastaF))
+				throw std::runtime_error(context + "fnaFile inputs must use a separate mapping run from alignmentFile inputs");
+			if (FastqF[row].empty() == alignmentFiles[row].empty())
+				throw std::runtime_error(context + "provide exactly one of fastqFile or alignmentFile; leave the other cell empty");
+			if (hasEntry(QualF))
+				throw std::runtime_error(context + "qualFile is only supported with fnaFile inputs");
+			if (alignmentFiles[row].empty()) { continue; }
+			if (hasEntry(MIDfqF))
+				throw std::runtime_error(context + "alignmentFile cannot be combined with MIDfqFile");
+			if (alignmentFiles[row].find(',') != string::npos)
+				throw std::runtime_error(context + "alignmentFile accepts one SAM/BAM/CRAM file; both mates belong in that file");
+			const string format = detectSeqFmt(path + alignmentFiles[row]);
+			if (format != "-i_sam" && format != "-i_bam" && format != "-i_cram")
+				throw std::runtime_error(context + "alignmentFile requires SAM/BAM/CRAM input: " + alignmentFiles[row]);
+			// Reuse the existing grouping, per-sample assignment and input detection.
+			FastqF[row] = alignmentFiles[row];
+		}
+		FastaF.clear();
+		QualF.clear();
 	}
 	//check some prerequisites 
 	if (HeadSmplID.size() == 0 && Barcode.size() == 0) {
@@ -3014,8 +3084,8 @@ bool Filters::readMap() {//core routine to read map info
 		exit(2);
 	}
 	if (pathMode) {
-		if (termIdx[5] == -1 && termIdx[4] == -1) {
-			cerr << "The defined input through a directory (-i_path) requries either \"fnaFile\" or \"fastqFile\" columns in the mapping file. \nAborting..\n";
+		if (termIdx[5] == -1 && termIdx[4] == -1 && termIdx[16] == -1) {
+			cerr << "The defined input through a directory (-i_path) requires \"fnaFile\", \"fastqFile\" or \"alignmentFile\" columns in the mapping file. \nAborting..\n";
 			exit(55);
 		}
 	}
@@ -3393,10 +3463,10 @@ void Filters::extractMap(int k, int cnt, int tbcnt, string& segments,
 		trim(segments);
 		FastaF.push_back(segments);
 		if (!hasQualityColumn) {//code to create artificial quality file name
-			string newQ = segments;
-			size_t pos = newQ.find_last_of(".");
-			newQ = newQ.substr(0, pos);
-			newQ += string(".qual_");
+			string newQ;
+			if (!segments.empty()) {
+				newQ = segments.substr(0, segments.find_last_of(".")) + ".qual_";
+			}
 			QualF.push_back(newQ);
 		}
 		break;
@@ -3477,7 +3547,7 @@ void Filters::extractMap(int k, int cnt, int tbcnt, string& segments,
 	}
 
 	if (k == 6 || k == 5) {//a qual_ pushback was "" (was empty); takeOver
-		if (QualF.size() == FastaF.size() && QualF.back() == "") {
+		if (!FastaF.empty() && QualF.size() == FastaF.size() && QualF.back().empty() && !FastaF.back().empty()) {
 			string newQ = FastaF.back();
 			size_t pos = newQ.find_last_of(".");
 			newQ = newQ.substr(0, pos);
@@ -3569,6 +3639,10 @@ void Filters::printHisto(ostream& give, int which, int set) {
 	}
 }
 void Filters::FileEssentials(filesStr& files, OptContainer* cmdArgs) {//unordered_map<string, int>& UFF) {
+    files.cramRef = cmdArgs->get("-cramRef");
+    files.htsBarcode = cmdArgs->get("-htsBarcode") == "BC";
+    if (files.htsBarcode && (bDoHeadSmplID || !bDoBarcode || bOneFileSample))
+        throw std::runtime_error("-htsBarcode BC requires a BarcodeSequence mapping (not header or per-file assignment)");
 
 	files.FastaF = this->getFastaFiles();
 	files.QualF = this->getQualFiles();
@@ -3584,7 +3658,7 @@ void Filters::FileEssentials(filesStr& files, OptContainer* cmdArgs) {//unordere
 
 
 	// Set folder path
-	if (cmdArgs->find("-i_path") != cmdArgs->end() && (*cmdArgs)["-i_path"].length() > 2) {
+	if (cmdArgs->find("-i_path") != cmdArgs->end() && (*cmdArgs)["-i_path"].length() >= 1) {
 		files.path = (*cmdArgs)["-i_path"] + string("/");
 	}
 
@@ -3596,7 +3670,7 @@ void Filters::FileEssentials(filesStr& files, OptContainer* cmdArgs) {//unordere
 	else { // If no files.FastaF present assume there are Fastq files
 		files.fastXtar = files.FastqF;
 		if (files.FastqF.size() == 0) { // no Fasta and no Fastq files -> abort
-			cerr << "No FastQ or Fasta file given.\n  Aborting..\n";
+			cerr << "No FASTQ, FASTA or SAM/BAM/CRAM file given.\n  Aborting..\n";
 			exit(12);
 		}
 	}

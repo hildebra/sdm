@@ -246,50 +246,28 @@ Dereplicate::ThreadLocalBatch& Dereplicate::get_or_create_thread_batch() {
 }
 
 bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending, HashDNA& tracker) {
-	auto tracker_it = tracker.find(pending.srchSeq);
-	if (tracker_it != tracker.end()) {
-		std::unique_ptr<DNAuniqSet>& dnuSet = tracker_it->second;
-		if (!dnuSet) {
-			dnuSet = std::make_unique<DNAuniqSet>();
-		}
-		auto dna_unique = dnuSet->find(pending.mergePos);
-		if (dna_unique == dnuSet->end()) {
-			dnuSet->addNewDNAuniq(pending.dna, pending.dna2, pending.dna_merged,
-				pending.mergePos, pending.sample_id, b_derep_as_fasta_);
-		}
-		else {
-			dna_unique->second->matchedDNA(pending.dna, pending.dna2, pending.dna_merged,
-				pending.sample_id, b_derep_as_fasta_, b_merge_pairs_derep_);
-		}
-		return false;
-	}
-
-	if (!pending.pass) {
-		return true;
-	}
-
-	auto [new_it, freshEntry] = tracker.try_emplace(pending.srchSeq, nullptr);
-	std::unique_ptr<DNAuniqSet>& entry = new_it->second;
-	if (!entry) {
-		entry = std::make_unique<DNAuniqSet>();
-	}
-	if (freshEntry) {
-		entry->addNewDNAuniq(pending.dna, pending.dna2, pending.dna_merged,
-			pending.mergePos, pending.sample_id, b_derep_as_fasta_);
-	}
-	else {
-		auto dna_unique = entry->find(pending.mergePos);
-		if (dna_unique == entry->end()) {
-			entry->addNewDNAuniq(pending.dna, pending.dna2, pending.dna_merged,
-				pending.mergePos, pending.sample_id, b_derep_as_fasta_);
-		}
-		else {
-			dna_unique->second->matchedDNA(pending.dna, pending.dna2, pending.dna_merged,
-				pending.sample_id, b_derep_as_fasta_, b_merge_pairs_derep_);
-		}
-	}
-
-	return freshEntry;
+    auto it = tracker.find(pending.srchSeq);
+    if (it == tracker.end() && !pending.pass && !prefixMode_) { return true; }
+    bool fresh = it == tracker.end();
+    if (fresh) { it = tracker.try_emplace(pending.srchSeq, std::make_unique<DNAuniqSet>()).first; }
+    auto& group = it->second;
+    auto representative = group->find(pending.mergePos);
+    // Prefix-mode failures are buffered separately. They become evidence only
+    // if a passing anchor exists at output time; buffering is not acceptance.
+    const bool evidenceOnly = prefixMode_ && !pending.pass;
+    // Deferred failures can never supply an output representative. Keep only
+    // R1 evidence and, when requested for output, merged quality evidence.
+    // Their mates and unused merged products need not be retained in memory.
+    if (representative == group->end()) {
+        group->addNewDNAuniq(pending.dna, evidenceOnly ? nullptr : pending.dna2,
+            evidenceOnly && !b_merge_pairs_derep_ ? nullptr : pending.dna_merged,
+            pending.mergePos, pending.sample_id, b_derep_as_fasta_, !evidenceOnly);
+    } else {
+        representative->second->matchedDNA(pending.dna, evidenceOnly ? nullptr : pending.dna2,
+            evidenceOnly && !b_merge_pairs_derep_ ? nullptr : pending.dna_merged,
+            pending.sample_id, b_derep_as_fasta_, b_merge_pairs_derep_, !evidenceOnly);
+    }
+    return fresh;
 }
 
 void Dereplicate::flush_batch(ThreadLocalBatch& batch) {
@@ -307,7 +285,10 @@ void Dereplicate::flush_batch(ThreadLocalBatch& batch) {
 		if (grouped[i].empty()) { continue; }
 		auto& shard = *shards_[i];
 		std::lock_guard<std::mutex> guard(shard.mutex);
-		for (size_t index : grouped[i]) { apply_pending_entry_locked(batch.pending[index], shard.tracker); }
+        for (size_t index : grouped[i]) {
+            const auto& pending = batch.pending[index];
+            apply_pending_entry_locked(pending, prefixMode_ && !pending.pass ? shard.rejected : shard.tracker);
+        }
 	}
 }
 
@@ -327,6 +308,10 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 		mapF(""), outHQf(""), outHQf_p2(""), outRest(""),
 		mainFilter(mf), searchWithMerg(true)
 {
+    const string prefixOption = cmdArgs->contains("-derepPrefix") ? (*cmdArgs)["-derepPrefix"] : "auto";
+    if (prefixOption != "auto" && prefixOption != "0" && prefixOption != "1") {
+        throw std::invalid_argument("-derepPrefix must be auto, 0, or 1");
+    }
 	const OptContainer::RuntimeOptions& runtimeOpts = cmdArgs->runtime();
 	outfile = (*cmdArgs)["-o_dereplicate"];
 	if (runtimeOpts.noSearchWithMerge) {
@@ -442,6 +427,20 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 		}
 		searchLength = static_cast<int>(parsedLen);
 	}
+    const int fixedLength = mf->fixedDereplicationLength(searchWithMerg);
+    const int clusteringCap = mf->dereplicationLengthLimit();
+    const bool explicitCap = mf->hasExplicitDerepSearchLength() && searchLength > 0;
+    prefixMode_ = prefixOption == "1" || (prefixOption == "auto" && !explicitCap && fixedLength == 0);
+    if (prefixMode_) {
+        searchLength = clusteringCap;
+    } else if (prefixOption == "auto") {
+        if (!explicitCap && fixedLength > 0) { searchLength = fixedLength; }
+        if (clusteringCap > 0 && (searchLength < 0 || searchLength > clusteringCap)) {
+            searchLength = clusteringCap;
+        }
+    }
+    cerr << "Dereplication matching: " << (prefixMode_ ? "100% prefix" : "exact length")
+         << (searchLength > 0 ? " (search cap " + to_string(searchLength) + ")" : " (full logical sequence)") << "\n";
 }
 
 Dereplicate::~Dereplicate() {
@@ -554,6 +553,7 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* fil
 		srchSeqPtr = &srchSeqBuffer;
 	}
 	const string& srchSeq = *srchSeqPtr;
+	if (prefixMode_ && srchSeq.empty()) { return false; }
 
 	threadBatch.pending.push_back(PendingDerepEntry{
 		srchSeq,
@@ -595,6 +595,7 @@ void Dereplicate::reset() {
 	for (auto& shard : shards_) {
 		std::lock_guard<std::mutex> guard(shard->mutex);
 		shard->tracker.clear();
+		shard->rejected.clear();
 	}
 	srch_seq_total_len_.store(0, std::memory_order_release);
 	srch_seq_count_.store(0, std::memory_order_release);
@@ -603,6 +604,65 @@ void Dereplicate::reset() {
 }
 bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r) { 
 	return l->totalSum() > r->totalSum(); 
+}
+
+std::vector<Dereplicate::DerepOutputGroup> Dereplicate::outputGroups(std::vector<uint64_t>& recoveredCounts) {
+    // Caller holds LifecyclePause and has flushed every producer batch.
+    vector<DerepOutputGroup> groups;
+    groups.reserve(tracker_size_total());
+    for (const auto& shard : shards_) {
+        for (const auto& entry : shard->tracker) {
+            assert(entry.second);
+            groups.push_back({entry.second->totalSum(), entry.first, entry.second.get(), {}});
+        }
+    }
+    if (!prefixMode_) { return groups; }
+    auto keyLess = [](const auto& a, const auto& b) { return a.key < b.key; };
+    auto addCount = [](uint64_t& target, uint64_t count) {
+        if (count > std::numeric_limits<uint64_t>::max() - target) {
+            throw std::overflow_error("Dereplication prefix count overflow");
+        }
+        target += count;
+    };
+    sort(groups.begin(), groups.end(), keyLess);
+    vector<DerepOutputGroup> anchors;
+    anchors.reserve(groups.size());
+    // A prefix is adjacent to its first extension. Traverse backwards so its
+    // assignment already names a maximal passing sequence. Conflicting longer
+    // sequences stay separate; an ambiguous prefix goes to the first in
+    // lexicographic order, independently of read arrival or worker scheduling.
+    for (size_t i = groups.size(); i-- > 0;) {
+        if (i + 1 < groups.size() && groups[i + 1].key.starts_with(groups[i].key)) {
+            auto& anchor = anchors.back();
+            addCount(anchor.count, groups[i].count);
+            anchor.members.push_back(groups[i].representative);
+        } else {
+            anchors.push_back(std::move(groups[i]));
+        }
+    }
+    sort(anchors.begin(), anchors.end(), keyLess);
+    for (const auto& shard : shards_) {
+        for (const auto& entry : shard->rejected) {
+            const std::string_view key = entry.first;
+            auto match = lower_bound(anchors.begin(), anchors.end(), key,
+                [](const auto& group, std::string_view value) { return group.key < value; });
+            if (match == anchors.end() || !match->key.starts_with(key)) {
+                if (match == anchors.begin()) { continue; }
+                --match;
+                if (!key.starts_with(match->key)) { continue; }
+            }
+            addCount(match->count, entry.second->totalSum());
+            match->members.push_back(entry.second.get());
+            for (auto subgroup = entry.second->begin(); subgroup != entry.second->end(); ++subgroup) {
+                for (const auto& occurrence : subgroup->second->getDerepMap()) {
+                    if (occurrence.first >= 0 && static_cast<size_t>(occurrence.first) < recoveredCounts.size()) {
+                        addCount(recoveredCounts[occurrence.first], occurrence.second);
+                    }
+                }
+            }
+        }
+    }
+    return anchors;
 }
 
 void Dereplicate::finishMap() {
@@ -615,6 +675,7 @@ void Dereplicate::finishMap() {
 	for (auto& shard : shards_) {
 		std::lock_guard<std::mutex> guard(shard->mutex);
 		shard->tracker.clear();
+		shard->rejected.clear();
 	}
 	srch_seq_total_len_.store(0, std::memory_order_release);
 	srch_seq_count_.store(0, std::memory_order_release);
@@ -777,19 +838,11 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	
 	//convert to vector, that can than be written out
 	// Sort small references; materialize only one independent output group at a time.
-	vector<pair<uint64_t, DNAuniqSet*>> dereplicated_dnas;
-	dereplicated_dnas.reserve(tracker_size_total());
-	for (const auto& shard : shards_) {
-		std::lock_guard<std::mutex> guard(shard->mutex);
-		for (auto& entry : shard->tracker) {
-			assert(entry.second && "Dereplicate tracker contains null DNAuniqSet entry");
-			if (!entry.second) { continue; }
-			dereplicated_dnas.emplace_back(entry.second->totalSum(), entry.second.get());
-		}
-	}
-//	bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r) {	return l->getCount() < r->getCount();}
-	sort(dereplicated_dnas.begin(), dereplicated_dnas.end(),
-        [](const auto& left, const auto& right) { return left.first > right.first; });
+    vector<uint64_t> recoveredCounts(barcode_number_to_sample_id_.size(), 0);
+    auto dereplicated_dnas = outputGroups(recoveredCounts);
+    sort(dereplicated_dnas.begin(), dereplicated_dnas.end(), [](const auto& left, const auto& right) {
+        return left.count != right.count ? left.count > right.count : left.key < right.key;
+    });
 	size_t passedSize = 0; size_t notPassedSize = 0; size_t passed_hits(0);
 	size_t passedMerge(0);
 	//bool thrHit = false;
@@ -815,8 +868,10 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	ofstream* derepNowOut;
 	//print unique DNAs
 	for (size_t i = 0; i < dereplicated_dnas.size(); i++) {
-		shared_ptr<DNAunique> dna = dereplicated_dnas[i].second->best(true, !b_derep_as_fasta_);
+        const auto& group = dereplicated_dnas[i];
+        shared_ptr<DNAunique> dna = group.representative->best(true, !b_derep_as_fasta_);
         if (!dna) { continue; }
+        for (const auto* member : group.members) { member->addEvidenceTo(dna, !b_derep_as_fasta_); }
         total_count ++;
 		dna->Count2Head(b_usearch_fmt);
 		shared_ptr<DNAunique> dna_merged = nullptr;
@@ -928,6 +983,11 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	report += "Dereplication: " + N_passed + " unique sequences (avg size ";
 	report += intwithcommas((int)avgSize) + "; " + formatCount64(static_cast<uint64_t>(passedSize)) + " counts, ";
 	report += formatCount64(static_cast<uint64_t>(passedMerge)) + " merged)\n";
+    if (prefixMode_) {
+        uint64_t recovered = 0;
+        for (uint64_t count : recoveredCounts) { recovered += count; }
+        report += "Prefix matching: " + formatCount64(recovered) + " non-passing reads recovered into passing groups\n";
+    }
 	report += "Search sequence length: avg " + avgSrchSeqLenStream.str() + " (" + formatCount64(srchSeqTotalLen) + " total over " + formatCount64(srchSeqCount) + " reads)\n";
 	
 		if (passed_hits > 0) {
@@ -956,7 +1016,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 			if (SampleID[i] == barcode_number_to_sample_id_[j]) { detected = true;  break; }
 		}
         if (detected && mf->collectStatistics[0]->BarcodeDetected[i] != -1 &&
-            static_cast<uint64_t>(mf->collectStatistics[0]->BarcodeDetected[i]) != counts_per_sample[j]) {
+            static_cast<uint64_t>(mf->collectStatistics[0]->BarcodeDetected[i]) + recoveredCounts[j] != counts_per_sample[j]) {
 			//cerr << "ERROR: Unequal counts for " << SampleID[i] << ": " << mf->collectStatistics.BarcodeDetected[i] << " vs " << counts_per_sample[j] << endl;
 			uneqCnts++;
 			

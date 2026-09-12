@@ -19,6 +19,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "DNA.h"
 #include "Common.h"
 #include "InputFileStream.h"
+#include "HtsInput.h"
 #include <chrono>
 #include <thread>
 
@@ -39,6 +40,8 @@ static void cdbg(const string& x) {
 }
 
 struct filesStr {//used in separateByFile
+    string cramRef;
+    bool htsBarcode = false;
     vector<string> FastaF;
     vector<string> QualF;
     vector<string> FastqF;
@@ -365,8 +368,10 @@ public:
 	void setupFna(string);
 	//path, fastq, fastqVer, pairNum
 	bool setupFastq(string,string, int&,string,bool simu= false, bool verbose=false);
+    void configureHts(const string& reference, bool barcodeTags) {
+        cramReference = reference; useHtsBarcode = barcodeTags;
+    }
 	//shared_ptr<DNA> getDNA(bool &has_next, bool &repair_input_stream, int pos);
-	//void getDNA(FastxRecord* FR1, FastxRecord* FR2, FastxRecord* FRM,shared_ptr<DNA>* dna1, shared_ptr<DNA>* dna2, shared_ptr<DNA>* mid);
 	void jumpToNextDNA(bool&, int);
 	//shared_ptr<DNA> getDNA2(bool&);
 	//shared_ptr<DNA> getDNA_MID(bool&);
@@ -392,10 +397,11 @@ public:
 	vector<ifbufstream*> fastq_istreams;
     
     
-  //  void getDNA(FastxRecord *read1, FastxRecord *read2, FastxRecord *quality1, FastxRecord *quality2, FastxRecord *FRM,
-   //             shared_ptr<DNA> *dna1, shared_ptr<DNA> *dna2, shared_ptr<DNA> *mid);
 
 private:
+    std::unique_ptr<HtsInput> htsInput;
+    string cramReference;
+    bool useHtsBarcode = false;
 	string current_infiles();
 	shared_ptr<DNA> getDNAUnlocked(int pos);
 	inline qual_score minmaxQscore(qual_score t, bool& print);// , int lnCnt);
@@ -480,17 +486,6 @@ private:
 #endif
 	int verbose;
     uint64_t N_DNApairsReturned, N_DNAreturned;
-    
-    /*shared_ptr<DNA> getDNA(bool &has_next);
-    
-    shared_ptr<DNA> getDNAFromRecord(int &pos);
-    
-    shared_ptr<DNA> getDNAFromRecord(FastxRecord &record, int &pos);
-    
-    shared_ptr<DNA> getDNAFromRecord(FastxRecord &record);
-    
-    void addQuality(shared_ptr<DNA> fasta, FastxRecord *quality);
-    */
 };
 
 

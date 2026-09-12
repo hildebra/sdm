@@ -25,7 +25,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define _CRT_SECURE_NO_DEPRECATE
 #endif
 
-//#include "FastxReader.h"
 #include <functional>
 #include <cctype>
 #include <locale>
@@ -74,8 +73,6 @@ public:
         fastq_write_offset_(0), id_fixed_(false), tempFloat(0.f), merge_offset_(-1) {
         sequence_.reserve(151);//set to resonable expectation
     }
-    //starts with fastx record
-    //DNA(FastxRecord*, qual_score & minQScore, qual_score & maxQScore, qual_score fastQver);
     //works directly with 4 lines in fastq format
     DNA(const vector<string>& fq, qual_score fastQver);//fastq input
     DNA(const vector<string>& fas);//this is for fasta only..
@@ -138,6 +135,9 @@ public:
         const size_t len = std::min(sequence_length_, sequence_.size());
         return std::string_view(sequence_.data(), len);
     }
+
+    const string& sampleBarcode() const { return sample_barcode_; }
+    void setSampleBarcode(string barcode) { sample_barcode_ = std::move(barcode); }
 
     void setQual(vector<qual_score> Q) {
         qual_ = move(Q);
@@ -379,6 +379,7 @@ protected:
     inline float prob_j_errors(float p, float j, float n);
     inline bool matchDNA(char, char);
 
+    string sample_barcode_;
     std::string sequence_;
     size_t sequence_length_;
     string id_, new_id_; //original and newly constructed id_
@@ -533,7 +534,7 @@ public:
     //string sequence_;    string id_;
     void Count2Head(bool);
     bool betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2);
-    void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, int, bool, bool collectMergedQualities = true);
+    void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, int, bool, bool collectMergedQualities = true, bool markDereplicated = true);
     void incrementSampleCounter(int sample_id);
     void writeMap(ofstream& os, const string&, vector<uint64_t>&, const vector<int>&, vector<uint64_t>&, vector<int>&);
     //inline int getCount() { return count_; }
@@ -565,6 +566,7 @@ public:
     void saveMem();
     shared_ptr<DNAunique> cloneForOutput() const;
     void sumMergeQualities(const shared_ptr<DNAunique>& other);
+    void absorbDerepEvidence(const shared_ptr<DNAunique>& other, bool collectQualities);
 
     void attachPair(shared_ptr<DNAunique> dna_unique);
     shared_ptr<DNAunique> getPair(void);
@@ -625,7 +627,7 @@ public:
     ~DNAuniqSet() {}
 
     void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
-        shared_ptr<DNA> dnaM, int MrgPos1, int sample_id, bool b_derep_as_fasta_);
+        shared_ptr<DNA> dnaM, int MrgPos1, int sample_id, bool b_derep_as_fasta_, bool markDereplicated = true);
     shared_ptr<DNAunique>& operator[] (int x) {
         return DNUs[x];
     }
@@ -634,6 +636,7 @@ public:
     const map<int, shared_ptr<DNAunique>>::iterator begin();
     size_t size() { return DNUs.size(); }
     uint64_t totalSum() const;
+    void addEvidenceTo(const shared_ptr<DNAunique>& target, bool collectQualities) const;
     void setBest(bool addCnts, bool collectQualities = true);
     shared_ptr<DNAunique> best(bool addCnts, bool collectQualities = true);
 

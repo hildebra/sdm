@@ -25,7 +25,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <atomic>
 #include "InputStream.h"
 #include "Common.h"
-#include "FastxReader.h"
 
 // Utilities are implemented in Common.cpp (defined once in Common.cpp)
 
@@ -722,6 +721,7 @@ qual_score InputStreamer::minmaxQscore(qual_score t,bool& print) {
 }
 
 bool InputStreamer::checkInFileStatus() {
+    if (htsInput) return htsInput->hasData();
 	for (uint i = 0; i < 3; i++) {
 		if (isFasta) {
 			if (fasta_istreams[i] != NULL && !fasta_istreams[i]->eof()) { return true; }
@@ -736,6 +736,7 @@ void InputStreamer::allStreamReset() {
 	std::unique_lock<std::shared_mutex> lock(protect);
 	resetStats();
 	cdbg("Resetting input streams");
+    if (htsInput) htsInput->reset();
 	for (uint i = 0; i < 3; i++) {
 		if (fasta_istreams[i] != NULL) { fasta_istreams[i]->reset(); }
 		if (quality_istreams[i] != NULL ) { quality_istreams[i]->reset(); }
@@ -745,6 +746,7 @@ void InputStreamer::allStreamReset() {
 }
 
 void InputStreamer::allStreamClose(){
+    htsInput.reset();
 	for (uint i = 0; i < 3; i++){
 		if (fasta_istreams[i] != NULL) { delete fasta_istreams[i];  fasta_istreams[i] = NULL;}
 		if (quality_istreams[i] != NULL) { delete quality_istreams[i];  quality_istreams[i] = NULL; }
@@ -756,6 +758,7 @@ void InputStreamer::allStreamClose(){
 }
 
 void InputStreamer::jumpToNextDNA(bool& stillMore, int pos) {
+    if (htsInput) { vector<string> record; stillMore = getDNAlines(record, pos); return; }
 	if (isFasta) {
 		stillMore = read_fasta_entry(fasta_istreams[pos], quality_istreams[pos], dnaTemp1[pos], dnaTemp2[pos], lnCnt[pos]);
 		dnaTemp1[pos] = dnaTemp2[pos];
@@ -812,6 +815,7 @@ vector<shared_ptr<DNA>> InputStreamer::getDNApairs() {
 
 
 string InputStreamer::current_infiles() {
+    if (htsInput) return htsInput->filename();
 	string ret;
 	for (int pos = 0; pos < 3; ++pos) {
 		ifbufstream* stream = isFasta ? fasta_istreams[pos] : fastq_istreams[pos];
@@ -882,6 +886,11 @@ bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse,b
 	return true;
 }
 bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
+    if (htsInput) {
+        const bool read = htsInput->read(ret, pos);
+        if (read) { ++lnCnt[pos]; ++pairs_read[pos]; }
+        return read;
+    }
 	
 	//vector<string> ret(4,"");
 	bool stillMore = true;
@@ -960,6 +969,12 @@ shared_ptr<DNA> InputStreamer::getDNA(int pos) {
 	}
 
 shared_ptr<DNA> InputStreamer::getDNAUnlocked(int pos){
+    if (htsInput) {
+        vector<string> record;
+        if (!getDNAlines(record, pos)) return nullptr;
+        ++N_DNAreturned;
+        return str2DNA(std::move(record), keepPairHD, 33, pos);
+    }
 	//if (sync) {
 	//	while (desync(pos)) {
 	//		jumpToNextDNA(stillMore, pos);
@@ -1021,6 +1036,8 @@ shared_ptr<DNA> InputStreamer::getDNAUnlocked(int pos){
 }
 
 void InputStreamer::openMIDseqs(string p,string in){
+    if (htsInput && !in.empty())
+        throw std::runtime_error("Separate MID FASTQ streams are unsupported with HTS input; use inline barcodes or -htsBarcode BC");
 	if (in==""){return;}
 	
 	if (fastq_istreams[2] != NULL){
@@ -1074,6 +1091,23 @@ bool InputStreamer::setupFastq(string path, string fileS, int& pairs, string sub
 	fqSolexaFmt = false;
 	resetStats();
 	vector<string> tfas = splitByCommas(fileS);
+    const string format = detectSeqFmt(path + tfas[0]);
+    if (format == "-i_sam" || format == "-i_bam" || format == "-i_cram") {
+        if (tfas.size() != 1)
+            throw std::runtime_error("Use one SAM/BAM/CRAM file per input set; mates must be in that file");
+        htsInput = std::make_unique<HtsInput>(path + tfas[0], pairs, subsPairs,
+                                             cramReference, useHtsBarcode);
+        isFasta = false;
+        qualAbsent = false;
+        fastQver = 33;
+        QverSet = true;
+        fqSolexaFmt = false;
+        pairs = numPairs = htsInput->pairCount();
+        return true;
+    }
+    if (useHtsBarcode)
+        throw std::runtime_error("-htsBarcode BC requires SAM/BAM/CRAM input");
+
 	if (pairs == -1) {
 		pairs = (int)tfas.size();
 		if (pairs > 1) { cerr << "Paired input (\",\" separated) detected\n"; }
@@ -1260,6 +1294,7 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 string InputStreamer::setupInput(string path, int t, const string& uniqueFastxFile,
 	filesStr& files, int& paired, string onlyPair,
 	string& mainFilename, bool simulate) {
+	configureHts(files.cramRef, files.htsBarcode);
 	string mainFilepath("");
 	vector<string> fastqFiles = files.FastqF;
 	vector<string> fastaFiles = files.FastaF;
@@ -1299,7 +1334,7 @@ string InputStreamer::setupInput(string path, int t, const string& uniqueFastxFi
 void InputStreamer::setupFna(string in) {
 	int paired = 1;
 	string fmt = detectSeqFmt(in);
-	if (fmt == "-i_fastq") {
+	if (fmt == "-i_fastq" || fmt == "-i_sam" || fmt == "-i_bam" || fmt == "-i_cram") {
 		setupFastq("", in, paired, "", false, false);
 	}
 	else {

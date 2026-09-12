@@ -425,6 +425,7 @@ public:
 
 	void finishMap();
 	bool doSearchWithMerge() { return searchWithMerg; }
+	bool usesPrefixDereplication() const { return prefixMode_; }
 
 
 private:
@@ -457,7 +458,14 @@ private:
 	//vector<shared_ptr<DNAunique>> Dnas;
 	//vector<shared_ptr<DNAunique>> DNApair;
 	vector<string> barcode_number_to_sample_id_;
-	struct Shard { std::mutex mutex; HashDNA tracker; };
+	struct Shard { std::mutex mutex; HashDNA tracker; HashDNA rejected; };
+    struct DerepOutputGroup {
+        uint64_t count;
+        std::string_view key;
+        DNAuniqSet* representative;
+        std::vector<DNAuniqSet*> members;
+    };
+    std::vector<DerepOutputGroup> outputGroups(std::vector<uint64_t>& recoveredCounts);
 	std::vector<std::unique_ptr<Shard>> shards_;
 	//vector<int> counts;
 	string outfile;
@@ -478,6 +486,7 @@ private:
 	ReadMerger* merger;
 
 	int searchLength;
+	bool prefixMode_ = false;
 
 
 	//output files, that need appending

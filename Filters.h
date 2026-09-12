@@ -161,6 +161,9 @@ public:
 	bool doDemultiplex() { return bDoMultiplexing; }
 	bool doDereplicate() { return bDoDereplicate; }
 	bool doFilterAtAll() { return b_doFilter; }
+    bool hasExplicitDerepSearchLength() const { return explicitDerepSearchLength_; }
+    int dereplicationLengthLimit() const { return !b_optiClusterSeq && TruncSeq > 0 ? TruncSeq : -1; }
+    int fixedDereplicationLength(bool useMergedSearch) const;
 	bool doSeedExtension() { return bDoSeedExtension; }
 	uint getcut5PR2() { return cut5PR2; }
 	uint getcut5PR1() { return cut5PR1; }
@@ -407,6 +410,7 @@ protected:
 	float FQWthr, EWthr, alt_FQWthr, alt_EWthr; //Floating window avg quality under which seq is kicked
 	int PEheaderVerWr;//correct PE header format (0/1/2) this is to accomodate the illumina miSeq paired end annotations 2="@XXX 1:0:4" insteand of 1="@XXX/1". 0=don't change or no PE seq.
 	int TrimStartNTs;//remove start NT. -1 indicates auto check for GC infrequencies
+	bool explicitDerepSearchLength_ = false;
 	int TruncSeq;//remove trailing NT's after this seq length (length after removal of adapters, primers, Barcodes)
 	string iniSpacer; // spacer in fasta file name after barcoding
 	int userReqFastqVer;//either 1 (33), 2(59) or 3 (62)
