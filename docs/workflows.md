@@ -8,20 +8,25 @@ The README covers common starting points. This reference describes additional co
 
 | Option | Purpose |
 | --- | --- |
-| `-i <file>` | Detect FASTA or FASTQ automatically. |
+| `-i <file>` | Detect FASTA, FASTQ, SAM, BAM or CRAM automatically. |
 | `-i_fastq <file>` | Supply FASTQ input explicitly. |
+| `-i_sam <file>`, `-i_bam <file>`, `-i_cram <file>` | Supply alignment input; requires an HTS-enabled build. |
+| `-cramRef <reference.fa>` | Matching indexed reference for CRAM; default: none explicitly supplied. |
+| `-htsBarcode <inline or BC>` | Inline barcodes (default), or exact sample assignment from `BC:Z` tags. |
 | `-i_fna <file>` | Supply FASTA input explicitly. |
 | `-i_qual <file>` | Supply separate FASTA quality data; for `test.fna`, the inferred filename is `test.qual_`. |
 | `-i_path <directory>` | Resolve input filenames from the [mapping file](mapping.md). |
 | `-i_MID_fastq <file>` | Supply a separate barcode/MID read file. |
-| `-paired <1, 2, or 3>` | Single-end, paired-end, or R1/R3 with MID reads in R2. Default: `1`. |
+| `-paired <1, 2, or 3>` | Single-end, paired-end, or R1/R3 with MID reads in R2. Default: infer the input layout. |
 | `-onlyPair <1 or 2>` | Process only the selected mate. |
 | `-i_qual_offset <0, auto, or n>` | Input FASTQ quality offset; `0` or `auto` requests detection. |
 | `-mergedPairs <0 or 1>` | Indicate that input reads were merged externally. |
 | `-5PR1cut <n>`, `-5PR2cut <n>` | Remove leading bases from read 1 or read 2. |
 | `-ignore_IO_errors <0 or 1>` | Attempt to continue after corrupt FASTQ records; default `0`. |
 
-Choose one primary input mode: `-i`, `-i_fastq`, `-i_fna`, or `-i_path`. Quality and MID files are companion inputs. Paired filenames are comma-separated; with `-paired 3`, list R1,R2,R3 in that order.
+Choose one primary input mode: `-i`, `-i_fastq`, `-i_fna`, an explicit alignment input, or `-i_path`. Quality and MID files are companion inputs. Paired filenames are comma-separated; with `-paired 3`, list R1,R2,R3 in that order.
+
+SAM/BAM/CRAM input uses one file per input set, containing singletons or complete query-name-sorted pairs. Separate MID FASTQ files cannot accompany alignment input. See [alignment input](hts.md) for orientation, qualities, references and error handling.
 
 Paired and MID read identifiers are always checked for synchronized order. Error recovery does not disable these checks.
 
@@ -62,7 +67,8 @@ sdm -i_fastq reads.fastq -options sdm_options.txt -o_dereplicate dereplicated.fn
 | `-derep_map <file>` | Dereplication abundance-map output. |
 | `-min_derep_copies <rule>` | Minimum abundance required to retain a sequence. |
 | `-dere_size_fmt <0 or 1>` | `0` uses `size=X;` abundance headers; `1` uses `_X`. |
-| `-derepSrchLen <n>` | Search length; `-1` uses the full sequence. Overrides the options-file value. |
+| `-derepSrchLen <n>` | Explicit search length; see the interaction with prefix mode below. Overrides the options-file value. |
+| `-derepPrefix <auto or 0 or 1>` | Automatic (default), legacy exact keys, or forced 100% prefix matching. |
 | `-derepPerSR <0 or 1>` | Enable dereplication by sequencing run, using the map's `SequencingRun` column. |
 | `-derep_reserve <n>` | Reserve capacity for sequence groups. |
 
@@ -79,6 +85,8 @@ Seed extension works with selected reads and read-to-cluster assignments. Releva
 | `-optimalRead2Cluster <file>`, `-optimalRead2Cluster_ref <file>` | Read-to-cluster assignments. |
 | `-OTU_fallback <file>`, `-OTU_fallback_refclust <file>` | Fallback OTU FASTA sequences. |
 | `-otu_matrix <file>` | OTU matrix output. |
+| `-minQueryCov <fraction>` | Minimum seed/OTU query coverage; default `0.8`. |
+| `-id <percent>` | Minimum seed/OTU identity; default `97`. |
 | `-merge_pairs_seed 1` | Enable pair merging for seed extension. |
 
 Seed extension uses already processed HQ mates without repeating quality trimming or 5′, barcode, or primer cuts. It ignores `TruncateSequenceLength` for all outputs, including unmerged mates and fallback seeds. Merged seeds still undergo minimum- and maximum-length checks.
@@ -94,6 +102,8 @@ If you have HQ mate files generated with the truncating behavior in versions 3.4
 | `-threads <n>` | `1` | Number of processing workers. |
 | `-threadIO <0 or 1>` | `1` | Enable threaded input/output. |
 | `-iniBlockSize <n>` | `120` | Initial number of reads per processing block. |
+
+Multithreading is included in current SDM builds. Default help and `-v` report threading, gzip and HTSlib availability. `-threads` controls processing workers; HTS decoding is currently sequential, with decoded reads processed by those workers. `-threadIO` controls the FASTA/FASTQ I/O backend independently.
 
 Try increasing `-threads` for large datasets and compare elapsed time on your machine. `-derep_reserve` can reserve capacity for dereplication; it specifies the total reservation, not an amount per worker.
 

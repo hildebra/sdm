@@ -329,7 +329,7 @@ protected:
 
 
 
-	inline void scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_err, int scanRegion,
+	inline void scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int& c_err, int scanRegion,
 		string& presentBC, bool fwdStrand, bool revBC = false, bool endScan = false);
 	//reverse BC scan on end of read
 /*	inline void scanBC_rev(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_err, int scanRegion,
@@ -362,6 +362,9 @@ protected:
 	//which kind of barcoding?
 	bool bDoBarcode, bDoBarcode2, bDoBarcode2Rd1, bDoHeadSmplID;
 	bool bBarcodeSameSize;
+    bool ontMode_ = false;
+    int barcodeSearchWindow_ = 200;
+    bool ontBarcodeBothEnds_ = false;
 
 	//related to "one sample per file"
 	bool bOneFileSample;

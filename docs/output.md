@@ -59,6 +59,7 @@ Gzip output adds `.gz`. A merged file may be created even when no merged reads a
 | `-oneLineFastaFormat <0 or 1>` | Set to `1` to write each FASTA sequence or quality record on one line. |
 | `-sample_sep <text>` | Delimiter between sample name and read identifier. |
 | `-pairedRD_HD_out <0 or 1>` | Control inclusion of paired-read identifiers in headers. |
+| `-suppressOutput <0, 1, 2, or 3>` | Ordinary output suppression: `0` keeps both tiers, `1` suppresses primary, `2` suppresses additional, and `3` suppresses both. |
 
 Two specialized cleanup flags affect dereplicated output: `-onlyCanonicalNTs 1` replaces noncanonical bases with `A` and sets their qualities to zero; `-strictPositiveQualsOut 1` changes negative quality scores to zero. These transform output values rather than rejecting reads. Use filtering settings such as `maxAmbiguousNT` when you want to reject reads instead.
 

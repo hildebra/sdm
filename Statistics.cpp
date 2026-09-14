@@ -190,6 +190,8 @@ void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx) {
     total2.fetch_add(cs->total2.load(std::memory_order_relaxed), std::memory_order_relaxed);
     totalSuccess += cs->totalSuccess;
     swappedRds += cs->swappedRds; reversedRds += cs->reversedRds;
+    ontAssigned += cs->ontAssigned; ontUnassigned += cs->ontUnassigned;
+    ontAmbiguous += cs->ontAmbiguous; ontConflictingEnds += cs->ontConflictingEnds;
     altRescueAccumError += cs->altRescueAccumError;
     altRescueQuality += cs->altRescueQuality;
     altRescueAmbiguousBases += cs->altRescueAmbiguousBases;
@@ -222,6 +224,7 @@ void collectstats::reset() {
     primerSearchSucceededFwdRead1 = 0; primerSearchSucceededFwdRead2 = 0;
     primerSearchSucceededRevRead1 = 0; primerSearchSucceededRevRead2 = 0;
     multiFailReads = 0;
+    ontAssigned = ontUnassigned = ontAmbiguous = ontConflictingEnds = 0;
 
     //reportStats
     PostFilt.reset(); PreFilt.reset();

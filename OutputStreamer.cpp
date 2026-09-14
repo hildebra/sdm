@@ -354,11 +354,9 @@ OutputStreamer::OutputStreamer(Filters* fil, OptContainer* cmdArgs,
 	std::ios_base::openmode writeStatus,
 	shared_ptr<ReadSubset> RDSset,
 	int numThreads, string fileExt, int forceFmt) :
-	MFil(nullptr), subFilter(0), //DNAsP1(0), DNAsP2(0), DNAsS1(0), DNAsS2(0),
-	//DNAsNoHead(0), DNAsP1_alt(0), DNAsP2_alt(0), DNAsS1_alt(0), DNAsS2_alt(0),
+	MFil(nullptr), subFilter(0),
 	//locBufGreen(2,""),
-	suppressOutWrite(0), write2File(true),// mem_used(false),
-	DNAinMem(0), writeThreadStatus(0),
+	suppressOutWrite(0), write2File(true),
 	fastQver(33),
 	fastQoutVer(33), BWriteQual(false),
 	BWriteFastQ(false), b_multiOutStream(false), pairedSeq(-1),
@@ -685,126 +683,6 @@ void OutputStreamer::closeOutFilesDemulti_locked() {
 	}
 	cdbg(" done closeOutFilesDemulti_locked\n");
 }
-
-/*
-void OutputStreamer::writeAllStoredDNA(){
-#ifdef DEBUG
-	printStorage();
-	cerr << "Writting stored DNA" << DNApairStreams[0].size() <<" " << DNApairStreams[1].size()<<endl;
-#endif
-
-#ifdef _THREADED
-	if (writeThreadStatus>0){
-		if (writeThreadStatus>1){wrThread.join();}
-		writeThreadStatus++;
-		wrThread = thread(&OutputStreamer::writeAllStoredDNA2t,this);
-	} else {
-		writeAllStoredDNA2();
-	}
-#else
-		writeAllStoredDNA2();
-#endif
-}
-void OutputStreamer::writeAllStoredDNA2(){
-	mem_used=false;
-	//
-	//this is handled by ofbufstream now..
-
-	if (b_writeGreenQual) {
-
-		//
-		if (DNAsP1.size() != DNAsP2.size()) {
-			for (unsigned int i = 0; i < DNAsP1.size(); i++) {
-				writeAndDel(DNAsP1[i], 0);
-				ReadsWritten++;
-			}
-			for (unsigned int i = 0; i < DNAsP2.size(); i++) {
-				writeAndDel(DNAsP2[i], 1);
-			}
-		} else {
-			for (unsigned int i = 0; i < DNAsP1.size(); i++) {
-				writeAndDel(DNAsP1[i], 0);
-				writeAndDel(DNAsP2[i], 1);
-				ReadsWritten++;
-			}
-		}
-		for (unsigned int i = 0; i < DNAsS1.size(); i++) {
-			writeAndDel(DNAsS1[i], 2);
-		}
-
-		for (unsigned int i = 0; i < DNAsS2.size(); i++) {
-			writeAndDel(DNAsS2[i], 3);
-		}
-		DNAsP1.resize(0); DNAsP2.resize(0);
-		DNAsS1.resize(0); DNAsS2.resize(0);
-	}
-	if (b_writeYellowQual) {
-
-		//Xtra file
-		if (DNAsP1_alt.size() != DNAsP2_alt.size()) {
-			for (unsigned int i = 0; i < DNAsP1_alt.size(); i++) {
-				writeAndDel(DNAsP1_alt[i], 0);
-				ReadsWritten++;
-			}
-			for (unsigned int i = 0; i < DNAsP2_alt.size(); i++) {
-				writeAndDel(DNAsP2_alt[i], 1);
-			}
-		} else {
-			for (unsigned int i = 0; i < DNAsP1_alt.size(); i++) {
-				writeAndDel(DNAsP1_alt[i], 0);
-				writeAndDel(DNAsP2_alt[i], 1);
-				ReadsWritten++;
-			}
-		}
-		for (unsigned int i = 0; i < DNAsS1_alt.size(); i++) {
-			writeAndDel(DNAsS1_alt[i], 2);
-		}
-
-		for (unsigned int i = 0; i < DNAsS2_alt.size(); i++) {
-			writeAndDel(DNAsS2_alt[i], 3);
-		}
-		DNAsP1_alt.resize(0); DNAsP2_alt.resize(0);
-		DNAsS1_alt.resize(0); DNAsS2_alt.resize(0);
-	}
-	//just to be on the safe side..
-	delAllDNAvectors();
-#ifdef DEBUG
-	cerr <<  " .. Finished" << endl;
-#endif
-}
-*/
-
-
-#ifdef _THREADED
-void OutputStreamer::writeAllStoredDNA2t() {
-	std::lock_guard<std::mutex> guard(mutex);
-	write2File = true; mem_used = false;
-	if (DNAsP1.size() != DNAsP2.size()) {
-		for (unsigned int i = 0; i < DNAsP1.size(); i++) {
-			writeAndDel(DNAsP1[i], 0);
-		}
-		for (unsigned int i = 0; i < DNAsP2.size(); i++) {
-			writeAndDel(DNAsP2[i], 1);
-		}
-	}
-	else {
-		for (unsigned int i = 0; i < DNAsP1.size(); i++) {
-			writeAndDel(DNAsP1[i], 0);
-			writeAndDel(DNAsP2[i], 1);
-		}
-	}
-	for (unsigned int i = 0; i < DNAsS1.size(); i++) {
-		writeAndDel(DNAsS1[i], 2);
-	}
-
-	for (unsigned int i = 0; i < DNAsS2.size(); i++) {
-		writeAndDel(DNAsS2[i], 3);
-	}
-	DNAsP1.resize(0); DNAsP2.resize(0);
-	DNAsS1.resize(0); DNAsS2.resize(0);
-}
-#endif
-
 
 bool OutputStreamer::writeDemultiRecords(int idx, const string& first, const string& second,
 	uint64_t bases, bool merged) {

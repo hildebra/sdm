@@ -390,6 +390,8 @@ private:
 bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r);
 
 
+class CoarseDereplication;
+
 class Dereplicate{
 public:
 	Dereplicate(OptContainer*, Filters* mf);//
@@ -426,6 +428,7 @@ public:
 	void finishMap();
 	bool doSearchWithMerge() { return searchWithMerg; }
 	bool usesPrefixDereplication() const { return prefixMode_; }
+    bool usesCoarseDereplication() const { return coarse_ != nullptr; }
 
 
 private:
@@ -464,6 +467,7 @@ private:
         std::string_view key;
         DNAuniqSet* representative;
         std::vector<DNAuniqSet*> members;
+        std::shared_ptr<DNAunique> refined;
     };
     std::vector<DerepOutputGroup> outputGroups(std::vector<uint64_t>& recoveredCounts);
 	std::vector<std::unique_ptr<Shard>> shards_;
@@ -487,6 +491,9 @@ private:
 
 	int searchLength;
 	bool prefixMode_ = false;
+    std::unique_ptr<CoarseDereplication> coarse_;
+    std::mutex coarseMutex_;
+    bool writeSubclusters_ = false;
 
 
 	//output files, that need appending
@@ -522,11 +529,8 @@ private:
 	mutable std::condition_variable lifecycle_wait_cv_;
 	static constexpr size_t kThreadBatchFlushThreshold = 256;
 
-	inline size_t tracker_size_total() const {
-		size_t size = 0;
-		for (const auto& shard : shards_) { size += shard->tracker.size(); }
-		return size;
-	}
+    size_t tracker_size_total() const;
+
 
 	bool searchWithMerg;
 

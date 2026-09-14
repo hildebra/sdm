@@ -1,0 +1,50 @@
+{
+  "baseline": "working tree captured before changes, not Git HEAD",
+  "date": "2026-09-13",
+  "compiler": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+  "flags": "-O3 -std=c++20 -pthread; WITH_HTS=0 STATIC=0",
+  "measurement": "Five repetitions per version, 12 workloads, independent processes, alternating version order, shuffled workloads, pinned to Linux CPU 0; Linux VmHWM peak RSS",
+  "files": {
+    "DNA.h": {
+      "before_sha256": "6e4d2ef9853ab14a74ec0491f55b618a769af4d2cb77b866dfe6c1b906343ba5",
+      "after_sha256": "9198cc5c5e848c211b62e35df7211f43717c417d43960126e214767d159a4164"
+    },
+    "DNA.cpp": {
+      "before_sha256": "ad74c57587757c2551402e1a1c2044b8a0c2a457e7094361da570cf6d8326a83",
+      "after_sha256": "14970686305e2c46855e03187ad5a5a03c94624705ba9530d83ed9033e86daeb"
+    },
+    "tests/TestRegression.cpp": {
+      "before_sha256": "4981129c368d8e432c5cd09291986ddb0b33e1d3c064f8549abfc1c2b0afaa41",
+      "after_sha256": "f8007bc2a7d7defc55e81283b2926ef93f2076f78b11c67a94a8945e72210391"
+    },
+    "tests/TestCoarseBenchmark.cpp": {
+      "before_sha256": "0f9e817a1d4f3643e335e87e805de10e9963620790c63c9de35f9d676dcc6fc7",
+      "after_sha256": "0f9e817a1d4f3643e335e87e805de10e9963620790c63c9de35f9d676dcc6fc7"
+    },
+    "tests/TestDNAMemory.cpp": {
+      "before_sha256": "37efe88405d2a93bdf4a1ca8ae2b63117eace9a494185c469cdc072a96096bb2",
+      "after_sha256": "37efe88405d2a93bdf4a1ca8ae2b63117eace9a494185c469cdc072a96096bb2"
+    },
+    "tests/TestQualityStorageBenchmark.cpp": {
+      "before_sha256": null,
+      "after_sha256": "8374d7e2f21bafa304e3531965fa01a9ed38b0669a9506b5795bb94a8c391232"
+    },
+    "tests/benchmark_dna_memory.py": {
+      "before_sha256": null,
+      "after_sha256": "5b170aebf467595792f24ac02587d6fd76eb3e7b437468d39c8505099c970570"
+    },
+    "tests/benchmark_quality_storage.py": {
+      "before_sha256": null,
+      "after_sha256": "d9c7ecc4cbf2c5ca42094016f90bf89cb2351b21a775d86868c3b99bf06a7e5c"
+    }
+  },
+  "benchmark_binary_sha256": {
+    ".build/dna-memory-20260913/before/sdm": "52c8fd1397fbb1e1f86f899688229641bc84dc7f18adfe19abc3e6d70b564b88",
+    ".build/dna-memory-20260913/before/TestCoarseBenchmark": "80bf23cea683e5a5d752e8692c520b01642b7fb25c47efd99352c24e63c3a1ab",
+    ".build/dna-memory-20260913/before/TestDNAMemory": "3c1d82a55d9f392e7547a673fc3d508bf850e9c0f8377b669596e1534df38583",
+    ".build/dna-memory-20260913/after/sdm": "22df1d1a1ce24336b2ac97828fe360cacc190e175fc4f72394c10fdc0e2a6036",
+    ".build/dna-memory-20260913/after/TestCoarseBenchmark": "bc1ebdf24df39d747f7254dbdf9d6dc7e661ab4caf9fa50eae722595a47b23c9",
+    ".build/dna-memory-20260913/after/TestDNAMemory": "c0941e9a3833e2837071b6863b80060ddeeb939ddc718222e948ab1b9b012ab6"
+  },
+  "baseline_archive_sha256": "176b21f2f9a0519bd9ba481411940b03bed1c75a4ba93066640336340a603b47"
+}

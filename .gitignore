@@ -20,7 +20,7 @@ deprecated/
 include/izlib.h
 tests/
 
-
+out
 
 # Build results
 [Dd]ebug/

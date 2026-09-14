@@ -240,6 +240,8 @@ public:
     //swapping/reversing reads
     uint64_t reversedRds;
     uint64_t swappedRds;
+    // Mutually exclusive ONT assignment outcomes, before quality/primer rejection.
+    uint64_t ontAssigned = 0, ontUnassigned = 0, ontAmbiguous = 0, ontConflictingEnds = 0;
     uint64_t altRescueAccumError;
     uint64_t altRescueQuality;
     uint64_t altRescueAmbiguousBases;

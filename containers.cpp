@@ -25,6 +25,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <mutex>
 #include "Common.h"
 #include "containers.h"
+#include "CoarseDereplication.h"
 #include "Filters.h"
 #include "OutputStreamer.h"
 
@@ -245,6 +246,13 @@ Dereplicate::ThreadLocalBatch& Dereplicate::get_or_create_thread_batch() {
  return *cachedBatch;
 }
 
+size_t Dereplicate::tracker_size_total() const {
+    if (coarse_) { return coarse_->groups().size(); }
+    size_t size = 0;
+    for (const auto& shard : shards_) { size += shard->tracker.size(); }
+    return size;
+}
+
 bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending, HashDNA& tracker) {
     auto it = tracker.find(pending.srchSeq);
     if (it == tracker.end() && !pending.pass && !prefixMode_) { return true; }
@@ -277,6 +285,15 @@ void Dereplicate::flush_batch(ThreadLocalBatch& batch) {
 	srch_seq_total_len_.fetch_add(searchBases, std::memory_order_relaxed);
 	srch_seq_count_.fetch_add(batch.pending.size(), std::memory_order_relaxed);
 	struct ClearBatch { ThreadLocalBatch& batch; ~ClearBatch() { batch.pending.clear(); } } clear{batch};
+    if (coarse_) {
+        std::lock_guard<std::mutex> guard(coarseMutex_);
+        for (const auto& entry : batch.pending) {
+            const auto& source = searchWithMerg && entry.dna_merged ? entry.dna_merged : entry.dna;
+            coarse_->add(entry.srchSeq, source->getSeqPseudoView(), entry.dna, entry.dna2,
+                entry.dna_merged, entry.sample_id, entry.pass, searchLength);
+        }
+        return;
+    }
 	thread_local std::vector<std::vector<size_t>> grouped;
 	grouped.resize(shards_.size());
 	for (auto& indices : grouped) { indices.clear(); }
@@ -308,6 +325,44 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 		mapF(""), outHQf(""), outHQf_p2(""), outRest(""),
 		mainFilter(mf), searchWithMerg(true)
 {
+    const uint64_t identity = CoarseDereplication::parseIdentity(cmdArgs->get("-derepIdentity", "100"));
+    const unsigned homopolymer = CoarseDereplication::parseHomopolymer(cmdArgs->get("-derepSeedHomopolymer", "4"));
+    const string diffOption = cmdArgs->get("-derepStoreDiffs", "0");
+    if (diffOption != "0" && diffOption != "1") { throw std::invalid_argument("-derepStoreDiffs must be 0 or 1"); }
+    const string subclusterOption = cmdArgs->get("-derepSubclusterFasta", "0");
+    if (subclusterOption != "0" && subclusterOption != "1") {
+        throw std::invalid_argument("-derepSubclusterFasta must be 0 or 1");
+    }
+    writeSubclusters_ = subclusterOption == "1";
+    if (writeSubclusters_ && diffOption != "1") {
+        throw std::invalid_argument("-derepSubclusterFasta 1 requires -derepStoreDiffs 1");
+    }
+    const string reassignOption = cmdArgs->get("-derepReassign", "0");
+    if (reassignOption != "0" && reassignOption != "1") { throw std::invalid_argument("-derepReassign must be 0 or 1"); }
+    const string qualityOption = cmdArgs->get("-derepStoreQuals", "0");
+    if (qualityOption != "0" && qualityOption != "1") { throw std::invalid_argument("-derepStoreQuals must be 0 or 1"); }
+    if (qualityOption == "1") {
+        if (!cmdArgs->get("-i_fna").empty() && cmdArgs->get("-i_qual").empty()) {
+            throw std::invalid_argument("-derepStoreQuals requires complete input qualities; FASTA alone is insufficient");
+        }
+        const auto fastaFiles = mf->getFastaFiles(), qualityFiles = mf->getQualFiles();
+        for (size_t i = 0; i < fastaFiles.size(); ++i) {
+            if (!fastaFiles[i].empty() && (i >= qualityFiles.size() || qualityFiles[i].empty())) {
+                throw std::invalid_argument("-derepStoreQuals requires a quality file for every FASTA input");
+            }
+        }
+    }
+    if (qualityOption == "1") {
+        b_pairedInput = mf->isPaired() > 1;
+        // Exact pair variants keep the two processed mates and their own scores.
+        searchWithMerg = false;
+        for (const auto* option : {"-merge_pairs_derep", "-merge_pairs_filter", "-merge_pairs_demulti"}) {
+            if (cmdArgs->get(option) == "1") { throw std::invalid_argument(std::string("-derepStoreQuals requires unmerged input; disable ") + option); }
+        }
+    }
+    if (identity < CoarseDereplication::identityScale || diffOption == "1" || reassignOption == "1" || qualityOption == "1") {
+        coarse_ = std::make_unique<CoarseDereplication>(identity, homopolymer, diffOption == "1", reassignOption == "1", qualityOption == "1");
+    }
     const string prefixOption = cmdArgs->contains("-derepPrefix") ? (*cmdArgs)["-derepPrefix"] : "auto";
     if (prefixOption != "auto" && prefixOption != "0" && prefixOption != "1") {
         throw std::invalid_argument("-derepPrefix must be auto, 0, or 1");
@@ -319,6 +374,9 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 	}
 
 	string baseOF = std::filesystem::path(outfile).replace_extension().string();
+    if (coarse_ && coarse_->storesDiffs() && outfile == baseOF + ".diff") {
+        throw std::invalid_argument("The dereplicate output cannot be its own .diff sidecar; choose a FASTA/FASTQ output filename");
+    }
 	mapF = baseOF + ".map";
 	outHQf = baseOF + ".1.hq.fq";
 	outHQf_p2 = baseOF + ".2.hq.fq";
@@ -329,7 +387,7 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 
 	// Reserve hash map capacity to avoid costly rehashing during heavy dereplication.
 	// Allow user to override via -derep_reserve; default to 500k slots.
-	size_t reserveSize = runtimeOpts.derepReserve;
+	size_t reserveSize = coarse_ ? 0 : runtimeOpts.derepReserve;
 // Independent sequence keys can update concurrently. Keep each key in one
 	// shard so occurrence counts, quality evidence, and selection stay atomic.
 	constexpr size_t shardCount = 64;
@@ -430,8 +488,11 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
     const int fixedLength = mf->fixedDereplicationLength(searchWithMerg);
     const int clusteringCap = mf->dereplicationLengthLimit();
     const bool explicitCap = mf->hasExplicitDerepSearchLength() && searchLength > 0;
-    prefixMode_ = prefixOption == "1" || (prefixOption == "auto" && !explicitCap && fixedLength == 0);
-    if (prefixMode_) {
+    prefixMode_ = !coarse_ && (prefixOption == "1" || (prefixOption == "auto" && !explicitCap && fixedLength == 0));
+    if (coarse_) {
+        if (!explicitCap) { searchLength = -1; }
+        if (clusteringCap > 0 && (searchLength < 0 || searchLength > clusteringCap)) { searchLength = clusteringCap; }
+    } else if (prefixMode_) {
         searchLength = clusteringCap;
     } else if (prefixOption == "auto") {
         if (!explicitCap && fixedLength > 0) { searchLength = fixedLength; }
@@ -439,7 +500,7 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
             searchLength = clusteringCap;
         }
     }
-    cerr << "Dereplication matching: " << (prefixMode_ ? "100% prefix" : "exact length")
+    cerr << "Dereplication matching: " << (coarse_ ? cmdArgs->get("-derepIdentity", "100") + "% streaming substitution clusters" : (prefixMode_ ? "100% prefix" : "exact length"))
          << (searchLength > 0 ? " (search cap " + to_string(searchLength) + ")" : " (full logical sequence)") << "\n";
 }
 
@@ -502,6 +563,10 @@ Dereplicate::LifecyclePause::~LifecyclePause() {
 }
 
 bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* filter) {
+    if (coarse_ && coarse_->storesQualities() && bool(dna2) != b_pairedInput) {
+        throw std::invalid_argument("-derepStoreQuals requires complete pairs for paired input, or consistently single-end input");
+    }
+    if (coarse_ && coarse_->storesQualities() && dna2 && dna2->length() == 0) { return false; }
 	ThreadLocalBatch& threadBatch = get_or_create_thread_batch();
 	ActiveAddGuard activeGuard(*this, threadBatch);
 	//1st build hash of DNA
@@ -553,7 +618,7 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* fil
 		srchSeqPtr = &srchSeqBuffer;
 	}
 	const string& srchSeq = *srchSeqPtr;
-	if (prefixMode_ && srchSeq.empty()) { return false; }
+	if ((prefixMode_ || coarse_) && srchSeq.empty()) { return false; }
 
 	threadBatch.pending.push_back(PendingDerepEntry{
 		srchSeq,
@@ -597,6 +662,7 @@ void Dereplicate::reset() {
 		shard->tracker.clear();
 		shard->rejected.clear();
 	}
+	if (coarse_) { coarse_->clear(); }
 	srch_seq_total_len_.store(0, std::memory_order_release);
 	srch_seq_count_.store(0, std::memory_order_release);
 	lifecycle_pause_.store(false, std::memory_order_release);
@@ -610,6 +676,12 @@ std::vector<Dereplicate::DerepOutputGroup> Dereplicate::outputGroups(std::vector
     // Caller holds LifecyclePause and has flushed every producer batch.
     vector<DerepOutputGroup> groups;
     groups.reserve(tracker_size_total());
+    if (coarse_) {
+        for (const auto& group : coarse_->groups()) {
+            groups.push_back({group->representatives.totalSum(), group->key(), &group->representatives, {}});
+        }
+        return groups;
+    }
     for (const auto& shard : shards_) {
         for (const auto& entry : shard->tracker) {
             assert(entry.second);
@@ -677,6 +749,7 @@ void Dereplicate::finishMap() {
 		shard->tracker.clear();
 		shard->rejected.clear();
 	}
+	if (coarse_) { coarse_->clear(); }
 	srch_seq_total_len_.store(0, std::memory_order_release);
 	srch_seq_count_.store(0, std::memory_order_release);
 	const string tmpMap = mapF + ".tmp";
@@ -776,6 +849,33 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 		}
 	};
 
+    std::ofstream diffOutput, subclusterOutput, subclusterOutputMate, subclusterFastq, subclusterFastqMate;
+    const bool pairedVariants = coarse_ && coarse_->storesQualities() && b_pairedInput;
+    const string subclusterFastqPath = baseOF2 + (pairedVariants ? ".subclusters.1.fq" : ".subclusters.fq");
+    const string subclusterFastqMatePath = baseOF2 + ".subclusters.2.fq";
+    const string subclusterPath = baseOF2 + (pairedVariants ? ".subclusters.1.fna" : ".subclusters.fna");
+    const string subclusterMatePath = baseOF2 + ".subclusters.2.fna";
+    const string diffPath = baseOF2 + ".diff";
+    if (coarse_ && coarse_->storesQualities()) {
+        subclusterFastq.open(subclusterFastqPath, ios::out | ios::trunc);
+        ensureOpen(subclusterFastq, subclusterFastqPath, "exact subcluster FASTQ");
+        if (pairedVariants) {
+            subclusterFastqMate.open(subclusterFastqMatePath, ios::out | ios::trunc);
+            ensureOpen(subclusterFastqMate, subclusterFastqMatePath, "exact subcluster mate FASTQ");
+        }
+    }
+    if (coarse_ && coarse_->storesDiffs()) {
+        diffOutput.open(diffPath, ios::out | ios::binary | ios::trunc);
+        ensureOpen(diffOutput, diffPath, "nucleotide differences");
+        if (writeSubclusters_) {
+            subclusterOutput.open(subclusterPath, ios::out | ios::trunc);
+            ensureOpen(subclusterOutput, subclusterPath, "exact subcluster FASTA");
+            if (pairedVariants) {
+                subclusterOutputMate.open(subclusterMatePath, ios::out | ios::trunc);
+                ensureOpen(subclusterOutputMate, subclusterMatePath, "exact subcluster mate FASTA");
+            }
+        }
+    }
 	// OPEN OUTPUT FILE STREAMS
 	const auto cumulativeMode = b_derepPerSR ? ios::app : (ios::out | ios::trunc);
 	omaps.open(mapF.c_str(), cumulativeMode);//| ios::binary
@@ -839,7 +939,15 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	//convert to vector, that can than be written out
 	// Sort small references; materialize only one independent output group at a time.
     vector<uint64_t> recoveredCounts(barcode_number_to_sample_id_.size(), 0);
-    auto dereplicated_dnas = outputGroups(recoveredCounts);
+    CoarseDereplication::Refinement refinement;
+    std::vector<DerepOutputGroup> dereplicated_dnas;
+    if (coarse_ && coarse_->reassigns()) {
+        refinement = coarse_->refine(searchWithMerg, searchLength);
+        for (size_t i = 0; i < refinement.representatives.size(); ++i) {
+            auto& dna = refinement.representatives[i];
+            if (dna) { dereplicated_dnas.push_back({dna->totalSum(), coarse_->groups()[i]->key(), nullptr, {}, dna}); }
+        }
+    } else { dereplicated_dnas = outputGroups(recoveredCounts); }
     sort(dereplicated_dnas.begin(), dereplicated_dnas.end(), [](const auto& left, const auto& right) {
         return left.count != right.count ? left.count > right.count : left.key < right.key;
     });
@@ -869,11 +977,24 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	//print unique DNAs
 	for (size_t i = 0; i < dereplicated_dnas.size(); i++) {
         const auto& group = dereplicated_dnas[i];
-        shared_ptr<DNAunique> dna = group.representative->best(true, !b_derep_as_fasta_);
+        shared_ptr<DNAunique> dna = group.refined ? group.refined : group.representative->best(true, !b_derep_as_fasta_);
         if (!dna) { continue; }
         for (const auto* member : group.members) { member->addEvidenceTo(dna, !b_derep_as_fasta_); }
         total_count ++;
 		dna->Count2Head(b_usearch_fmt);
+        if (auto differences = dna->getDiffDNA(); differences && coarse_) {
+            if (coarse_->storesDiffs()) {
+                differences->write(diffOutput, dna->getId());
+                if (writeSubclusters_) {
+                    if (pairedVariants) { differences->writeFasta(subclusterOutput, subclusterOutputMate, dna->getId()); }
+                    else { differences->writeFasta(subclusterOutput, dna->getId()); }
+                }
+            }
+            if (coarse_->storesQualities()) {
+                if (pairedVariants) { differences->writeFastq(subclusterFastq, subclusterFastqMate, dna->getId(), fastqVer); }
+                else { differences->writeFastq(subclusterFastq, dna->getId(), fastqVer); }
+            }
+        }
 		shared_ptr<DNAunique> dna_merged = nullptr;
 		if ((dereplicate_sample_specific && 
 			dna->pass_deprep_smplSpc(dereplicate_sample_specific_indices)) ||
@@ -955,6 +1076,11 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 //	if (tmpCnt != passedSize) {
 //		cerr << "Counting failed\n" << tmpCnt << " " << passedSize<<endl;
 //	}
+	if (diffOutput.is_open()) { finalizeOutputFile(diffOutput, diffPath); }
+    if (subclusterOutput.is_open()) { finalizeOutputFile(subclusterOutput, subclusterPath); }
+    if (subclusterFastq.is_open()) { finalizeOutputFile(subclusterFastq, subclusterFastqPath); }
+    if (subclusterFastqMate.is_open()) { finalizeOutputFile(subclusterFastqMate, subclusterFastqMatePath); }
+    if (subclusterOutputMate.is_open()) { finalizeOutputFile(subclusterOutputMate, subclusterMatePath); }
 	finalizeOutputFile(of, outfile2);
     finalizeOutputFile(omaps, mapF);
     finalizeOutputFile(ofRest, outRest);
@@ -987,6 +1113,21 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
         uint64_t recovered = 0;
         for (uint64_t count : recoveredCounts) { recovered += count; }
         report += "Prefix matching: " + formatCount64(recovered) + " non-passing reads recovered into passing groups\n";
+    }
+    if (coarse_) {
+        const auto& stats = coarse_->stats();
+        report += "Coarse matching: " + formatCount64(stats.comparisons) + " bounded comparisons; " +
+            formatCount64(stats.fallbackQueries) + " queries requiring seed fallback\n";
+        if (coarse_->reassigns()) {
+            report += "Final reassignment: " + formatCount64(refinement.movedReads) + " reads in " +
+                formatCount64(refinement.movedVariants) + " exact subclusters moved; " +
+                formatCount64(refinement.searches.comparisons) + " representative comparisons\n";
+        }
+        if (coarse_->storesDiffs()) { report += "Nucleotide differences: " + diffPath + "\n"; }
+        if (writeSubclusters_) { report += "Exact subcluster FASTA: " + subclusterPath + (pairedVariants ? ", " + subclusterMatePath : "") + "\n"; }
+        if (coarse_->storesQualities()) {
+            report += "Exact subcluster FASTQ (selected qualities): " + subclusterFastqPath + (pairedVariants ? ", " + subclusterFastqMatePath : "") + "\n";
+        }
     }
 	report += "Search sequence length: avg " + avgSrchSeqLenStream.str() + " (" + formatCount64(srchSeqTotalLen) + " total over " + formatCount64(srchSeqCount) + " reads)\n";
 	

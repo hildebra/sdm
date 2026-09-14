@@ -1,0 +1,4 @@
+simulation: seed_templates=2026091201 seed_reads=2026091202 length=1500 templates=50 lineages=5 reads=5000
+errors: total=74966 mean=14.9932 rate=0.009995466667 min=3 max=31 within_99pct_of_true_template=2799/5000
+template_divergence: within_lineage=0.01347851852 between_lineages=0.1334453333
+same_template_read_pairs: trials=10000 mean_mismatches=29.743 within_99pct=27 first4_also_pass=15

@@ -25,6 +25,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <istream>
 #include <memory>
 #include <iostream>
+#include <cstdint>
 
 using std::string;
 using std::vector;

@@ -109,10 +109,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 
-#ifdef _THREADED
-#include <thread>
-#include <mutex>
-#endif
 //#include <future>
 
 #ifdef _WIN32
@@ -176,7 +172,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //3.47: restore historical truncation scope: full merged outputs and legacy ordinary-read minimum adjustment.
 //3.48: 12.9.26: automatic 100% prefix dereplication with a fixed-length fast path;
 //      cap merged clustering keys for UPARSE while retaining full merged outputs and HQ mates.
-static const char* sdm_version = "3.48";
+//3.50: 12.9.26: development baseline for evaluating 99% identity clustering and seed filtering.
+//3.51: bounded opt-in ONT barcode edit matching, primer orientation and assignment counters.
+//      Streaming substitution dereplication with homopolymer-filtered seeds and optional diffDNA storage.
+//3.52: 13.9.26: selected qualities for exact single/pair variants, shared fragment counts,
+//      paired reassignment, synchronized subcluster FASTQ, and linked SDMDIFF3 pair export.
+static const char* sdm_version = "3.52";
 static const char* sdm_status = "beta";
 
 

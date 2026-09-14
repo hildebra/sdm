@@ -124,7 +124,6 @@ public:
 	void closeOutFilesDemulti();
 	void closeOutStreams(bool wr = true);
 
-	//void writeAllStoredDNA();
 
 	//	void threadAnalyzeDNA(shared_ptr<DNA>);
 	void setFastQWrite(bool x) { BWriteFastQ = x; BWriteQual = !x; }
@@ -172,9 +171,7 @@ public:
 	void setSubfilters(int num);
 	void mergeSubFilters();
 	void activateWrite2File() { write2File = true; }
-	void createWriteThread() { writeThreadStatus = 1; }
 	void setOneLinerFastaFmt(bool b) { b_oneLinerFasta = b; }
-	//void printStorage() { cerr << "Size of MD DNA P1:" << DNAsP1.size() << " P2: " << DNAsP2.size() << endl; }
 	//void revConstellationCnts(int x) { MFil->revConstellationCnts(x); }
 	//dereplication of DNA seqs
 	void attachDereplicator(shared_ptr<Dereplicate> de);
@@ -245,8 +242,6 @@ private:
 
 	//	void resetOutStreams();
 	void delAllDNAvectors();
-	//void writeAllStoredDNA2();
-	//void writeAllStoredDNA2t();
 	void incrementOutputFile();
 	// internal variant of closeOutStreams that assumes sqfqostrMTX already held
 	void closeOutStreams_locked(bool wr);
@@ -261,13 +256,6 @@ private:
 	vector<std::unique_ptr<Filters>> subFilter;
 
 
-	//contains DNA sequences (that failed to have matching Q and vice versa
-	//TODO rausschmeissen andreplace with ofbufstrea,
-//	vector<shared_ptr<DNA>> DNAsP1;
-//	vector<shared_ptr<DNA>> DNAsP2,DNAsS1,DNAsS2,DNAsNoHead;
-//	vector<shared_ptr<DNA>> DNAsP1_alt,DNAsP2_alt,DNAsS1_alt,DNAsS2_alt;
-	// bis hier
-	//Replace with ofbufstream
 	uint totalFileStrms;
 	//p1: 0:green, 1:yellow
 	//p2: 0:pair1, 1:pair2, 2:single1, 3:single2
@@ -286,9 +274,6 @@ private:
 	//controls how memory DNA is written to out file
 	int suppressOutWrite;//0=all normal, 1=skip mainfile, 2=skip addfile, 3=skip both
 	bool write2File;
-	//bool mem_used;
-	std::atomic<uint64_t> DNAinMem;
-	std::atomic<int> writeThreadStatus;
 
 	int fastQver; //33, 62 or 59
 	int fastQoutVer; //33, 62 or 59

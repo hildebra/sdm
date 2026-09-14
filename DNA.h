@@ -25,6 +25,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define _CRT_SECURE_NO_DEPRECATE
 #endif
 
+#include "diffDNA.h"
 #include <functional>
 #include <cctype>
 #include <locale>
@@ -50,29 +51,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 class DNA {
     friend class DNAunique;
 public:
-    struct WhoIsBetterMergeStats {
-        uint64_t merged_compares = 0;
-        uint64_t non_merged_compares = 0;
-        uint64_t accumulated_merge_length = 0;
-    };
+    using WhoIsBetterMergeStats = SeedComparisonHistory;
 
-    DNA(string seq, string names) : sequence_(seq), sequence_length_(sequence_.length()),
-        id_(names), new_id_(names),
-        qual_(0), sample_id_(-1), avg_qual_(-1.f),
-        quality_sum_(0), accumulated_error_(0.),
-        good_quality_(false), mid_quality_(false), failed_(false), reversed_(false),
-        read_position_(-1),
-        FtsDetected(),
-        fastq_write_offset_(0), id_fixed_(false), tempFloat(0.f), merge_offset_(-1) {}
-    DNA() : sequence_(""), sequence_length_(0), id_(""), new_id_(""), qual_(0),
-        sample_id_(-1), avg_qual_(-1.f),
-        quality_sum_(0), accumulated_error_(0.),
-        good_quality_(false), mid_quality_(false), failed_(false), reversed_(false),
-        read_position_(-1),
-        FtsDetected(),
-        fastq_write_offset_(0), id_fixed_(false), tempFloat(0.f), merge_offset_(-1) {
-        sequence_.reserve(151);//set to resonable expectation
-    }
+    DNA(string seq, string names) : sequence_(std::move(seq)),
+        id_(std::move(names)), sequence_length_(sequence_.size()) {}
+    DNA() { sequence_.reserve(151); }
     //works directly with 4 lines in fastq format
     DNA(const vector<string>& fq, qual_score fastQver);//fastq input
     DNA(const vector<string>& fas);//this is for fasta only..
@@ -92,7 +75,7 @@ public:
     }
     //something wrong with DNA object, just del all info
     void delself() {
-        sequence_ = ""; sequence_length_ = 0; id_ = ""; new_id_ = ""; qual_.resize(0);
+        sequence_ = ""; sequence_length_ = 0; id_ = ""; resetNewId(); qual_.resize(0);
         good_quality_ = false; mid_quality_ = false; failed_ = true;
     }
     //~DNA(){}
@@ -152,7 +135,7 @@ public:
 
     const string& getId() {
         if (id_fixed_) {
-            return new_id_;
+            return newId();
         }
         return id_;
     }
@@ -163,7 +146,7 @@ public:
     void normalizePositionFreeId();
     const string& getOldId() { return id_; }
     string getShortId() { return id_.substr(0, getShorterHeadPos(id_)); }
-    string getNewIDshort() { return new_id_.substr(0, getShorterHeadPos(new_id_)); }
+    string getNewIDshort() { return newId().substr(0, getShorterHeadPos(newId())); }
     bool seal(bool isFasta = false);
 
 
@@ -215,9 +198,19 @@ public:
     };
     PrimerMatchDetails getPrimerMatchDetails(const string& primer, int start) const;
     int matchSeq(string, int Err, int searchSpace, int startPos, bool exhaustive = false);
+    // Read-only view overload: reuse primer matching while considering orientation.
+    static int matchSeq(std::string_view sequence, std::string_view primer,
+        int Err, int searchSpace, int startPos, bool exhaustive = false);
     void reverse_compliment(bool reset = true);
     int matchSeqRev(const string&, int Err, int searchSpace, int start = 0, bool = false);
-    int matchSeq_tot(const string&, int, int, int&);
+    int matchSeq_tot(const string&, int, int, int&, bool endScan = false);
+    struct BarcodeMatch {
+        int start = -1, stop = -1, errors = 0;
+        bool ambiguous = false; // Equally good matches imply different trim coordinates.
+    };
+    // ONT overload: best full-barcode edit match, with bounded start positions.
+    static BarcodeMatch matchSeq_tot(std::string_view sequence, std::string_view barcode,
+        int error, int maxPos);
     void writeSeq(ostream&, bool singleLine = false);
     void writeSeq_derep(ostream&, bool singleLine = false);
     string writeSeq(bool singleLine = false);
@@ -231,12 +224,12 @@ public:
     void writeFastQ(string&, bool = true);
     //void writeFastQ(ofbufstream&, bool = true);
     void writeFastQEmpty(ostream&);
-    void setNewID(const string& x) { new_id_ = x; }
-    void setNewID(string&& x) { new_id_ = std::move(x); }
-    void setHeader(const string& x) { id_ = x; new_id_ = x; }
+    void setNewID(const string& x) { new_id_ = x; new_id_is_original_ = false; }
+    void setNewID(string&& x) { new_id_ = std::move(x); new_id_is_original_ = false; }
+    void setHeader(const string& x) { id_ = x; resetNewId(); }
     void setHeader(string&& x) {
         id_ = std::move(x);
-        new_id_ = id_;
+        resetNewId();
     }
     void changeHeadPver(int ver);
     void setTA_cut(bool x) { FtsDetected.TA_cut = x; }
@@ -364,7 +357,7 @@ public:
             BinomialErr(false),
             dblTagFail(false)
         {}
-    } QualCtrl;
+    };
 
 protected:
     size_t getShorterHeadPos(const string& x, int fastQheadVer = -1);
@@ -379,18 +372,9 @@ protected:
     inline float prob_j_errors(float p, float j, float n);
     inline bool matchDNA(char, char);
 
-    string sample_barcode_;
-    std::string sequence_;
-    size_t sequence_length_;
-    string id_, new_id_; //original and newly constructed id_
-    vector<qual_score> qual_;
 
 public:
 
-    int merge_seed_pos_ = -1;
-    int seed_length_ = -1;
-    int merge_offset_ = -1;
-    bool reversed_merge_ = false;
 
     void clearMergeSeed() {
         merge_seed_pos_ = -1;
@@ -429,27 +413,17 @@ public:
     bool isReversed() { return reversed_; }
 
 protected:
-    int sample_id_;
 
     //const char* DN;
-    float avg_qual_;
-    uint64_t quality_sum_;
-    double accumulated_error_;
 
     void invalidateQualityCaches() {
         avg_qual_ = -1.f;
         quality_sum_ = 0;
         accumulated_error_ = 0.;
     }
-    uint8_t good_quality_ : 1;
-    uint8_t mid_quality_ : 1;
-    uint8_t failed_ : 1;
-    uint8_t reversed_ : 1;
 
 
-    short read_position_;//-1=unkown; 0=pair1 (fwd primer); 1=pair2 (rev primer); 3=MID seq ;
 
-    qual_score fastq_write_offset_;
 
     struct ElementsDetection {
         uint8_t forward : 1;
@@ -460,12 +434,13 @@ protected:
         uint8_t dereplicated : 1;
         uint8_t revPairConstellation : 1;
         //read merging related stats
-        int errInOverlap;        qual_score meanQInOverlapMismatch;
+        qual_score meanQInOverlapMismatch;
+        int errInOverlap;
         int mergeLength;
 
         ElementsDetection() : forward(false), reverse(false), TA_cut(false), barcode_detected(false),
             barcode_cut(false), dereplicated(false), revPairConstellation(false),
-            errInOverlap(-1), meanQInOverlapMismatch(0), mergeLength(-1) {}
+            meanQInOverlapMismatch(0), errInOverlap(-1), mergeLength(-1) {}
         void transferFrom(ElementsDetection& o) {
             forward = o.forward;
             reverse = o.reverse;
@@ -492,17 +467,54 @@ protected:
             meanQInOverlapMismatch = 0;
         }
 
-    } FtsDetected;
+    };
 
 
 
-    bool id_fixed_;
-    float tempFloat;
+    // Large aligned fields first; byte-sized state shares the final word.
+    string sample_barcode_;
+    string sequence_;
+    string id_, new_id_;
+    vector<qual_score> qual_;
+    size_t sequence_length_ = 0;
+    uint64_t quality_sum_ = 0;
+    double accumulated_error_ = 0.;
+    ElementsDetection FtsDetected;
+public:
+    QualStats QualCtrl;
+    int merge_seed_pos_ = -1;
+    int seed_length_ = -1;
+    int merge_offset_ = -1;
+protected:
+    int sample_id_ = -1;
+    float avg_qual_ = -1.f;
+    float tempFloat = 0.f;
+    short read_position_ = -1; // -1 unknown; 0 forward; 1 reverse; 3 MID
+    qual_score fastq_write_offset_ = 0;
+    uint8_t good_quality_ : 1 = false;
+    uint8_t mid_quality_ : 1 = false;
+    uint8_t failed_ : 1 = false;
+    uint8_t reversed_ : 1 = false;
+    bool id_fixed_ = false;
+    bool new_id_is_original_ = true;
+public:
+    bool reversed_merge_ = false;
+protected:
+    // Parsing constructors adopt a buffer and must not allocate a reserve first.
+    struct AdoptBuffer {};
+    explicit DNA(AdoptBuffer) {}
+    const string& newId() const { return new_id_is_original_ ? id_ : new_id_; }
+    string& mutableNewId() {
+        if (new_id_is_original_) { new_id_ = id_; new_id_is_original_ = false; }
+        return new_id_;
+    }
+    void resetNewId() { new_id_.clear(); new_id_is_original_ = true; }
+
 };
 
 using sample_count_t = uint64_t;
-using read_occ_entry = std::pair<int, sample_count_t>;
-typedef std::vector<read_occ_entry> read_occ;
+using read_occ_entry = diffDNA::SampleCount;
+using read_occ = diffDNA::SampleCounts;
 
 struct DNAHasher
 {
@@ -514,15 +526,37 @@ struct DNAHasher
 
 
 
-class DNAunique : public DNA {//used for dereplication
+// Shared arithmetic for selected representatives and detached merge history.
+// Uniform coverage avoids an allocation and a per-base increment stream.
+class DNAQualityEvidence {
+public:
+    using qual_accum_t = uint64_t;
+    std::vector<qual_accum_t> quality_sum_per_base_;
+    static void addToQualSum(qual_accum_t& target, qual_accum_t value);
+    void initializeQualityEvidence(const vector<qual_score>& qualities, size_t length);
+    void addQualityEvidence(const vector<qual_score>& qualities, size_t length);
+    void addQualityEvidence(const DNAQualityEvidence& other);
+    void clearQualityEvidence();
+    qual_accum_t qualityCoverage(size_t position) const {
+        return quality_coverage_per_base_.empty() ? uniform_quality_coverage_ : quality_coverage_per_base_[position];
+    }
+protected:
+    void buildAverageQualityString(string& output, size_t length, int offset) const;
+private:
+    void extendQualityEvidence(size_t length, bool uniformSource);
+    std::vector<qual_accum_t> quality_coverage_per_base_;
+    qual_accum_t uniform_quality_coverage_ = 0;
+};
+
+class DNAunique : public DNA, public DNAQualityEvidence {//used for dereplication
     friend class DNA;
 public:
     // Constructors and Destructors
-    DNAunique() : DNA(), pair_(0), total_sum_cache_(0), total_sum_cache_valid_(false), derep_fastq_offset_(0) {}
-    DNAunique(string s, string x) : DNA(s, x), total_sum_cache_(0), total_sum_cache_valid_(false), derep_fastq_offset_(0) {}
+    DNAunique() : DNA(), pair_(0), derep_fastq_offset_(0) {}
+    DNAunique(string s, string x) : DNA(std::move(s), std::move(x)), derep_fastq_offset_(0) {}
 
     // Mostly used constructor
-    DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), pair_(0), total_sum_cache_(0), total_sum_cache_valid_(false), derep_fastq_offset_(0) {//best_seed_length_((uint)sequence_.size())
+    DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), pair_(0), derep_fastq_offset_(0) {//best_seed_length_((uint)sequence_.size())
         incrementSampleCounter(BC);
     }
     ~DNAunique() = default;
@@ -535,6 +569,12 @@ public:
     void Count2Head(bool);
     bool betterPreSeed(shared_ptr<DNA> d1, shared_ptr<DNA> d2);
     void matchedDNA(shared_ptr<DNA>, shared_ptr<DNA>, shared_ptr<DNA>, int, bool, bool collectMergedQualities = true, bool markDereplicated = true);
+    // Coarse clusters retain only the chosen read's qualities and attachments.
+    void matchedCoarseDNA(std::shared_ptr<DNA> dna, std::shared_ptr<DNA> mate,
+        std::shared_ptr<DNA> merged, int sample) {
+        matchedDNA(std::move(dna), std::move(mate), std::move(merged), sample, true, false);
+        merge_quality_evidence_.reset();
+    }
     void incrementSampleCounter(int sample_id);
     void writeMap(ofstream& os, const string&, vector<uint64_t>&, const vector<int>&, vector<uint64_t>&, vector<int>&);
     //inline int getCount() { return count_; }
@@ -543,14 +583,13 @@ public:
     //void setBestSeedLength(uint i) { best_seed_length_ = i; }
     void incrementSampleCounterBy(int sample_id, uint64_t count);
     void transferOccurence(shared_ptr<DNAunique>);
-    const read_occ& getDerepMap() { return occurence; }
+    const read_occ& getDerepMap() const { return differences_.sampleCounts(); }
     vector<uint64_t> getDerepMapSort(size_t);
     //vector<pair_<int, int>> getDerepMapSort2(size_t wh);
     //void getDerepMapSort(vector<int>&, vector<int>&);
 
     using qual_accum_t = uint64_t;
 
-    void addToQualSum(qual_accum_t& target, qual_accum_t value);
 
     void prepSumQuals();
     void sumQualities(const shared_ptr<DNAunique>& dna);
@@ -563,6 +602,24 @@ public:
     string writeFastQ(bool = true);
     void writeFastQ(string&, bool = true);
 
+    // Replaces the complete count/variant state, as used to create an output snapshot.
+    void attachDiffDNA(std::shared_ptr<diffDNA> differences) { differences_ = differences ? *differences : diffDNA{}; }
+    const diffDNA& getDerepCounts() const { return differences_; }
+    // Preserve the optional, owning snapshot API for nucleotide observations.
+    std::shared_ptr<const diffDNA> getDiffDNA() const {
+        return differences_.hasSequenceData() ? std::make_shared<const diffDNA>(differences_) : nullptr;
+    }
+    void recordDiffDNA(std::string_view sequence, int sample = -1, uint64_t copies = 1);
+    void recordDiffDNA(std::string_view sequence, const diffDNA::SampleCounts& samples);
+    void recordDiffQuality(DNA& dna, int sample) { differences_.addQuality(dna, 1, sample); }
+    void recordDiffPairQuality(DNA& r1, DNA& r2, int sample) { differences_.addPairQuality(r1, r2, 1, sample); }
+    void recordDiffPair(std::string_view r1, std::string_view r2, const diffDNA::SampleCounts& samples, const diffDNA::QualityRecord& quality) {
+        differences_.addPair(r1, r2, samples, quality);
+    }
+    void recordDiffDNA(std::string_view sequence, const diffDNA::SampleCounts& samples, const diffDNA::QualityRecord& quality) {
+        differences_.add(sequence, samples, quality);
+    }
+    void clearDerepCounts() { differences_.clear(); }
     void saveMem();
     shared_ptr<DNAunique> cloneForOutput() const;
     void sumMergeQualities(const shared_ptr<DNAunique>& other);
@@ -584,32 +641,36 @@ public:
     void compactForFastaDerepStorage();
     std::vector<qual_accum_t> transferPerBaseQualitySum();
 
-    std::vector<qual_accum_t> quality_sum_per_base_;
 
 private:
     //int count_;
     //matrixUnit chimeraCnt;
     //int best_seed_length_;
 
-    read_occ occurence;
-    mutable uint64_t total_sum_cache_;
-    mutable uint8_t total_sum_cache_valid_ : 1;
-
-    inline void invalidateTotalSumCache() {
-        total_sum_cache_valid_ = false;
-    }
-
+    diffDNA differences_;
     void promoteQualitiesToSums(bool releaseRawQualities);
-    std::vector<qual_accum_t> quality_coverage_per_base_;
-
-    read_occ::iterator findOccurrenceEntry(int sample_id);
-    read_occ::const_iterator findOccurrenceEntry(int sample_id) const;
+    struct MergeQualityEvidence : DNAQualityEvidence {
+        // Preserve the unpromoted case without allocating eight-byte sums yet.
+        vector<qual_score> raw;
+        MergeQualityEvidence() = default;
+        explicit MergeQualityEvidence(DNA& dna) {
+            const auto& qualities = dna.getQual();
+            const size_t n = std::min(static_cast<size_t>(dna.length()), qualities.size());
+            raw.assign(qualities.begin(), qualities.begin() + n);
+        }
+        void add(DNA& dna) {
+            if (dna.getQual().empty() || !dna.length()) { return; }
+            if (quality_sum_per_base_.empty()) { initializeQualityEvidence(raw, raw.size()); }
+            addQualityEvidence(dna.getQual(), dna.length());
+            vector<qual_score>().swap(raw);
+        }
+    };
 
     shared_ptr<DNAunique> pair_;
 
     shared_ptr<DNAunique> merge_;
     // Retain accepted consensus evidence if the chosen representative loses its merge.
-    shared_ptr<DNAunique> merge_quality_evidence_;
+    shared_ptr<MergeQualityEvidence> merge_quality_evidence_;
 
     // to calculate mean
     qual_score derep_fastq_offset_;

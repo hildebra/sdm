@@ -1,0 +1,69 @@
+
+1.
+mima create -n sdm-static --override-channels -c conda-forge \
+    gcc_linux-64 gxx_linux-64 sysroot_linux-64 \
+    make pkg-config curl \
+    zlib bzip2 liblzma-static
+
+mima activate sdm-static
+
+
+2.
+ls "$CONDA_PREFIX/lib/"{libz.a,libbz2.a,liblzma.a}
+
+printf '#include <iostream>\nint main(){std::cout << "static OK\\n";}\n' \
+    | "$CXX" -std=c++20 -static -x c++ - \
+        -o "$CONDA_PREFIX/bin/sdm-static-check"
+
+"$CONDA_PREFIX/bin/sdm-static-check"
+
+
+3.
+mkdir -p "$HOME/src"
+cd "$HOME/src"
+
+curl -fL -o htslib-1.22.1.tar.bz2 \
+    https://github.com/samtools/htslib/releases/download/1.22.1/htslib-1.22.1.tar.bz2
+
+tar -xjf htslib-1.22.1.tar.bz2
+cd htslib-1.22.1
+
+export SDM_HTS_PREFIX="$HOME/.local/htslib-sdm-static"
+
+./configure \
+    --prefix="$SDM_HTS_PREFIX" \
+    --disable-libcurl \
+    --disable-s3 \
+    --disable-gcs \
+    --disable-plugins \
+    --without-libdeflate \
+    CC="$CC" \
+    CPPFLAGS="-I$CONDA_PREFIX/include" \
+    LDFLAGS="-L$CONDA_PREFIX/lib"
+
+make -j4
+make install
+
+
+
+4.
+
+cd ~/dev/Cpp//sdm
+
+export PKG_CONFIG_PATH="$SDM_HTS_PREFIX/lib/pkgconfig:$CONDA_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
+pkg-config --libs --static htslib
+
+make -B -j4 STATIC=1 WITH_HTS=1 \
+    CC="$CC" \
+    CXX="$CXX" \
+    CXXFLAGS="-O3" \
+    LDFLAGS="-L$SDM_HTS_PREFIX/lib -L$CONDA_PREFIX/lib" \
+    HTS_CFLAGS="$(pkg-config --cflags htslib)" \
+    HTS_LIBS="$(pkg-config --libs --static htslib)"
+	
+	
+	
+5.
+file ./sdm
+ldd ./sdm

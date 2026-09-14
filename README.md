@@ -7,6 +7,8 @@
 
 It accepts FASTA and FASTQ files, including gzip-compressed files, and supports single-end and paired-end data. The default build also reads SAM, BAM and CRAM; see [alignment input](docs/hts.md).
 
+**3.52 beta:** retain selected qualities for exact single-read and `(R1, R2)` variants, count fragments once, and export synchronized paired subclusters. Optional reassignment preserves mate linkage and sample counts; paired nucleotide sidecars use `SDMDIFF3`. See the [dereplication flags](docs/options.md#streaming-coarse-dereplication) and [paired-mode guide](docs/paired-diff-quality.md).
+
 ## Build from source
 
 The supplied Makefile uses a C++20 compiler, GNU Make, POSIX threads, zlib and HTSlib. By default, `make` produces **one fully static executable, `sdm`, with HTSlib enabled**. It reads FASTA/FASTQ (including gzip), SAM, BAM and CRAM.
@@ -221,6 +223,48 @@ In automatic and forced-prefix modes, `TruncateSequenceLength` caps **both R1 an
 
 Prefix matching allows no substitutions, gaps, or offsets. Longer sequences that disagree stay separate; a short read compatible with several longer sequences is assigned once, deterministically. See [dereplication options](docs/options.md#dereplication) for matching and count-recovery details, and [runtime and memory measurements](docs/derep-prefix-evaluation.md) for the tradeoffs.
 
+For noisy reads, **streaming coarse dereplication** can reduce the number of retained sequences. Set `-derepIdentity` below `100` to enable it:
+
+```sh
+sdm -i_fastq ont.fastq -o_dereplicate clusters.fna -options sdm_options.txt \
+    -derepIdentity 97.5 -threads 1
+```
+
+This example uses a 97.5% substitution identity threshold; choose the threshold for the compression and variant resolution you need. Each cluster keeps one high-quality representative, chosen by the existing dereplication rules, and the counts of all reads assigned to it. Matching uses an immutable initial sequence, so replacing the output representative does not move the cluster boundary. Comparisons start at position zero, cover the shorter clustering key, and respect explicit search and truncation caps. There is no indel alignment or reverse-complement search.
+
+Search uses non-overlapping 20-mers and excludes seeds containing homopolymers of four or more bases, or ambiguous bases. `-derepSeedHomopolymer <2..20>` changes the run cutoff. Homopolymer positions still count in the final identity calculation. Reads without enough usable seeds use direct comparison.
+
+Every dereplicate stores its sparse sample counts in a base `diffDNA` object, including ordinary 100% exact/prefix dereplication. With nucleotide storage disabled, its reference and variant entries remain unallocated. The same counts supply abundance headers, sample maps, and minimum-copy filtering.
+
+Add `-derepStoreDiffs 1` to retain nucleotide-only observations in a compact **`clusters.diff`** sidecar. This enables the nucleotide portion of `diffDNA`, which records each distinct nucleotide-change pattern and processed length once, with its exact copy count, relative to the fixed initial sequence. It discards individual read names and qualities. High-quality representative replacement leaves the reference and all stored differences intact. With differences, quality retention, and final reassignment disabled, memory grows with retained clusters and sample counts rather than with every assigned read. With differences enabled, memory also grows with the distinct encoded nucleotide variants. Exact repeats of any variant only increment its count.
+
+To export every exact subcluster within the coarse groups, also add `-derepSubclusterFasta 1`. SDM then writes `clusters.subclusters.fna`, with headers such as `>read_17.sub2;size=42;`. Each record reconstructs one distinct full processed sequence and uses that sequence's own count; the normal output still contains one representative per coarse cluster. The export is off by default and requires `-derepStoreDiffs 1`.
+
+Add **`-derepStoreQuals 1`** to retain each exact variant's selected quality vector and export `clusters.subclusters.fq`. The existing representative-selection rules choose one complete observed quality vector for each exact sequence; these are not averaged qualities. Nucleotides remain encoded as differences from the immutable initial reference. Names are generated as `@read_17.sub2;size=42;`, with the exact variant's own count. The normal coarse representative output remains available.
+
+```sh
+sdm -i_fastq ont.fastq -o_dereplicate clusters.fna -options sdm_options.txt \
+    -derepIdentity 97 -derepStoreQuals 1 -threads 1
+```
+
+Quality retention defaults to `0` and requires complete qualities for unmerged single-end reads or complete read pairs. It automatically retains nucleotide variants in memory; `-derepStoreDiffs 1` separately enables binary delta output. Binary `.diff` output remains nucleotide-only, using `SDMDIFF2` for single reads and `SDMDIFF3` for linked pairs. Selected qualities and counts also follow variants through optional final reassignment. See [single-end implementation and ONT simulation benchmarks](docs/diff-quality-retention.md).
+
+For paired input, the same flag retains **exact `(R1, R2)` variants**. Pairs sharing R1 but differing in R2 remain separate exact subclusters. SDM selects both quality vectors from one observed fragment and counts each fragment once. It writes synchronized `clusters.subclusters.1.fq` and `clusters.subclusters.2.fq` files with matching IDs and `;size=N;` values.
+
+```sh
+sdm -i_fastq reads.1.fq,reads.2.fq -paired 2 \
+    -o_dereplicate clusters.fna -options sdm_options.txt \
+    -derepIdentity 97 -derepStoreQuals 1 -threads 1
+```
+
+R1 supplies candidate seeds; both mates must independently meet the configured same-start identity threshold against their corresponding initial references. Search caps apply to each mate independently. Final reassignment compares both mates and moves complete variants and sample counts together. Native merging options must be disabled for this mode. Optional paired `.diff` files use the linked `SDMDIFF3` format; paired exact-subcluster FASTA produces `.subclusters.1.fna` and `.subclusters.2.fna`. See [paired behavior and validation](docs/paired-diff-quality.md).
+
+For an optional final reassignment, add `-derepReassign 1` (default `0`). SDM compares each exact variant against the final high-quality representatives and moves all its copies and sample counts to a strictly closer representative that meets `derepIdentity`. Equal identities keep the original cluster. This is one pass with fixed representatives; it does not select new representatives or iterate. It works at any configured identity, including 97%, 98%, and 99%.
+
+Reassignment automatically retains nucleotide variants and per-variant sample counts in memory, even with `-derepStoreDiffs 0`, so it uses more memory than ordinary coarse clustering. Each variant stores one sparse sample-count vector; its abundance and the cluster sample map are derived from those entries. Writing `.diff` or exact-subcluster FASTA remains separately controlled by the existing options. Output counts, sample maps, minimum-copy filtering, and enabled variant exports all use the final assignments. See the [Q30 200 bp benchmark](docs/coarse-dereplication-q30.md) for speed and memory measurements.
+
+All of these options can be set as tab-separated entries in `sdm_options.txt`; command-line values take precedence. Default `derepIdentity=100`, `derepStoreDiffs=0`, `derepStoreQuals=0`, and `derepReassign=0` retain the existing automatic exact/prefix modes. Enabling differences, quality retention, or reassignment at `100` selects streaming exact-prefix clustering with fixed initial anchors. See [coarse dereplication and the delta format](docs/coarse-dereplication.md) for semantics, limits, and validation.
+
 For more control over copy counts across samples, see `sdm -help_flags`.
 
 ### Try a small run first
@@ -272,6 +316,8 @@ sdm -help_options
 sdm -help_map
 sdm -v
 ```
+
+For single-end ONT amplicons, see [ONT matching and LotuS integration](docs/ont.md) and the [primer/barcode search audit](docs/search-audit.md). ONT matching requires `-ontMode 1`; the default remains off.
 
 These references also cover read merging, additional output formats, read selection, seed extension, and GoldenAxe processing for PacBio concatenated reads.
 

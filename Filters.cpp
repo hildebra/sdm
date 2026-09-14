@@ -150,6 +150,38 @@ Filters::Filters(OptContainer* cmdArgs1) :
 
 
 
+    const string ontMode = cmdArgs->get("-ontMode", "0");
+    if (ontMode != "0" && ontMode != "1") {
+        throw std::runtime_error("-ontMode must be 0 or 1");
+    }
+    ontMode_ = ontMode == "1";
+    if (cmdArgs->contains("-barcodeSearchWindow")) {
+        const string value = cmdArgs->get("-barcodeSearchWindow");
+        const uint64_t window = parseOutputCount(value, "-barcodeSearchWindow");
+        if (value.find_first_not_of("0123456789") != string::npos || window < 1 || window > 10000) {
+            throw std::runtime_error("-barcodeSearchWindow must be an integer from 1 to 10000");
+        }
+        barcodeSearchWindow_ = static_cast<int>(window);
+    }
+    const string ends = cmdArgs->get("-ontBarcodeEnds", "either");
+    if (ends != "either" && ends != "both") {
+        throw std::runtime_error("-ontBarcodeEnds must be either or both");
+    }
+    ontBarcodeBothEnds_ = ends == "both";
+    if (!ontMode_ && (cmdArgs->contains("-barcodeSearchWindow") || cmdArgs->contains("-ontBarcodeEnds"))) {
+        throw std::runtime_error("-barcodeSearchWindow and -ontBarcodeEnds require -ontMode 1");
+    }
+    if (ontMode_) {
+        if (!cmdArgs->contains("-map")) {
+            throw std::runtime_error("-ontMode 1 requires -map (BarcodeSequence or one FASTQ per sample)");
+        }
+        if ((cmdArgs->contains("-paired") && cmdArgs->get("-paired") != "1") ||
+            !cmdArgs->get("-onlyPair").empty() || !cmdArgs->get("-i_MID_fastq").empty() ||
+            cmdArgs->get("-GoldenAxe") == "1" || cmdArgs->get("-htsBarcode") == "BC") {
+            throw std::runtime_error("-ontMode 1 supports single-end FASTQ only; paired/MID, -onlyPair, GoldenAxe and HTS barcode modes are incompatible");
+        }
+    }
+
 	bool alt_bRequireRevPrimSet = false;
 
 	string optF("");
@@ -244,6 +276,12 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	const bool explicitDerepSearchLength = cmdArgs->contains("-derepSrchLen");
 	explicitDerepSearchLength_ = explicitDerepSearchLength;
 	const bool explicitDerepPrefix = cmdArgs->contains("-derepPrefix");
+    const bool explicitDerepIdentity = cmdArgs->contains("-derepIdentity");
+    const bool explicitDerepDiffs = cmdArgs->contains("-derepStoreDiffs");
+    const bool explicitDerepQuals = cmdArgs->contains("-derepStoreQuals");
+    const bool explicitDerepSubclusters = cmdArgs->contains("-derepSubclusterFasta");
+    const bool explicitDerepHomopolymer = cmdArgs->contains("-derepSeedHomopolymer");
+    const bool explicitDerepReassign = cmdArgs->contains("-derepReassign");
 	ifstream opt;
 	opt.open(optF.c_str(), ios::in);
 	if (!opt || optF == "") {
@@ -292,6 +330,12 @@ Filters::Filters(OptContainer* cmdArgs1) :
 			explicitDerepSearchLength_ = true;
         } else if (strcmp(segs.c_str(), "derepPrefix") == 0) {
             if (!explicitDerepPrefix) { (*cmdArgs)["-derepPrefix"] = segs2; }
+        } else if (segs == "derepIdentity" || segs == "derepStoreQuals" || segs == "derepStoreDiffs" || segs == "derepSeedHomopolymer" || segs == "derepSubclusterFasta" || segs == "derepReassign") {
+            const bool explicitOption = segs == "derepStoreQuals" ? explicitDerepQuals : segs == "derepIdentity" ? explicitDerepIdentity :
+                (segs == "derepStoreDiffs" ? explicitDerepDiffs :
+                (segs == "derepSubclusterFasta" ? explicitDerepSubclusters :
+                (segs == "derepReassign" ? explicitDerepReassign : explicitDerepHomopolymer)));
+            if (!explicitOption) { trim(segs2); (*cmdArgs)["-" + segs] = segs2; }
 		} else if (strcmp(segs.c_str(), "minAvgQuality") == 0) {
 			if (addMod) {
 				alt_min_q = (float)atof(segs2.c_str());
@@ -351,6 +395,10 @@ Filters::Filters(OptContainer* cmdArgs1) :
 			}
 		}
 		else if (strcmp(segs.c_str(), "maxBarcodeErrs") == 0) {
+            if (ontMode_ && (segs2.empty() || segs2.find_first_not_of("0123456789") != string::npos ||
+                parseOutputCount(segs2, "maxBarcodeErrs") > 3)) {
+                throw std::runtime_error("ONT maxBarcodeErrs must be an integer from 0 to 3 (edit distance)");
+            }
 			TagErrs = atoi(segs2.c_str());
 		}
 		else if (strcmp(segs.c_str(), "maxPrimerErrs") == 0) {
@@ -693,6 +741,8 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	bDoBarcode(of->bDoBarcode), bDoBarcode2(of->bDoBarcode2), bDoBarcode2Rd1(of->bDoBarcode2Rd1),
 	bDoHeadSmplID(of->bDoHeadSmplID),
 	bBarcodeSameSize(of->bBarcodeSameSize),
+    ontMode_(of->ontMode_), barcodeSearchWindow_(of->barcodeSearchWindow_),
+    ontBarcodeBothEnds_(of->ontBarcodeBothEnds_),
 	bOneFileSample(of->bOneFileSample), curBCnumber(BCnumber), BCoffset(of->BCoffset),
 	bAdditionalOutput(of->bAdditionalOutput), b2ndRDBcPrimCk(of->b2ndRDBcPrimCk),
 	bRevRdCk(of->bRevRdCk),
@@ -1058,7 +1108,7 @@ void Filters::reverseTS_all_BC2() {
 }
 
 bool Filters::isReversedAmplicon(const shared_ptr<DNA>& tdn) {
-	if ((!checkRevRd())) {
+	if (ontMode_ || !checkRevRd()) {
 		return false;
 	}
 
@@ -1552,13 +1602,14 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		canUsePrimerIdx = false;
 	}
 
-	if (!isMerged && canUsePrimerIdx && BextensivePrimerChecks) {
+	if (!ontMode_ && !isMerged && canUsePrimerIdx && BextensivePrimerChecks) {
 		if (checkIfRevPrimerHits(d, PrimerIdx[tagIdx], 0, bShortAmplicons)) {
 			d->reverse_compliment(false);
 		}
 	}
 	//bShortAmplicons checks for reverse primer on 1st read
-	if (canUsePrimerIdx && (BcutPrimer || Bcheck4illuAdapts)) {
+	if (canUsePrimerIdx && (BcutPrimer || Bcheck4illuAdapts ||
+        (ontMode_ && (!PrimerL.empty() || !PrimerR.empty())))) {
        if (pair == 1) {//pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
 			bool revCheck = false;
 			reverseSearchAttempted = true;
@@ -1571,11 +1622,11 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		else {//pair 0 or -1
 			bool fwdRC = false;
 			forwardSearchAttempted = true;
-			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, BextensivePrimerChecks, !isMerged);
-			if (bShortAmplicons || isMerged) {//also check other end of primer.. also use for PacBio amplicons
+			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, !ontMode_ && BextensivePrimerChecks, !isMerged);
+			if (ontMode_ || bShortAmplicons || isMerged) {//also check the reverse primer in single-end ONT reads
                bool revRC = true;
 				reverseSearchAttempted = true;
-				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, BextensivePrimerChecks, !isMerged);
+				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, !ontMode_ && BextensivePrimerChecks, !isMerged);
 				//case for 1) long read 2) look for both primers 3) rev required
 			}
 		}
@@ -2042,9 +2093,8 @@ int Filters::findTag(const shared_ptr<DNA>& d, string& presentBC, int& c_err,
 				d->cutSeq(0, stop);//start,stop
 			}
 			d->setBarcodeCut();
-			// needs to be locked when multithreaded
-			BCintoHead(idx, d, presentBC, c_err, isPair1);
 		}
+        if (cutBC) { BCintoHead(idx, d, presentBC, c_err, isPair1); }
 	}
 
 	return idx;
@@ -2052,6 +2102,110 @@ int Filters::findTag(const shared_ptr<DNA>& d, string& presentBC, int& c_err,
 
 //somewhat redundant with findTag function..
 int Filters::detectCutBC(const shared_ptr<DNA>& d, bool isPair1) {
+    if (ontMode_) {
+        if (d->getBarcodeDetected()) { return d->getBCnumber() - BCoffset; }
+        auto& stats = *collectStatistics[0];
+        auto reject = [&](uint64_t& counter) {
+            ++counter;
+            d->setBCnumber(-1, BCoffset);
+            d->QualCtrl.TagFail = true;
+            return -1;
+        };
+        const std::string_view sequence(d->getSequence().data(), d->length());
+        int begin = 0, end = static_cast<int>(sequence.size()), idx = 0, errors = 0;
+        string observed;
+        if (!bOneFileSample) {
+            struct EndMatch {
+                int sample = -1;
+                DNA::BarcodeMatch hit;
+                bool sampleTie = false;
+            };
+            const size_t extent = min(sequence.size(),
+                static_cast<size_t>(barcodeSearchWindow_ - 1) + maxBCLength1_ + barcodeErrors_);
+            const auto front = sequence.substr(0, extent);
+            const string rear = reverseTS2(string(sequence.substr(sequence.size() - extent)));
+            auto scanEnd = [&](std::string_view bases) {
+                EndMatch best;
+                best.hit.errors = barcodeErrors_ + 1;
+                // One exact-only pass avoids dynamic programming for ordinary reads.
+                for (int budget : {0, barcodeErrors_}) {
+                    for (size_t sample = 0; sample < Barcode.size(); ++sample) {
+                        const auto hit = DNA::matchSeq_tot(bases, Barcode[sample], budget, barcodeSearchWindow_);
+                        if (hit.start < 0) { continue; }
+                        if (hit.errors < best.hit.errors) {
+                            best = {static_cast<int>(sample), hit, false};
+                        } else if (hit.errors == best.hit.errors && best.sample != static_cast<int>(sample)) {
+                            best.sampleTie = true;
+                        }
+                    }
+                    if (best.sample >= 0 || barcodeErrors_ == 0) { break; }
+                }
+                return best;
+            };
+            const auto left = scanEnd(front), right = scanEnd(rear);
+            if (left.sample >= 0 && right.sample >= 0 && !left.sampleTie && !right.sampleTie &&
+                left.sample != right.sample) {
+                return reject(stats.ontConflictingEnds);
+            }
+            if (left.sampleTie || right.sampleTie || left.hit.ambiguous || right.hit.ambiguous) {
+                return reject(stats.ontAmbiguous);
+            }
+            if ((left.sample < 0 && right.sample < 0) ||
+                (ontBarcodeBothEnds_ && (left.sample < 0 || right.sample < 0))) {
+                return reject(stats.ontUnassigned);
+            }
+            idx = left.sample >= 0 ? left.sample : right.sample;
+            if (left.sample >= 0) {
+                begin = left.hit.stop;
+                errors += left.hit.errors;
+                observed = string(front.substr(left.hit.start, left.hit.stop - left.hit.start));
+            }
+            if (right.sample >= 0) {
+                end -= right.hit.stop;
+                errors += right.hit.errors;
+                if (!observed.empty()) { observed += "|"; }
+                observed += rear.substr(right.hit.start, right.hit.stop - right.hit.start);
+            }
+            // Overlapping windows must never turn a single physical hit into two ends.
+            if (begin >= end) { return reject(stats.ontAmbiguous); }
+        }
+
+        // Symmetric end barcodes cannot establish biological strand. Reuse primer
+        // matching on immutable views before any sequence or quality is modified.
+        const auto insert = sequence.substr(begin, end - begin);
+        const int fwdIdx = idx < (int)PrimerIdx.size() ? PrimerIdx[idx] : -1;
+        const int revIdx = idx < (int)PrimerIdxRev.size() ? PrimerIdxRev[idx] : -1;
+        const string fwd = fwdIdx >= 0 && fwdIdx < (int)PrimerL.size() ? PrimerL[fwdIdx] : "";
+        const string rev = revIdx >= 0 && revIdx < (int)PrimerR.size() ? PrimerR[revIdx] : "";
+        bool reverseRead = false;
+        if (!fwd.empty() || !rev.empty()) {
+            const size_t extent = min(insert.size(), static_cast<size_t>(barcodeSearchWindow_ - 1) + max(fwd.size(), rev.size()));
+            const auto front = insert.substr(0, extent);
+            const string rear = reverseTS2(string(insert.substr(insert.size() - extent)));
+            auto hasPrimer = [&](std::string_view bases, const string& primer) {
+                return !primer.empty() && DNA::matchSeq(bases, primer, PrimerErrs, barcodeSearchWindow_, 0) >= 0;
+            };
+            const bool forward = hasPrimer(front, fwd) || hasPrimer(rear, rev);
+            const bool reverse = hasPrimer(front, rev) || hasPrimer(rear, fwd);
+            if (forward && reverse) { return reject(stats.ontAmbiguous); }
+            reverseRead = reverse;
+        }
+        if (BcutTag && !bOneFileSample) {
+            if (end < static_cast<int>(sequence.size())) { d->cutSeq(end); }
+            if (begin > 0) { d->cutSeq(0, begin); }
+            d->setBarcodeCut();
+        }
+        if (reverseRead) {
+            d->reverse_compliment(false);
+            ++stats.reversedRds;
+        }
+        if (bOneFileSample && removeAdapter) { remove_adapter(d); }
+        BCintoHead(idx, d, observed, errors, true);
+        d->QualCtrl.suc_correct_BC = errors > 0;
+        ++stats.ontAssigned;
+        return idx;
+    }
+
     if (!d->sampleBarcode().empty()) {
         // BC is a sample/library tag, already in sequencing orientation. Match
         // the complete index (or index pair), without scanning or cutting SEQ.
@@ -2074,7 +2228,7 @@ int Filters::detectCutBC(const shared_ptr<DNA>& d, bool isPair1) {
         return idx;
     }
 	//seq too short for BC
-	if (d->length() < minBCLength1_) {
+	if (d->length() < (isPair1 ? minBCLength1_ : minBCLength2_)) {
 		return -1;
 	}
 	//already detected barcode
@@ -2475,9 +2629,9 @@ void Filters::scanBC_back(shared_ptr<DNA> d, int& start, int& stop, int& idx, in
 
 */
 
-void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_err,
+void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int& c_err,
 	int scanRegion, string& presentBC, bool fwdStrand, bool revBC, bool endScan) {
-	if (d->length() < minBCLength1_) { return; }
+    start = stop = idx = -1; c_err = 0; presentBC.clear();
 	bool leaveFunction = false;
 
 
@@ -2527,11 +2681,11 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
 		maxBCLength = maxBCLength2_;
 		minBCLength = minBCLength2_;
 	}
-	if (d->length() < maxBCLength) {
+	if (minBCLength == 0 || d->length() < minBCLength) {
 		return;
 	}
 
-	int seqLen = d->mem_length();
+	int seqLen = d->length();
 
 	//    cout << "minBCLength: " << minBCLength << endl;
 	//    cout << "maxBCLength: " << maxBCLength << endl;
@@ -2543,7 +2697,7 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
 
     // Use a thread-local scratch string to avoid repeated allocations for temporary substring
 	thread_local std::string scratch;
-	for (int start2 = 0; start2 < scanRegion; start2++) {
+	for (int start2 = 0; start2 < min(scanRegion, seqLen - (int)maxBCLength + 1); start2++) {
 		start = endScan ? (seqLen - start2 - maxBCLength) : start2;
 		if (start < 0) { break; }
 		// get a non-owning view of the substring
@@ -2564,22 +2718,23 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
 
 	start = -1;
 	if (barcodeErrors_ != 0 || minBCLength != maxBCLength) {
-		vector<int> stars(0), indices(0);
+		vector<int> stars(0), indices(0), errors;
 		bool zeroErr = false;
 
 		//this version tries all BC's and if there are more than one possible match, will reject all matches
 		for (auto jx = localBarcodes->begin(); jx != localBarcodes->end(); jx++) {
-			start = d->matchSeq_tot((*jx).first, barcodeErrors_, scanRegion, c_err);
+			start = d->matchSeq_tot((*jx).first, barcodeErrors_, scanRegion, c_err, endScan);
 			if (start != -1) {
 				idx = (*jx).second;
 				if (c_err == 0) {
 					stop = start + (int)(*localBarcodeLengths)[idx];
-					presentBC = d->getSubSeq(start, maxBCLength); // (*locBC)[idx];
+					presentBC = d->getSubSeq(start, (*localBarcodeLengths)[idx]);
 					zeroErr = true;
 					break;
 				}
 				stars.push_back(start);
 				indices.push_back(idx);
+                errors.push_back(c_err);
 			}
 		}
 		if (!zeroErr && stars.size() > 0) {
@@ -2597,6 +2752,7 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
 
 				start = stars[0];
 				idx = indices[0];
+                c_err = errors[0];
 				stop = start + (int)(*localBarcodeLengths)[idx];
 				presentBC = d->getSubSeq(start, (*localBarcodeLengths)[idx]);
 			}
@@ -2614,20 +2770,20 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int c_e
 }
 
 bool Filters::checkIfRevPrimerHits(shared_ptr<DNA> d, int primerID, int pair, bool twoPrimers) {
-	if (PrimerL.size() == 0 || PrimerL[0].length() == 0) { return true; }
+    if (primerID < 0) { return false; }
 	if (d->getFwdPrimDetect()) {
 		return true;
 	}
 	int start(-1), stop(-1);
 	int tolerance(30); //, startSearch(0);
 	int QS = d->length(); int limit = max(QS >> 1, QS - 150); stop = QS;
-	if (pair == 1) {
+	if (pair == 1 && (size_t)primerID < PrimerR_RC.size()) {
 		start = d->matchSeqRev(PrimerR_RC[primerID], PrimerErrs, limit);
 		if (start != -1) {
 			return true;
 		}
 	}
-	if (pair != 1 || twoPrimers) {
+	if ((pair != 1 || twoPrimers) && (size_t)primerID < PrimerL_RC.size()) {
 		start = d->matchSeqRev(PrimerL_RC[primerID], PrimerErrs, limit);
 	}
 
@@ -2647,7 +2803,8 @@ bool Filters::passedReads(int n) {
 }
 
 bool Filters::checkIfPrimerHits(shared_ptr<DNA> d, int primerID, int pair) {
-	if (PrimerL.size() == 0 || PrimerL[0].length() == 0) { return true; }
+    const auto& primers = pair == 1 ? PrimerR : PrimerL;
+    if (primerID < 0 || (size_t)primerID >= primers.size() || primers[primerID].empty()) { return false; }
 	if (d->getFwdPrimDetect()) {
 		return true;
 	}
@@ -2676,7 +2833,7 @@ bool Filters::checkIfPrimerHits(shared_ptr<DNA> d, int primerID, int pair) {
 //cuts primers, tags
 bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, bool extensivePrimerCheck, bool recordVariants) {
 	//only adapted to singular BC
-	if (PrimerL.size() == 0 || PrimerL[0].length() == 0) { return true; }
+    if (primerID < 0 || (size_t)primerID >= PrimerL.size() || PrimerL[primerID].empty()) { return true; }
 	if (d->getFwdPrimDetect()) {
 		return true;
 	}
@@ -2699,6 +2856,7 @@ bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, boo
 		startSearch = minBCLength1_ - 2;
 		limit += (maxBCLength1_ - minBCLength1_) + 4;
 	}
+    if (ontMode_) { limit = barcodeSearchWindow_; startSearch = 0; }
 	if (!RC) {
 		start = d->matchSeq(PrimerL[primerID], PrimerErrs, limit, startSearch);
 		stop = start + (int)PrimerL[primerID].length();
@@ -2746,7 +2904,8 @@ bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, boo
 	//remove everything before/after primer cut
 	if (!BcutPrimer) {
 		if (!RC) { d->cutSeq(0, start); }
-		else { d->cutSeq(stop, -1); }
+		else { d->cutSeq(start + static_cast<int>(PrimerL[primerID].size()), -1); }
+        d->setFwdPrimCut();
 		return true;
 	}
 	else {
@@ -2773,7 +2932,7 @@ void Filters::recordPrimerVariant(const shared_ptr<DNA>& d, const string& primer
 }
 bool Filters::findPrimer(shared_ptr<DNA> d, int primerID, bool RC, int pair) {
 	//only adapted to singular BC
-	if (PrimerL[0].length() == 0) { return true; }
+    if (primerID < 0 || (size_t)primerID >= PrimerL.size() || PrimerL[primerID].empty()) { return false; }
 	int start(-1);// , 
 	//int stop(-1);
 	int tolerance(22), startSearch(0);
@@ -2797,7 +2956,7 @@ bool Filters::findPrimer(shared_ptr<DNA> d, int primerID, bool RC, int pair) {
 }
 bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extraCheck, bool recordVariants) {
 	//const string& se = d->getSequence();
-	if (d->getRevPrimDetect() || PrimerR.size() == 0) {
+	if (d->getRevPrimDetect() || primerID < 0 || (size_t)primerID >= PrimerR.size() || PrimerR[primerID].empty()) {
 		return true;
 	}
 
@@ -2820,6 +2979,10 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extra
 		}
 	}
 
+    if (ontMode_ && primerID >= 0 && (size_t)primerID < PrimerR_RC.size()) {
+        limit = max(-1, QS - static_cast<int>(PrimerR_RC[primerID].size()) - barcodeSearchWindow_);
+        limit2 = barcodeSearchWindow_;
+    }
 	//int limit = QS>>1;
 
 	if (RC) {
@@ -2850,7 +3013,8 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extra
 
 	if (!BcutPrimer) { //found it, but no cut
 		if (!RC) { d->cutSeq(0, start); }
-		else { d->cutSeq(stop, -1); }
+		else { d->cutSeq(start + static_cast<int>(PrimerR[primerID].size()), -1); }
+        d->setRevPrimCut();
 		return true;
 	}
 	else {
@@ -3051,6 +3215,9 @@ bool Filters::readMap() {//core routine to read map info
 		cnt++;
 	}
 
+    if (ontMode_ && (termIdx[11] >= 0 || termIdx[8] >= 0 || termIdx[7] >= 0 || termIdx[16] >= 0)) {
+        throw std::runtime_error("ONT mapping supports BarcodeSequence or per-file assignment; Barcode2ndPair, MIDfqFile, SampleIDinHead and alignmentFile are incompatible");
+    }
 	if (termIdx[16] != -1) {
 		FastqF.resize(SampleID.size(), "");
 		for (size_t row = 0; row < SampleID.size(); ++row) {
@@ -3091,6 +3258,14 @@ bool Filters::readMap() {//core routine to read map info
 	}
 
 	decideHeadBC();
+    if (ontMode_ && !bOneFileSample) {
+        for (const auto& barcode : Barcode) {
+            if (barcode.empty() || barcode.find_first_not_of("ACGT") != string::npos ||
+                barcode.size() <= static_cast<size_t>(barcodeErrors_)) {
+                throw std::runtime_error("ONT BarcodeSequence must contain A/C/G/T and be longer than maxBarcodeErrs");
+            }
+        }
+    }
 
 	//check for duplicate barcodes, but only if no list provided
 	if (termIdx[4] != -1 && termIdx[5] != -1 && termIdx[6] != -1) {
@@ -3100,12 +3275,14 @@ bool Filters::readMap() {//core routine to read map info
 	checDoubleSampleID();
 
 	//eleminate required checks for primers, if there is simply no primer given
-	if (PrimerL.size() == 0 || PrimerL[0].length() == 0 || PrimerL[0].substr(0, 1) == " ") {
-		BcutPrimer = false;
+    const bool hasForwardPrimer = std::any_of(PrimerL.begin(), PrimerL.end(), [](const string& p) { return !p.empty(); });
+    const bool hasReversePrimer = std::any_of(PrimerR.begin(), PrimerR.end(), [](const string& p) { return !p.empty(); });
+    if (!hasForwardPrimer && !hasReversePrimer) { BcutPrimer = false; }
+	if (!hasForwardPrimer) {
 		bRequireFwdPrim = false;
 		alt_bRequireFwdPrim = false;
 	}
-	if (PrimerR.size() == 0 || PrimerR[0].length() == 0 || PrimerR[0].substr(0, 1) == " ") {
+	if (!hasReversePrimer) {
 		alt_bRequireRevPrim = false;
 		bRequireRevPrim = false;
 	}
@@ -3299,6 +3476,8 @@ void Filters::sanityCheckFilesSRs(void) {
 }
 
 void Filters::BarcodePreStats() {
+    barcodes1_.clear(); barcodes2_.clear();
+    revBarcode.clear(); revBarcode2.clear(); revBarcodes1_.clear(); revBarcodes2_.clear();
 	minBCLength1_ = 100000; maxBCLength1_ = 0;
 	for (unsigned int i = 0; i < Barcode.size(); i++) {
 		if (Barcode[i].length() < minBCLength1_) minBCLength1_ = (unsigned int)Barcode[i].length();
@@ -3648,6 +3827,17 @@ void Filters::FileEssentials(filesStr& files, OptContainer* cmdArgs) {//unordere
 	files.QualF = this->getQualFiles();
 	files.FastqF = this->getFastqFiles();
 	files.MIDfq = this->getMIDfqFiles();
+    if (ontMode_) {
+        if (!files.FastaF.empty() || std::any_of(files.MIDfq.begin(), files.MIDfq.end(), [](const string& file) { return !file.empty(); })) {
+            throw std::runtime_error("-ontMode 1 supports single-end FASTQ/FASTQ.gz only (no FASTA or MID)");
+        }
+        const string path = cmdArgs->get("-i_path").empty() ? "" : cmdArgs->get("-i_path") + "/";
+        for (const auto& file : files.FastqF) {
+            if (file.find(',') != string::npos || detectSeqFmt(path + file) != "-i_fastq") {
+                throw std::runtime_error("-ontMode 1 requires one single-end FASTQ/FASTQ.gz per input set: " + file);
+            }
+        }
+    }
 
 
 
@@ -3984,6 +4174,13 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 	else if (outf.length() > 0) {
 		give << "Output File: " << outf << endl;
 	}
+    if (ontMode_ && greenQualStats) {
+        printSection("ONT assignment (before primer/quality filtering)");
+        printCountRow("ONT assigned", cst->ontAssigned);
+        printCountRow("ONT unassigned", cst->ontUnassigned);
+        printCountRow("ONT ambiguous", cst->ontAmbiguous);
+        printCountRow("ONT conflicting ends", cst->ontConflictingEnds);
+    }
 	if (!b_doFilter) {
 		give << "No valid Filter file provided; no filtering done on files\n";
 		return;
