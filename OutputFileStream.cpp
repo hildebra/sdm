@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -21,8 +22,13 @@
 #ifdef _gzipread
 #include <zlib.h>
 #endif
+#if defined(_gzipread) && defined(SDM_WITH_LIBDEFLATE)
+#include <libdeflate.h>
+#endif
 
 namespace {
+
+std::atomic<bool> g_writeBgzfIndex{false};
 
 class FinalizableOutput {
 public:
@@ -36,6 +42,15 @@ constexpr size_t kBgzfBlockSize = 0xff00;
 constexpr size_t kBgzfMaxBlockSize = 0x10000;
 constexpr size_t kBgzfHeaderSize = 18;
 constexpr size_t kBgzfFooterSize = 8;
+
+// CRC-32 of a BGZF block payload (libdeflate and zlib compute the same value).
+uint32_t bgzfCrc32(const uint8_t* data, size_t size) {
+#ifdef SDM_WITH_LIBDEFLATE
+    return libdeflate_crc32(0, data, size);
+#else
+    return static_cast<uint32_t>(crc32(crc32(0L, Z_NULL, 0), data, static_cast<uInt>(size)));
+#endif
+}
 
 bool shouldUseParallelGzip(bool requested) {
     if (!requested) {
@@ -120,8 +135,7 @@ CompressedBlock makeStoredBgzfBlock(const std::vector<uint8_t>& input) {
         std::memcpy(body + 5, input.data(), input.size());
     }
 
-    const uint32_t checksum = static_cast<uint32_t>(
-        crc32(crc32(0L, Z_NULL, 0), input.data(), static_cast<uInt>(input.size())));
+    const uint32_t checksum = bgzfCrc32(input.data(), input.size());
     storeLe32(result.bytes.data() + totalSize - 8, checksum);
     storeLe32(result.bytes.data() + totalSize - 4, result.uncompressedSize);
     return result;
@@ -136,6 +150,23 @@ CompressedBlock compressBgzfBlock(std::vector<uint8_t> input) {
     result.bytes.resize(kBgzfMaxBlockSize);
     result.uncompressedSize = static_cast<uint32_t>(input.size());
 
+#ifdef SDM_WITH_LIBDEFLATE
+    // One compressor per thread: its state is much larger than a BGZF block.
+    struct Compressor {
+        libdeflate_compressor* handle = libdeflate_alloc_compressor(1);
+        ~Compressor() { libdeflate_free_compressor(handle); }
+    };
+    thread_local Compressor compressor;
+    if (!compressor.handle) {
+        throw std::runtime_error("libdeflate_alloc_compressor failed");
+    }
+    const size_t compressedBodySize = libdeflate_deflate_compress(
+        compressor.handle, input.data(), input.size(), result.bytes.data() + kBgzfHeaderSize,
+        kBgzfMaxBlockSize - kBgzfHeaderSize - kBgzfFooterSize);
+    if (compressedBodySize == 0) { // does not fit: store the block
+        return makeStoredBgzfBlock(input);
+    }
+#else
     z_stream stream{};
     stream.next_in = input.data();
     stream.avail_in = static_cast<uInt>(input.size());
@@ -166,6 +197,7 @@ CompressedBlock compressBgzfBlock(std::vector<uint8_t> input) {
         throw std::runtime_error(
             "deflateEnd failed with code " + std::to_string(endResult));
     }
+#endif
 
     const size_t totalSize = kBgzfHeaderSize + compressedBodySize + kBgzfFooterSize;
     if (totalSize > kBgzfMaxBlockSize) {
@@ -174,8 +206,7 @@ CompressedBlock compressBgzfBlock(std::vector<uint8_t> input) {
 
     std::copy(kBgzfHeader.begin(), kBgzfHeader.end(), result.bytes.begin());
     storeLe16(result.bytes.data() + 16, static_cast<uint16_t>(totalSize - 1));
-    const uint32_t checksum = static_cast<uint32_t>(
-        crc32(crc32(0L, Z_NULL, 0), input.data(), static_cast<uInt>(input.size())));
+    const uint32_t checksum = bgzfCrc32(input.data(), input.size());
     storeLe32(result.bytes.data() + totalSize - 8, checksum);
     storeLe32(result.bytes.data() + totalSize - 4, result.uncompressedSize);
     result.bytes.resize(totalSize);
@@ -195,7 +226,7 @@ public:
           filename_(filename),
           parallel_(parallel),
           maxPending_(parallel
-              ? std::min<size_t>(8, std::max<size_t>(2,
+              ? std::min<size_t>(64, std::max<size_t>(2,
                     ThreadPool::configured_gzip_thread_count() * 2))
               : 0) {
         (void)requestedBufferSize;
@@ -252,7 +283,12 @@ public:
 
         if (!failure_) {
             try {
-                writeGzi();
+                if (bgzfIndexOutput()) {
+                    writeGzi();
+                }
+                else {
+                    removeGzi();
+                }
             }
             catch (...) {
                 rememberFailure(std::current_exception());
@@ -401,7 +437,12 @@ private:
             return;
         }
 
-        std::ifstream input(filename_, std::ios::binary);
+        // Only block headers and ISIZE trailers are needed to rebuild the index.
+        // Seek over the compressed payloads (unbuffered) instead of reading the
+        // whole existing file, which made repeated appends quadratic.
+        std::ifstream input;
+        input.rdbuf()->pubsetbuf(nullptr, 0);
+        input.open(filename_, std::ios::binary);
         if (!input) {
             throw std::runtime_error("Could not inspect BGZF file for append: " + filename_);
         }
@@ -412,6 +453,7 @@ private:
         bool foundEof = false;
         while (compressed < fileSize) {
             std::array<uint8_t, kBgzfHeaderSize> header{};
+            input.seekg(static_cast<std::streamoff>(compressed));
             input.read(reinterpret_cast<char*>(header.data()), header.size());
             if (input.gcount() != static_cast<std::streamsize>(header.size()) ||
                 !std::equal(kBgzfHeader.begin(), kBgzfHeader.begin() + 16, header.begin())) {
@@ -425,14 +467,19 @@ private:
                     "Cannot append: invalid BGZF block size in " + filename_);
             }
 
-            std::vector<uint8_t> rest(static_cast<size_t>(blockSize - header.size()));
+            // The EOF candidate is compared completely; other blocks only need ISIZE.
+            const bool eofCandidate = blockSize == kBgzfEof.size();
+            std::vector<uint8_t> rest(eofCandidate ? static_cast<size_t>(blockSize - header.size()) : 4);
+            if (!eofCandidate) {
+                input.seekg(static_cast<std::streamoff>(compressed + blockSize - rest.size()));
+            }
             input.read(reinterpret_cast<char*>(rest.data()), rest.size());
             if (input.gcount() != static_cast<std::streamsize>(rest.size())) {
                 throw std::runtime_error(
                     "Cannot append: truncated BGZF block in " + filename_);
             }
             const uint32_t blockUncompressed = loadLe32(rest.data() + rest.size() - 4);
-            const bool isCanonicalEof = blockSize == kBgzfEof.size() &&
+            const bool isCanonicalEof = eofCandidate &&
                 std::equal(
                     kBgzfEof.begin(),
                     kBgzfEof.begin() + static_cast<std::ptrdiff_t>(header.size()),
@@ -490,6 +537,12 @@ private:
         indexFile.close();
     }
 
+    // An index from an earlier run would describe different blocks.
+    void removeGzi() {
+        std::error_code ignored;
+        std::filesystem::remove(filename_ + ".gzi", ignored);
+    }
+
     void rememberFailure(std::exception_ptr failure) {
         if (!failure_) {
             failure_ = std::move(failure);
@@ -518,6 +571,14 @@ private:
 #endif
 
 } // namespace
+
+void setBgzfIndexOutput(bool enabled) {
+    g_writeBgzfIndex.store(enabled, std::memory_order_relaxed);
+}
+
+bool bgzfIndexOutput() {
+    return g_writeBgzfIndex.load(std::memory_order_relaxed);
+}
 
 std::unique_ptr<std::ostream> openOutputFile(
     const std::string& filename,

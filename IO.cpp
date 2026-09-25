@@ -19,11 +19,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <queue>
 #include <mutex>
 #include <thread>
+#include <condition_variable>
+#include <deque>
 #include "ThreadPool.h"
 #include "IO.h"
 #include "OutputStreamer.h"
 #include "Filters.h"
 #include "Benchmark.h"
+#include "OutputFileStream.h"
 #include <future>
 #include <utility>
 
@@ -49,6 +52,25 @@ void multi_read_paired_STRget(shared_ptr<InputStreamer> IS, OutputStreamer* MD, 
 
 bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 	bool MIDuse, OutputStreamer* MD, int curThread,
+	bool keepPairHd, qual_score FastqVer, uint64_t derepBlock) {
+	MD->beginDerepBlock(derepBlock);
+	bool isOK(true);
+	try {
+		isOK = process_read_block(tmpLines, MIDuse, MD, curThread, keepPairHd, FastqVer);
+	}
+	catch (...) {
+		// Seal the block anyway, so later blocks are not held back behind it.
+		try { MD->endDerepBlock(derepBlock); } catch (...) {}
+		throw;
+	}
+	MD->endDerepBlock(derepBlock);
+	// Publish this block's output (no-op unless per-worker batching is active).
+	MD->flushWriteBatch(curThread);
+	return isOK;
+}
+
+bool process_read_block(multi_tmp_lines* tmpLines,
+	bool MIDuse, OutputStreamer* MD, int curThread,
 	bool keepPairHd, qual_score FastqVer) {
 
 	//for loop over tmplines, each entry is a read pair
@@ -61,26 +83,26 @@ bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 	}
 	bool isOK(true);
 	vector<shared_ptr<DNA>> ret(3, nullptr);
+	// Copy each record into worker-local strings before handing them to DNA.
+	// The reader's block buffers then keep their capacity (no allocation on the
+	// reader thread), and every string is allocated and freed by this worker
+	// instead of bouncing between malloc arenas.
+	thread_local vector<string> record;
+	auto convert = [&](vector<string>& lines, int readpos) {
+		Instr::ScopedTimer st(Instr::STR2DNA);
+		record = lines;
+		return str2DNA(std::move(record), keepPairHd, FastqVer, readpos);
+	};
 
 	for (size_t k = 0; k < tmpLines->size(); k++) {
 		ret[0].reset();
 		ret[1].reset();
 		ret[2].reset();
 		//cdbg("rpS");
-            {
-				Instr::ScopedTimer st(Instr::STR2DNA);
-				ret[0] = str2DNA(std::move(tmpLines->tmp[k][0]), keepPairHd, FastqVer, 0);
-			}
-            {
-				Instr::ScopedTimer st(Instr::STR2DNA);
-				ret[1] = str2DNA(std::move(tmpLines->tmp[k][1]), keepPairHd, FastqVer, 1);
-			}
+		ret[0] = convert(tmpLines->tmp[k][0], 0);
+		ret[1] = convert(tmpLines->tmp[k][1], 1);
 		if (MIDuse) {
-			ret[2].reset();
-                {
-					Instr::ScopedTimer st(Instr::STR2DNA);
-					ret[2] = str2DNA(std::move(tmpLines->tmp[k][2]), keepPairHd, FastqVer, 2);
-				}
+			ret[2] = convert(tmpLines->tmp[k][2], 2);
 		}
 		if (ret[0] == nullptr) {
 			continue;
@@ -90,6 +112,18 @@ bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 		//GoldenAxe requires some extra rounds of checking DNA
 		if (MD->getFilters(curThread)->isGoldAxe()) {
 			vector<shared_ptr<DNA>> multDNA = MD->getFilters(curThread)->GoldenAxe(ret);
+			if (multDNA.empty()) {
+				// No usable sub-amplicons (too short, no barcode, amplicon count
+				// out of range): count the read as processed and rejected, as
+				// process_DNA would, instead of dropping it from the statistics.
+				Filters* gaFilter = MD->getFilters(curThread);
+				ret[0]->failed();
+				gaFilter->sTotalPlus(0);
+				gaFilter->preFilterSeqStat(ret[0], 0);
+				int gaStream = 100;
+				MD->saveForWrite(ret[0], 1, curThread, gaStream, false);
+				continue;
+			}
 			int iniBCsGA(-2);
 			if (multDNA.size()) {
 				iniBCsGA = multDNA[0]->getBCnumber();
@@ -239,6 +273,12 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 				cerr << "tagidx2 wrongly truncated to " << tagIdx2 << endl;
 			}
 		}
+		else if (!curFil->doFilterAtAll() && !dualBCs && tagIdx >= 0) {
+			// Without filtering, only a sample index marks a read as passed. With no
+			// barcodes (e.g. no map), read 2 inherits read 1's index, so complete
+			// pairs are written as pairs instead of two singleton files.
+			tagIdx2 = tagIdx;
+		}
 		//if (isReversed) { tdn[1]->reverse_compliment(); }
         if (!dualBCs && !read2->sampleBarcode().empty()) {
             tagIdx2 = curFil->detectCutBC(read2, true);
@@ -339,28 +379,27 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 	if (MD->doWriteNonBCrds()) {
 		MD->writeNonBCReads(tdn[0], tdn[1]);
 	}
-	if (MD->doDeriplicate()) {
-		MD->dereplicateDNA(tdn[0], tdn[1], curThread);
-	}
 
-    // Test
-    /*if (OutStreamer->b_merge_pairs_derep_ && tdn[0]->merge_seed_pos_ > 0) {
-        auto dna_merged = ReadMerger::merge(tdn[0], tdn[1]);
-    }*/
-	//testreadpair.unlock();
-	//save for later .. and collect stats
-	
-	//writing of pairs needs to be mutex locked 
+	//save for later .. and collect stats (also prepares the records for writing)
 	int Cstr1(100), Cstr2(100);
-	//cdbg("sFW\n");
     bool owr1;
 	bool owr2;
 	{
 		Instr::ScopedTimer st_out(Instr::OUTPUT_WRITE);
 		owr1 = MD->saveForWrite(read1, idx1, curThread, Cstr1,false);
 		owr2 = MD->saveForWrite(read2, idx2, curThread, Cstr2,false);
-		//mutex version to ensure read pairs together..
-		MD->writeForWrite(read1,idx1,Cstr1,read2,idx2,Cstr2);
+	}
+	// Dereplication decides whether this set is counted. A set bound for the
+	// mid-quality tier is withheld here and written by the dereplicator only if
+	// it does not count it, so back-mapping that tier cannot count it twice.
+	bool withheld = false;
+	if (MD->doDeriplicate()) {
+		withheld = MD->dereplicateDNA(tdn[0], tdn[1], curThread, idx1, idx2);
+	}
+	if (!withheld) {
+		Instr::ScopedTimer st_out(Instr::OUTPUT_WRITE);
+		//writing of pairs needs to be mutex locked; read pairs stay together
+		MD->writeForWrite(read1,idx1,Cstr1,read2,idx2,Cstr2, curThread);
 	}
 
 	if (!owr1 || (!owr2 && read2notNull)) {
@@ -372,10 +411,26 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 
 
 
-struct job2 {
-	bool inUse = false;
-	future<bool> job;
-	//thread job;
+// Block buffers whose processing finished, in completion order. Lets the reader
+// reuse whichever buffer is free first instead of waiting for one fixed slot.
+struct CompletedBlocks {
+	std::mutex mutex;
+	std::condition_variable ready;
+	std::deque<size_t> done;
+	void push(size_t slot) {
+		// Notify under the lock: the reader may destroy this object as soon as
+		// it has seen the last completion.
+		std::lock_guard<std::mutex> lock(mutex);
+		done.push_back(slot);
+		ready.notify_one();
+	}
+	size_t pop() {
+		std::unique_lock<std::mutex> lock(mutex);
+		ready.wait(lock, [this] { return !done.empty(); });
+		const size_t slot = done.front();
+		done.pop_front();
+		return slot;
+	}
 };
 
 bool read_sequences(OutputStreamer* MD, 
@@ -403,12 +458,18 @@ bool read_sequences(OutputStreamer* MD,
 	
 	//multithreading setup
 	//int Nthrds = atoi((*cmdArgs)["-threads"].c_str()) -1 ;
-	vector<job2> slots(Nthreads);
-	int thrCnt = 0;
 	bool doMC(false);
 	if (Nthreads > 1) {
 		doMC = true;
 	}
+	ThreadPool* pool = doMC ? &ThreadPool::instance() : nullptr;
+	// Per-worker filters, mergers and output batches are indexed by pool worker.
+	// If the pool was created with another size, fall back to one buffer per
+	// index so that a slot index identifies the per-thread state instead.
+	const bool workerIndexed = pool && pool->size() == static_cast<size_t>(Nthreads);
+	// Twice as many block buffers as workers: the reader fills the next blocks
+	// while every worker is busy.
+	const size_t slotCount = !doMC ? 1 : static_cast<size_t>(Nthreads) * (workerIndexed ? 2 : 1);
 
 	int DNAinMem(0);
 	bool cont(true),cont2(true),cont3(true);
@@ -434,7 +495,10 @@ bool read_sequences(OutputStreamer* MD,
 		cdbg("task batch size probe");
 		multi_tmp_lines probe(tmpBlockSize);
 		bool probeCont = IS->getDNAlines(&probe, tmpBlockSize, MIDuse, true);
-        fastqVer = IS->fastQscore() == 0 ? 33 : IS->fastQscore();
+		// The offset is auto-detected from the whole probe block when no single
+		// record was conclusive; workers convert with the settled value.
+		IS->finalizeFastqVersion();
+		fastqVer = IS->fastQscore();
 		if (probeCont && probe.size() > 0 && probe.tmp[0].size() > 0 && probe.tmp[0][0].size() > 1) {
 			const size_t probeReadLen = probe.tmp[0][0][1].size();
 			if (probeReadLen > 0) {
@@ -455,12 +519,14 @@ bool read_sequences(OutputStreamer* MD,
 			empty.reserve(probeReadLen + 1);
 
 			fastqVer = IS->fastQscore();
-			if (fqHeadVer && probe.tmp[0][0].size() > 0) {
-				shared_ptr<DNA> tmp = str2DNA(probe.tmp[0][0], keepPairedHD, fastqVer, 0);
-				MD->checkFastqHeadVersion(tmp);
-				fqHeadVer = false;
-			}
 			cdbg("FASTQversion: " + to_string(fastqVer) + ". ");
+		}
+		// Inputs smaller than one block end the probe with probeCont == false;
+		// they still need the paired header-format check.
+		if (fqHeadVer && probe.size() > 0 && probe.tmp[0].size() > 0 && probe.tmp[0][0].size() > 1) {
+			shared_ptr<DNA> tmp = str2DNA(probe.tmp[0][0], keepPairedHD, fastqVer, 0);
+			if (tmp) { MD->checkFastqHeadVersion(tmp); }
+			fqHeadVer = false;
 		}
 		IS->allStreamReset();
 		cdbg( " is " + to_string(taskBatchMultiplier) + ". ");
@@ -470,13 +536,29 @@ bool read_sequences(OutputStreamer* MD,
 		tmpBlockSize *= taskBatchMultiplier;
 	}
 	cdbg("read_seq check3 ");
-	vector<unique_ptr<multi_tmp_lines>> tmpStrHolders(Nthreads);	
+	vector<unique_ptr<multi_tmp_lines>> tmpStrHolders(slotCount);
 	vector<string>tmpLines2(4, empty);
 	vector<vector<string>> tmpLines(3, tmpLines2);
-	for (size_t ii = 0; ii < Nthreads; ii++) {
+	for (size_t ii = 0; ii < slotCount; ii++) {
 		tmpStrHolders[ii] = make_unique<multi_tmp_lines>();
 		tmpStrHolders[ii]->tmp.resize(tmpBlockSize, tmpLines);
 	}
+	MD->beginWriteBatching();
+	CompletedBlocks completed;
+	vector<size_t> freeSlots;
+	for (size_t ii = slotCount; ii-- > 0;) { freeSlots.push_back(ii); }
+	vector<std::exception_ptr> slotErrors(slotCount);
+	size_t outstanding = 0;
+	auto reclaim = [&]() {
+		const size_t slot = completed.pop();
+		--outstanding;
+		freeSlots.push_back(slot);
+		if (slotErrors[slot]) {
+			std::exception_ptr error = slotErrors[slot];
+			slotErrors[slot] = nullptr;
+			std::rethrow_exception(error);
+		}
+	};
 
     //object holding converted DNA.. not longer used
 	//vector<shared_ptr<DNA>> tdn(3, nullptr);
@@ -487,72 +569,63 @@ bool read_sequences(OutputStreamer* MD,
 	while ( cont ) {
 		//decide on MC or single core submission route
 		if (doMC) { // multithreading
-			// step 0: find first available slot (free or already completed)
-			size_t slotIdx = static_cast<size_t>(thrCnt);
-			bool hasFreeSlot = false;
-			for (size_t probe = 0; probe < slots.size(); ++probe) {
-				size_t idx = (slotIdx + probe) % slots.size();
-				if (!slots[idx].inUse) {
-					slotIdx = idx;
-					hasFreeSlot = true;
-					break;
-				}
-				if (slots[idx].job.valid() &&
-					slots[idx].job.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-					bool doneOk = slots[idx].job.get();
-					(void)doneOk;
-					slots[idx].inUse = false;
-					slotIdx = idx;
-					hasFreeSlot = true;
-					break;
-				}
-			}
-			if (!hasFreeSlot) {
-				if (slots[slotIdx].job.valid()) {
-					bool doneOk = slots[slotIdx].job.get();
-					(void)doneOk;
-				}
-				slots[slotIdx].inUse = false;
-				hasFreeSlot = true;
-			}
-			thrCnt = static_cast<int>(slotIdx);
+			// step 0: take a free block buffer, or wait for the first worker to finish one
+			if (freeSlots.empty()) { reclaim(); }
+			const size_t slot = freeSlots.back();
+			freeSlots.pop_back();
+			multi_tmp_lines* block = tmpStrHolders[slot].get();
 
             //step 1: read block from input into tmp buffer
 			{
 				Instr::ScopedTimer st(Instr::GETDNALINES);
-				cont = IS->getDNAlines(tmpStrHolders[thrCnt].get(), tmpBlockSize, MIDuse);
+				cont = IS->getDNAlines(block, tmpBlockSize, MIDuse);
 			}
 
 			// If we read any records into the tmp buffer, submit them for processing.
 			// If cont==false but buffer contains data (partial final block), still process it.
-			if (tmpStrHolders[thrCnt]->size() > 0) {
-                if (slots[thrCnt].inUse == false) {
-					// record submit timestamp and measure async creation cost
-					long long submit_ts = Instr::now_us();
-					tmpStrHolders[thrCnt]->submit_ts = submit_ts;
-					{
-						Instr::ScopedTimer st_async(Instr::ASYNC_SUBMIT);
-						slots[thrCnt].job = ThreadPool::instance().submit(multi_read_paired_STRready,
-							tmpStrHolders[thrCnt].get(), MIDuse, MD, thrCnt, keepPairedHD, fastqVer);
+			if (block->size() > 0) {
+				// record submit timestamp and measure async creation cost
+				block->submit_ts = Instr::now_us();
+				Instr::ScopedTimer st_async(Instr::ASYNC_SUBMIT);
+				++outstanding;
+				try {
+					// Numbered here, in input order, so dereplication can apply
+					// blocks in that order however they are scheduled.
+					const uint64_t derepBlock = MD->reserveDerepBlock();
+					(void)pool->submit([&, block, slot, derepBlock]() {
+						try {
+							const int worker = workerIndexed ? pool->worker_index_of_current_thread() : static_cast<int>(slot);
+							if (worker < 0 || worker >= Nthreads) {
+								throw std::logic_error("Block processed outside the processing pool");
+							}
+							multi_read_paired_STRready(block, MIDuse, MD, worker, keepPairedHD, fastqVer, derepBlock);
 						}
-					slots[thrCnt].inUse = true;
+						catch (...) {
+							slotErrors[slot] = std::current_exception();
+						}
+						completed.push(slot);
+					});
 				}
+				catch (...) {
+					--outstanding;
+					freeSlots.push_back(slot);
+					throw;
+				}
+			} else {
+				freeSlots.push_back(slot);
 			}
 
 			// If no data was read and cont is false, EOF reached without data -> stop.
-			if (!cont && tmpStrHolders[thrCnt]->size() == 0) { break; }
-			thrCnt++;
-			if (thrCnt >= Nthreads) { thrCnt = 0; }
            if (!cont) { break; }
 		} else {//single thread
-           cont = IS->getDNAlines(tmpStrHolders[thrCnt].get(), tmpBlockSize, MIDuse);
+           cont = IS->getDNAlines(tmpStrHolders[0].get(), tmpBlockSize, MIDuse);
 			// If we read any records into the tmp buffer, process them even if cont==false (partial final block).
-			if (tmpStrHolders[thrCnt]->size() > 0) {
+			if (tmpStrHolders[0]->size() > 0) {
 				//fastqVer = IS->fastQscore();
-				bool cont2 = multi_read_paired_STRready(tmpStrHolders[thrCnt].get(), MIDuse, 
+				bool cont2 = multi_read_paired_STRready(tmpStrHolders[0].get(), MIDuse,
 					MD, 0, keepPairedHD, fastqVer);
 			}
-			if (!cont && tmpStrHolders[thrCnt]->size() == 0) { break; }
+			if (!cont && tmpStrHolders[0]->size() == 0) { break; }
 				//if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
 			//}
 		}
@@ -562,25 +635,23 @@ bool read_sequences(OutputStreamer* MD,
 		failure = std::current_exception();
 	}
 
-	// A packaged-task future does not join on destruction. Keep the input buffers
-	// and OutputStreamer alive until every submitted worker has finished, even
-	// when input parsing, submission, or another worker has already failed.
-	for (size_t i = 0; i < slots.size(); ++i) {
-		const size_t x = (static_cast<size_t>(thrCnt) + i) % slots.size();
-		if (slots[x].job.valid()) {
-			try {
-				(void)slots[x].job.get();
-			}
-			catch (...) {
-				if (!failure) { failure = std::current_exception(); }
-			}
+	// Keep the input buffers and OutputStreamer alive until every submitted
+	// block has finished, even when input parsing, submission, or another
+	// worker has already failed.
+	while (outstanding > 0) {
+		try {
+			reclaim();
 		}
-		slots[x].inUse = false;
+		catch (...) {
+			if (!failure) { failure = std::current_exception(); }
+		}
 	}
 	if (failure) { std::rethrow_exception(failure); }
 
 	//close shop
-	//MD->revConstellationCnts(revConstellation);
+	// Queued dereplication entries may still publish withheld mid-quality
+	// sets: apply them before the streams close.
+	MD->flushDereplication();
 	MD->closeOutStreams();
 
 	cdbg("read_seq check6 ");
@@ -625,6 +696,10 @@ bool readCmdArgs(int argc, char* argv[]){
 	//set to default (empty)
 	setDefault("-OTU_fallback", "");
 	setDefault("-otu_matrix", "");
+    setDefault("-seedSubclusters", "0");
+    if ((*cmdArgs)["-seedSubclusters"] != "0" && (*cmdArgs)["-seedSubclusters"] != "1") {
+        throw invalid_argument("-seedSubclusters must be 0 or 1");
+    }
 	setDefault("-derepPerSR", "0");
 	setDefault("-ucAdditionalCounts", "");
 	setDefault("-ucAdditionalCounts1", "");
@@ -657,8 +732,8 @@ bool readCmdArgs(int argc, char* argv[]){
 		if (cmdArgs->find("-i") != cmdArgs->end()) {
 			string fmt = detectSeqFmt((*cmdArgs)["-i"]);
 			if (fmt == "empty") {
-				//exit(0);
-				cerr << "Only empty input files\n";
+				// Previously fell through to a misleading "Fasta not supplied" error.
+				throw std::runtime_error("Input empty: no sequences found in " + (*cmdArgs)["-i"]);
 			}
 			(*cmdArgs)[fmt] = (*cmdArgs)["-i"];
 		}
@@ -685,7 +760,7 @@ bool readCmdArgs(int argc, char* argv[]){
 					cerr<<"Using quality file: "<<newQ <<endl;
 				} else if ((cmdArgs->find("-number")!=  cmdArgs->end() && (*cmdArgs)["-number"] =="T")||
 					((*cmdArgs)["-specificReads"] != "")) {
-					(*cmdArgs)["-i_qual"] = "";
+					newQ = "";
 				} else {
 					cerr<<"You did not supply a quality file. \nPlease give the path to your quality file as command line argument:\n  -i_qual <PathToQualityFile>\n";
 					newQ = "";
@@ -730,27 +805,29 @@ bool readCmdArgs(int argc, char* argv[]){
 	setDefault("-options", string("sdm_options.txt"));
 	setDefault("-threads", "1");
 	setDefault("-threadIO", "1");
+	// Strip an extension only when the last dot is part of the file name,
+	// so "./out" or "../dir/out" keep their directory part.
+	auto stripExtension = [](string& f) {
+		const size_t dot = f.find_last_of('.');
+		const size_t sep = f.find_last_of("/\\");
+		if (dot != string::npos && (sep == string::npos || dot > sep)) { f.erase(dot); }
+	};
 	if (cmdArgs->find("-log")  == cmdArgs->end()){
 		string ofile1 = (*cmdArgs)["-o_fna"];
 		if (ofile1==""){ofile1 = (*cmdArgs)["-o_fastq"];}
 		vector<string> tvec = splitByComma(ofile1,false); 
 		ofile1 = tvec[0];
 		//remove file ending
-		size_t pos = ofile1.find_last_of(".");
-		if (pos != string::npos){ofile1 = ofile1.substr(0,pos);	}
+		stripExtension(ofile1);
 		if (tvec.size()==2){
 			ofile1+= "_" + getFileNoPath(tvec[1]);
-			pos =  ofile1.find_last_of(".");
-			if (pos != string::npos){ofile1 = ofile1.substr(0,pos);	}
+			stripExtension(ofile1);
 		}
 		(*cmdArgs)["-log"] = ofile1 + string(".log");
 	}
 	string ofile1 = (*cmdArgs)["-log"];
 	//ofile1.find_last_of(".log");
-	size_t logPos = ofile1.find_last_of(".");
-	if (logPos != std::string::npos){
-		ofile1 = ofile1.substr(0,logPos);
-	}
+	stripExtension(ofile1);
 	if (cmdArgs->find("-length_hist")  == cmdArgs->end()){
 		cmdArgs->set("-length_hist", ofile1 + string("_lenHist.txt"));
 	}
@@ -771,6 +848,13 @@ bool readCmdArgs(int argc, char* argv[]){
 	}
 
 
+	// .gzi block indexes next to gzip outputs are opt-in: they only speed up
+	// parallel re-reading by sdm and clutter per-sample output directories.
+	setDefault("-o_gzi", "0");
+	if ((*cmdArgs)["-o_gzi"] != "0" && (*cmdArgs)["-o_gzi"] != "1") {
+		throw std::runtime_error("-o_gzi must be 0 or 1");
+	}
+	setBgzfIndexOutput((*cmdArgs)["-o_gzi"] == "1");
 	setDefault("-o_qual_offset", DEFAULT_output_qual_offset);
 	setDefault("-pairedRD_HD_out", DEFAULT_pairedRD_HD_out);
 	setDefault("-5PR1cut", DEFAULT_5PR1cut);
@@ -887,6 +971,26 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 	// Should be brought in right order (SRblock)
 	//------------------------------------
 //	for (unsigned int i = 0; i < files.uniqueFastxFiles.size(); i++ ) {
+	bool anyInputRead = false;
+	string skippedInputs;
+	// Keep the main outputs open across input files instead of finalizing and
+	// re-opening them in append mode for each one. Output rotation and read
+	// subsets manage their own file sets and keep the previous behavior.
+	struct RetentionScope {
+		explicit RetentionScope(bool on) : active(on) { OutputStreamRetention::enable(on); }
+		void close() {
+			if (!active) { return; }
+			active = false;
+			OutputStreamRetention::enable(false);
+			OutputStreamRetention::closeAll();
+		}
+		~RetentionScope() {
+			try { close(); }
+			catch (const std::exception& error) { cerr << "Failed to finalize output: " << error.what() << "\n"; }
+		}
+		bool active;
+	} retention(mainFilter->maxReadsOutput() == 0 && !mainFilter->doSubselReads() &&
+		!mainFilter->doOptimalClusterSeq());
 	for (auto &uFX : files.uniqFxFls) {
 		uint i = uFX.second;
 		cdbg("Unique file " + uFX.first + "(" + itos(i) + ")\n");
@@ -931,10 +1035,16 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 		mainFile = IS->setupInput(files.path, tarID, uFX.first, files, filter->setPaired(),
 			runtimeOpts.onlyPair, mainFileShort, false);
 		if (mainFile.empty() || !IS->checkInFileStatus()) {
+            if (mainFilter->doOptimalClusterSeq() && cmdArgs->get("-seedSubclusters") == "1") {
+                delete filter;
+                throw runtime_error("Could not read complete subcluster FASTQ input: " + uFX.first);
+            }
 			cerr << "Warning: input file set is empty or unreadable; skipping " << uFX.first << "\n";
+			skippedInputs += (skippedInputs.empty() ? "" : ", ") + uFX.first;
 			delete filter;
 			continue;
 		}
+		anyInputRead = true;
 
 		// check if derep block will change; only after input was confirmed readable
 		if (totalReadsRead>0 && mainFilter->doDereplicate() && dereplicator->DerepPerSR()
@@ -1002,13 +1112,16 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 
 		//only pull out a subset of sequences
 		if (mainFilter->doSubselReads()) {
-			if (cmdArgs->find("-mocatFix") != cmdArgs->end()) {
+			if (cmdArgs->get("-mocatFix", "0") == "1") {
 				cerr << "MOCAT fix appplies\n";
 				RDSset->findMatches(IS, OutStreamer, true);
 			}	else {
 				RDSset->findMatches(IS, OutStreamer, false);
 			}
-			//delete OutStreamer;
+			// Flushes and closes the subset/exclude streams; needs filter alive.
+			// Close explicitly so a write failure is raised, not just printed.
+			OutStreamer->closeOutStreams(true);
+			delete OutStreamer;
 			delete filter;
 			continue;
 		}
@@ -1068,7 +1181,7 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 		totalReadsRead += filter->getLocalRdsRead();
 		//		delete IS;
 				//write log file
-		if (files.uniqueFastxFiles.size() > 1) {//only print sub log if neccessary
+		if (files.uniqueFastxFiles.size() > 1 && (*cmdArgs)["-log"] != "nolog") {//only print sub log if neccessary
 			ofstream log;
 			string logF2 = (*cmdArgs)["-log"] + string("0") + itos(i);
 			log.open(logF2.c_str(), ios_base::out);
@@ -1087,7 +1200,12 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
 		delete OutStreamer;
 		delete filter;
     }//uFX
+	retention.close();
 	cdbg("End of UFx loop");
+	// Single empty samples are skipped above; if nothing at all could be read, say so.
+	if (!anyInputRead && !skippedInputs.empty()) {
+		throw std::runtime_error("Input empty: no sequences found in " + skippedInputs);
+	}
 
 
     //-------------------------------------------------
@@ -1160,6 +1278,7 @@ void separateByFile(Filters* mainFilter, Benchmark* sdm_benchmark){
             MDx->addMergeStatsTo(positionStats);
             printPositionStats();
         }
+        MDx->closeOutStreams(true); // raises write failures before the destructor swallows them
         delete MDx;
 		//delete DerepM;
 		printConvertedSummary();
@@ -1323,6 +1442,9 @@ void rewriteNumbers(){
     string tname="",tseq="";
 	fna.open(cmdArgs["-i_fna"].c_str(),ios::in);
 	ofna.open(cmdArgs["-o_fna"].c_str(),ios::out);
+	if (!fna.is_open() || !ofna.is_open()) {
+		throw std::runtime_error("-number T requires a readable -i_fna and a writable -o_fna file");
+	}
     while (getline(fna,line,'\n')){
 
         if (line.empty() || line[0]=='$'){ //$ marks comment
@@ -1436,6 +1558,7 @@ void printCmdsHelp(){//actually these are flags
 		 << " -o_fna2/-o_qual2/-o_fastq2 <file> Additional filtering tier, configured by * options\n"
 		 << " -o_demultiplex <path>          Per-sample FASTQ output; directory must already exist\n"
 		 << " -o_demultiplex_gz <0|1>        Gzip demultiplexed output\n"
+		 << " -o_gzi <0|1>                   Write a .gzi block index next to gzip outputs (default: 0)\n"
 		 << " -o_fastq_noBC <file>           No-barcode reads; paired: one interleaved file or R1,R2\n"
 		 << " -o_qual_offset <n>             Output FASTQ quality offset (default: 33)\n"
 		 << " -oneLineFastaFormat <0|1>      Write FASTA/quality sequences on one line\n"
@@ -1470,21 +1593,28 @@ void printCmdsHelp(){//actually these are flags
 	cout << "Dereplication, merging, and OTU support:\n"
 		 << " -o_dereplicate <file>          Dereplicated sequences (default format: fa)\n"
 		 << " -dere_size_fmt <0|1>           0: size=X; format; 1: _X format\n"
-		 << " -min_derep_copies <rule>       Minimum copies, e.g. 10:1,3:3\n"
-		 << " -derep_map <file>              Dereplication mapping output\n"
+		 << " -min_derep_copies <rule>       Minimum copies: N = N in total across samples;\n"
+		 << "                                X:Y = X in each of Y samples; e.g. 10:1,3:3 (any rule)\n"
+		 << " -derep_map <file>              Parent abundance-map input for seed extension\n"
 		 << " -derep_reserve <n>             Reserve capacity for dereplication\n"
 		 << " -derepPerSR <0|1>              Dereplicate per mapping-file SequencingRun (default: 0)\n"
 		 << " -derep_format <fa|fq>          Dereplicated FASTA or FASTQ output (default: fa)\n"
 		 << " -derepSrchLen <n>              Explicit dereplication search length (-1: full logical sequence)\n"
 		 << " -derepPrefix <auto|0|1>        Auto-select, disable, or force 100% prefix matching\n"
-         << " -derepIdentity <percent>      Streaming substitution clusters below 100 (default: 100)\n"
+         << " -derepIdentity <percent>      Internal substitution grouping below 100; ordinary output (default: 100)\n"
+         << " -derepCoarseClusters <0|1>    Export coarse clusters instead of ordinary dereplicates (default: 0)\n"
+         << "                              Default FASTA/map/HQ output preserves exact dereplicates.\n"
+         << " -derepGlobal <0|1>            Global coarse grouping instead of independent parallel partitions (default: 0)\n"
+         << "                              Multiple workers use 64 partitions below 100%; no final consolidation.\n"
+         << "                              Identity 100 and derepReassign=1 retain a global index.\n"
          << " -derepSeedHomopolymer <2..20> Exclude search seeds containing this run length (default: 4)\n"
-         << " -derepReassign <0|1>          Final nearest-representative reassignment; retains variants/samples (default: 0)\n"
+         << " -derepReassign <0|1>          Final reassignment with coarse cluster output; retains variants/samples (default: 0)\n"
          << " -derepStoreDiffs <0|1>        Write nucleotide .diff: SDMDIFF2 single, SDMDIFF3 pairs (default: 0)\n"
-         << " -derepStoreQuals <0|1>        Retain selected qualities per exact sequence or pair (default: 0)\n"
-         << "                              Single: .subclusters.fq; paired: .subclusters.1.fq/.subclusters.2.fq\n"
+         << " -derepStoreQuals <0|1>        Optional full variants with selected qualities (default: 0)\n"
+         << "                              Representative HQ qualities are retained with 0; no seedSubclusters needed.\n"
+         << "                              Standard HQ output: .1.hq.fq; paired additionally .2.hq.fq\n"
          << "                              Complete unmerged reads with qualities; both mate qualities selected together.\n"
-         << "                              Pair size counts fragments once; both mates must meet derepIdentity.\n"
+         << "                              Exact R1 keys share a parent; new R1 candidates check both mates.\n"
          << "                              Implies in-memory variants, not .diff export; works with derepReassign.\n"
          << "                              Disable merge_pairs_derep, merge_pairs_filter, and merge_pairs_demulti.\n"
          << " -derepSubclusterFasta <0|1>   Export exact single/pair FASTA; requires derepStoreDiffs=1 (default: 0)\n"
@@ -1492,9 +1622,15 @@ void printCmdsHelp(){//actually these are flags
 		 << " -merge_pairs_derep <0|1>       Merge pairs during dereplication\n"
 		 << " -noSearchWithMerge <value>     Use R1 rather than merged derep search; presence enables, even value 0\n"
 		 << " -OTU_fallback/-OTU_fallback_refclust <file> Fallback OTU FASTA sequences\n"
+         << " -seedSubclusters <0|1>        Extend seeds from reconstructed variant HQ FASTQ (default: 0)\n"
+         << "                              Use parent mappings and derep.map; count each parent once.\n"
+         << "                              Paired input: synchronized .1.hq.fq/.2.hq.fq with parent.subN IDs.\n"
 		 << " -otu_matrix <file>             OTU matrix output\n"
 		 << " -ucAdditionalCounts/-ucAdditionalCounts1/-ucAdditionalCounts_refclust/-ucAdditionalCounts_refclust1 <file> Additional UC counts\n"
 		 << " -optimalRead2Cluster/-optimalRead2Cluster_ref <file> Read-to-cluster assignments\n\n";
+	cout << "Non-passing reads matching a passing dereplicate are counted in its abundance\n"
+         << "(exact key or prefix, any input order) and withheld from the mid-quality output;\n"
+         << "the mid-quality output holds only uncounted reads, so back-mapping it counts each once.\n";
 	cout << "A copy rule 10:1,3:3 means >=10 copies in one sample OR >=3 copies in each\n"
          << "of three samples. derepPrefix=auto uses exact keys for guaranteed fixed lengths\n"
          << "or an explicit positive derepSrchLen; otherwise it uses 100% prefix matching.\n"
@@ -1588,6 +1724,9 @@ TrimStartNTs	0
 # Merged output and HQ mates retain full length; seed extension ignores this cap.
 TruncateSequenceLength	-1
 
+# Minimum overlap (bases) for merging mates; overlaps below 20 must match exactly.
+MergeMinOverlap	16
+
 # Use T/F for paired-read checks. IDs are always checked for synchronization.
 # AmpliconShortPE checks reverse primers on R1; MixedPairs checks swapped mates;
 # ReversedSeqs checks reads in the reverse orientation.
@@ -1603,9 +1742,16 @@ CheckForReversedSeqs	F
 # without shortening stored merged output or HQ mates. No gaps/mismatches are allowed.
 derepPrefix	auto
 # Below 100: streaming same-start substitution clustering over the shorter key.
-# Fixed initial anchors; one high-quality representative and all assigned counts.
-# This mode takes precedence over derepPrefix and still respects search/truncation caps.
+# Internal anchors; ordinary exact/prefix outputs, merge policy and HQ pairs remain.
+# Only explicit coarse-cluster output takes precedence over derepPrefix.
 derepIdentity	100
+# Export one representative/count per coarse cluster instead of exact R1 keys.
+# Default 0 preserves normal dereplicates; final derepReassign=1 also opts into clusters.
+derepCoarseClusters	0
+# Below 100% with multiple workers, use independent coarse partitions by default.
+# Identical effective R1 keys share one partition even when R2 differs.
+# No final consolidation. Set 1 for global grouping; reassignment also requires it.
+derepGlobal	0
 # Search seeds containing this many consecutive identical bases are excluded.
 derepSeedHomopolymer	4
 # Optional nucleotide-only .diff: SDMDIFF2 single sequences; SDMDIFF3 linked pairs.
@@ -1613,8 +1759,11 @@ derepSeedHomopolymer	4
 # Neither format stores qualities, per-read names, or sample IDs.
 # Setting this to 1 also selects the streaming mode at identity 100.
 derepStoreDiffs	0
-# Optional selected qualities per exact sequence or (R1,R2) variant; default off.
-# Single-end output: .subclusters.fq; paired: .subclusters.1.fq and .subclusters.2.fq.
+# Optional full-variant export with selected qualities; default off.
+# At 0, ordinary representative HQ pairs and observed qualities are still retained.
+# Standard HQ output: .1.hq.fq; paired additionally .2.hq.fq.
+# These contain exact variants with parent.subN IDs; use seedSubclusters=1 for seeds.
+# HQ files accumulate across sequencing runs; no duplicate .subclusters FASTQ.
 # Both mate quality vectors come from one fragment; ;size= counts fragments once.
 # Requires complete, unmerged reads with qualities. Disable merge_pairs_derep,
 # merge_pairs_filter, and merge_pairs_demulti. No additional paired retention flag.
@@ -1624,7 +1773,7 @@ derepStoreQuals	0
 # Optional exact subcluster FASTA with ;size= counts; requires derepStoreDiffs=1.
 # Single: .subclusters.fna; paired quality mode: .subclusters.1.fna and .subclusters.2.fna.
 derepSubclusterFasta	0
-# Optional final reassignment to strictly closer qualifying representatives; default off.
+# Optional coarse cluster output with final reassignment to closer representatives.
 # Retains variants/sample counts in memory; does not enable sidecar output.
 # Paired quality mode moves whole variants, both quality vectors, and fragment counts.
 # Both mates must qualify; combined mismatch rate ranks targets. Ties keep the original.
@@ -1649,8 +1798,9 @@ minAvgQuality	25
 *minAvgQuality	20
 
 Supported alternates: minSeqLength, minAvgQuality, maxAmbiguousNT,
-QualWindowThreshhold, TrimWindowThreshhold, maxPrimerErrs, keepPrimerSeq,
+QualWindowThreshhold, TrimWindowThreshhold, maxPrimerErrs,
 maxAccumulatedError, RejectSeqWithoutRevPrim, RejectSeqWithoutFwdPrim.
+keepPrimerSeq applies to both tiers (*keepPrimerSeq is ignored with a warning).
 Use -o_fastq2, or -o_fna2/-o_qual2, for additional-tier output. If alternate settings
 are present and these paths are omitted, names are derived from the primary output.
 For paired output, supply R1,R2 paths within each tier; mates with different passing

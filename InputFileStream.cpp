@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
@@ -16,11 +17,15 @@
 #include <stdexcept>
 #include <streambuf>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #ifdef _gzipread
 #include <zlib.h>
+#endif
+#if defined(_gzipread) && defined(SDM_WITH_LIBDEFLATE)
+#include <libdeflate.h>
 #endif
 
 namespace {
@@ -410,6 +415,25 @@ std::vector<char> inflateBgzfBlock(
     const std::string& filename) {
     std::vector<char> output(static_cast<size_t>(block.uncompressedSize) + 1);
 
+#ifdef SDM_WITH_LIBDEFLATE
+    // One decompressor per thread. It checks the gzip header, CRC-32 and ISIZE.
+    struct Decompressor {
+        libdeflate_decompressor* handle = libdeflate_alloc_decompressor();
+        ~Decompressor() { libdeflate_free_decompressor(handle); }
+    };
+    thread_local Decompressor decompressor;
+    if (!decompressor.handle) {
+        throw std::runtime_error("libdeflate_alloc_decompressor failed");
+    }
+    size_t consumed = 0, produced = 0;
+    const libdeflate_result status = libdeflate_gzip_decompress_ex(decompressor.handle,
+        compressed.data(), compressed.size(), output.data(), output.size(), &consumed, &produced);
+    if (status != LIBDEFLATE_SUCCESS || produced != block.uncompressedSize || consumed != compressed.size()) {
+        throw std::runtime_error(
+            "Invalid BGZF block in " + filename + " at compressed offset " +
+            std::to_string(block.compressedOffset));
+    }
+#else
     z_stream stream{};
     stream.next_in = compressed.data();
     stream.avail_in = static_cast<uInt>(compressed.size());
@@ -433,6 +457,7 @@ std::vector<char> inflateBgzfBlock(
             "Invalid BGZF block in " + filename + " at compressed offset " +
             std::to_string(block.compressedOffset));
     }
+#endif
     output.resize(produced);
     return output;
 }
@@ -546,6 +571,134 @@ public:
     }
 };
 
+// Plain gzip streams cannot be inflated in parallel, but each input file (R1,
+// R2, MID) can be inflated on its own thread, ahead of and concurrently with
+// record parsing on the reader thread. Decompression errors are rethrown on
+// the reading thread at the position where they occurred.
+class ReadaheadStreambuf final : public std::streambuf {
+public:
+    ReadaheadStreambuf(std::unique_ptr<std::istream> source, size_t chunkSize, size_t depth)
+        : source_(std::move(source)), chunkSize_(chunkSize), depth_(depth) {
+        thread_ = std::thread([this] { run(); });
+    }
+    ReadaheadStreambuf(const ReadaheadStreambuf&) = delete;
+    ReadaheadStreambuf& operator=(const ReadaheadStreambuf&) = delete;
+    ~ReadaheadStreambuf() override {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stop_ = true;
+        }
+        space_.notify_all();
+        if (thread_.joinable()) {
+            thread_.join();
+        }
+    }
+
+protected:
+    int_type underflow() override {
+        if (gptr() != egptr()) {
+            return traits_type::to_int_type(*gptr());
+        }
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!current_.empty()) {
+            spare_.push_back(std::move(current_));
+            current_.clear();
+        }
+        data_.wait(lock, [this] { return !ready_.empty() || done_; });
+        if (ready_.empty()) {
+            setg(nullptr, nullptr, nullptr);
+            if (error_) {
+                std::exception_ptr error = error_;
+                error_ = nullptr;
+                lock.unlock();
+                std::rethrow_exception(error);
+            }
+            return traits_type::eof();
+        }
+        current_ = std::move(ready_.front());
+        ready_.pop_front();
+        // Wake the producer once half the queue is free, not for every chunk: each
+        // wake-up of a sleeping thread is a futex call on this, the reading, thread.
+        const bool wakeProducer = ready_.size() <= depth_ / 2;
+        lock.unlock();
+        if (wakeProducer) { space_.notify_one(); }
+        setg(current_.data(), current_.data(), current_.data() + current_.size());
+        return traits_type::to_int_type(*gptr());
+    }
+
+private:
+    void run() {
+        try {
+            for (;;) {
+                std::vector<char> chunk;
+                {
+                    std::unique_lock<std::mutex> lock(mutex_);
+                    space_.wait(lock, [this] { return stop_ || ready_.size() < depth_; });
+                    if (stop_) {
+                        return;
+                    }
+                    if (!spare_.empty()) {
+                        chunk = std::move(spare_.back());
+                        spare_.pop_back();
+                    }
+                }
+                chunk.resize(chunkSize_);
+                source_->read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+                chunk.resize(static_cast<size_t>(source_->gcount()));
+                const bool ended = chunk.size() < chunkSize_ || !*source_;
+                bool wakeConsumer;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (!chunk.empty()) {
+                        ready_.push_back(std::move(chunk));
+                    }
+                    done_ = ended;
+                    // The consumer only waits on an empty queue.
+                    wakeConsumer = ended || ready_.size() == 1;
+                }
+                if (wakeConsumer) { data_.notify_one(); }
+                if (ended) {
+                    return;
+                }
+            }
+        }
+        catch (...) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            error_ = std::current_exception();
+            done_ = true;
+            data_.notify_one();
+        }
+    }
+
+    std::unique_ptr<std::istream> source_;
+    const size_t chunkSize_;
+    const size_t depth_;
+    std::mutex mutex_;
+    std::condition_variable data_, space_;
+    std::deque<std::vector<char>> ready_;
+    std::vector<std::vector<char>> spare_;
+    std::vector<char> current_;
+    bool done_ = false;
+    bool stop_ = false;
+    std::exception_ptr error_;
+    std::thread thread_;
+};
+
+class ReadaheadInputStream final : public std::istream {
+public:
+    explicit ReadaheadInputStream(std::unique_ptr<std::istream> source)
+        : std::istream(new ReadaheadStreambuf(std::move(source), 256 * 1024, 8)) {
+        exceptions(std::ios::badbit);
+    }
+
+    ~ReadaheadInputStream() override {
+        exceptions(std::ios::goodbit);
+        std::streambuf* buffer = rdbuf();
+        rdbuf(nullptr);
+        delete buffer;
+    }
+};
+
 #endif
 
 } // namespace
@@ -583,7 +736,11 @@ std::unique_ptr<std::istream> openInputFile(
         }
     }
 
-    return std::make_unique<GzipInputStream>(filename, bufferSize);
+    auto sequential = std::make_unique<GzipInputStream>(filename, bufferSize);
+    if (useParallelGzip) {
+        return std::make_unique<ReadaheadInputStream>(std::move(sequential));
+    }
+    return sequential;
 #else
     (void)mode;
     (void)bufferSize;

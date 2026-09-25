@@ -186,6 +186,12 @@ public:
     bool getlines(string& ret, bool untilNextFasta = false, bool nwlRspace = false) { // int& linesRead,
         if (atEnd && at >= bufS) return false;
         ret.clear();
+        if (untilNextFasta) {
+            // Empty sequence/quality block: the next header follows directly. Reading
+            // the first line unconditionally merged that header into this record.
+            if (at >= bufS && !readChunk()) return false;
+            if (at < bufS && keeper[at] == '>') return true;
+        }
         for (;;) {
             // Cache bufS locally to avoid mid-iteration changes
             size_t currentBufS = bufS;
@@ -391,6 +397,11 @@ public:
 
 	bool keepPairedHD() { return keepPairHD; }
 	qual_score fastQscore() { return fastQver; }
+	// Auto-detection (fastQver == 0) accumulates the ASCII quality range over
+	// the records read so far and settles as soon as the range rules out one
+	// encoding. Callers that convert records immediately, or that finished the
+	// probe block, call this to force a decision from the evidence collected.
+	void finalizeFastqVersion();
     
 	
     vector<ifbufstream*> fasta_istreams, quality_istreams;
@@ -415,8 +426,11 @@ private:
 	bool read_fasta_entry(ifbufstream*fasta_is, ifbufstream*quality_is, shared_ptr<DNA> in, shared_ptr<DNA>, int&);
 	//static bool getFastaQualLine(istream&fna,  string&);
 	void maxminQualWarns_fq();
-	qual_score auto_fq_version();
-	qual_score auto_fq_version(qual_score minQScore, qual_score maxQScore=0);
+	// 33 or 64 when the ASCII range is conclusive, otherwise 0 (or the legacy
+	// guess when force is set).
+	static qual_score auto_fq_version(qual_score minAscii, qual_score maxAscii, bool force);
+	// Adds one record's qualities to the evidence; sets and returns fastQver
+	// once it is decided, 0 while still open.
 	qual_score auto_fq_version(const vector<string>& ret);
 	bool detectAndSwitchFileFormat(ifbufstream* stream, const std::string& filepath);
 	void resetStats() {
@@ -460,6 +474,7 @@ private:
 	qual_score fastQver,minQScore,maxQScore;//which version of Fastq? minima encountered Qscore
 	mutex fqverMTX;
 	bool QverSet;
+	uint64_t fqAutoRecords_ = 0; // records that contributed to auto-detection
 	//1 or 2?
 	int numPairs;
 	//keep track of sequences read for each pair_; other position (1=2,2=1)
@@ -474,6 +489,9 @@ private:
 	//collects errors, handles errors
 	vector<string> ErrorLog;
 	bool DieOnError;
+	// Set by the record reader when -ignore_IO_errors discards a malformed record
+	// (as opposed to reaching end of input).
+	bool malformedRecordSkipped_ = false;
 
     shared_mutex protect;
 	int num_threads;

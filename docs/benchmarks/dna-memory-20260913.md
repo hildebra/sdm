@@ -80,8 +80,8 @@ The 64-bit quality *sums* also cannot be narrowed merely because each individual
 From the repository root, rerun the saved binaries with:
 
 ```sh
-python3 tests/benchmark_dna_memory.py --before .build/dna-memory-20260913/before --after .build/dna-memory-20260913/after --output /tmp/dna-memory-repeat.csv --repeats 5 --cpu 0
-python3 tests/benchmark_quality_storage.py --binary .build/dna-memory-20260913/TestQualityStorageBenchmark --output /tmp/dna-quality-repeat.csv --cpu 0
+python3 .claude/archive/benchmarks/benchmark_dna_memory.py --before .build/dna-memory-20260913/before --after .build/dna-memory-20260913/after --output /tmp/dna-memory-repeat.csv --repeats 5 --cpu 0
+python3 .claude/archive/benchmarks/benchmark_quality_storage.py --binary .build/dna-memory-20260913/TestQualityStorageBenchmark --output /tmp/dna-quality-repeat.csv --cpu 0
 ```
 
 To rebuild the production benchmark harnesses in either source tree:
@@ -93,5 +93,5 @@ make WITH_HTS=0 STATIC=0 -j3 .build/portable-0/TestDNAMemory .build/portable-0/T
 To rebuild the separate representation prototype:
 
 ```sh
-g++ -std=c++20 -O3 tests/TestQualityStorageBenchmark.cpp -o /tmp/quality-storage-benchmark
+g++ -std=c++20 -O3 .claude/archive/benchmarks/TestQualityStorageBenchmark.cpp -o /tmp/quality-storage-benchmark
 ```

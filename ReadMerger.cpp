@@ -1,6 +1,48 @@
 #include "ReadMerger.h"
 
 #include <algorithm>
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+#include <immintrin.h>
+#define SDM_MISMATCH_AVX2 1
+#endif
+
+namespace {
+// Differences between a and b over `length` bytes. Counting stops once more than
+// `limit` are found, so the result is exact only while it is <= limit.
+int boundedMismatchesScalar(const char* a, const char* b, int length, int limit) {
+	int mismatches = 0;
+	for (int i = 0; i < length; ++i) {
+		if (a[i] != b[i] && ++mismatches > limit) { return mismatches; }
+	}
+	return mismatches;
+}
+#ifdef SDM_MISMATCH_AVX2
+// 32 bytes per step; the limit is checked after each step, so the result is > limit
+// exactly when the scalar count would exceed it.
+__attribute__((target("avx2,popcnt")))
+int boundedMismatchesAvx2(const char* a, const char* b, int length, int limit) {
+	int mismatches = 0, i = 0;
+	for (; i + 32 <= length; i += 32) {
+		const __m256i x = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(a + i));
+		const __m256i y = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b + i));
+		const unsigned equal = static_cast<unsigned>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(x, y)));
+		mismatches += __builtin_popcount(~equal);
+		if (mismatches > limit) { return mismatches; }
+	}
+	for (; i < length; ++i) {
+		if (a[i] != b[i] && ++mismatches > limit) { return mismatches; }
+	}
+	return mismatches;
+}
+#endif
+int boundedMismatches(const char* a, const char* b, int length, int limit) {
+#ifdef SDM_MISMATCH_AVX2
+	static const bool avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("popcnt");
+	if (avx2) { return boundedMismatchesAvx2(a, b, length, limit); }
+#endif
+	return boundedMismatchesScalar(a, b, length, limit);
+}
+}
 
 
 void mergeStats::printHisto(string File) {
@@ -29,16 +71,16 @@ void mergeStats::prepStats() {
 	percFwd.resize(matchFwd.size(), 0.f); percRev.resize(mismatchRev.size(), 0.f);
 	maxF = 0.f; maxR = 0.f;
 	for (size_t i = 0; i < matchFwd.size(); i++) {
-		const float observations = mismatchFwd[i] + matchFwd[i];
-		percFwd[i] = observations > 0.f ? mismatchFwd[i] / observations : 0.f;
+		const double observations = double(mismatchFwd[i]) + double(matchFwd[i]);
+		percFwd[i] = observations > 0.0 ? float(double(mismatchFwd[i]) / observations) : 0.f;
 		if (percFwd[i] > maxF) { maxF = percFwd[i]; }
 	}
 	//normalize to max val
 	//for (size_t i = 0; i < matchFwd.size(); i++) { percFwd[i] /= maxF; }
 	//same game for rev scores
 	for (size_t i = 0; i < mismatchRev.size(); i++) {
-		const float observations = mismatchRev[i] + matchRev[i];
-		percRev[i] = observations > 0.f ? mismatchRev[i] / observations : 0.f;
+		const double observations = double(mismatchRev[i]) + double(matchRev[i]);
+		percRev[i] = observations > 0.0 ? float(double(mismatchRev[i]) / observations) : 0.f;
 		if (percRev[i] > maxR) { maxR = percRev[i]; }
 	}
 	//normalize to max val
@@ -160,46 +202,20 @@ string ReadMerger::reverseComplement(std::string str) {
 
 double ReadMerger::percentIdentity(const char* sequence1, const char* sequence2, 
 	int length, int mismatches ) {
-	int match_count = 0;
-	int mismatch_count = 0;
 	if (mismatches < 0) mismatches = length;
 	if (length <= 0) return 0.f;
-
-	for (int i = 0; i < length; ++i) {
-		if (sequence1[i] == sequence2[i]) {
-			++match_count;
-		}
-		else if (++mismatch_count > mismatches) {
-			return -1.f;
-		}
-	}
-    return (double)match_count / length;
+	const int found = boundedMismatches(sequence1, sequence2, length, mismatches);
+	if (found > mismatches) { return -1.f; }
+    return (double)(length - found) / length;
 }
 
 double ReadMerger::percentIdentity(std::string_view sequence1, std::string_view sequence2, 
 	int mismatches ) {
-	int match_count = 0;
-	int mismatch_count = 0;
- const int length = static_cast<int>(sequence1.length());
-
 	if (sequence1.length() != sequence2.length()) {
 		std::cerr << "Sequences must be of the same length." << std::endl;
 		return -1.f;
 	}
-
-	if (mismatches < 0) { mismatches = length; }
-	if (length <= 0) return 0.f;
-
- for (int i = 0; i < length; ++i) {
-
-      if (sequence1[i] == sequence2[i]) {
-			++match_count;
-		}
-		else if (++mismatch_count > mismatches) {
-			return -1.f;
-		}
-	}
-    return (double)match_count / length;
+	return percentIdentity(sequence1.data(), sequence2.data(), static_cast<int>(sequence1.length()), mismatches);
 }
 void ReadMerger::reverseComplement(char *str, int len) {
  if (str == nullptr || len <= 0) {
@@ -316,12 +332,14 @@ bool ReadMerger::findSeed(std::string& sequence1, std::string& sequence2, MergeR
                 overlap = std::min(seq1_len_i + offset, seq2_len_i);
 			}
 
-			if (overlap < (int)min_overlap_) { offset1 = -1; continue; }
+			if (overlap < (int)min_overlap_.load()) { offset1 = -1; continue; }
 
+          // Up to 10% mismatches, but short overlaps (below 20 bases) must match
+          // exactly: a 5-mer seed plus one tolerated mismatch is weak evidence.
           auto pi = percentIdentity(
 				sequence1_ptr + offset2,
 				(rev ? reverse_sequence2_ptr : sequence2_ptr) + offset1, overlap,
-				overlap / 10);
+				overlap >= 20 ? overlap / 10 : 0);
 			if (pi > percent_identity_threshold_) {
                 result.seed.pos1 = static_cast<size_t>(pos1);
 				result.seed.pos2 = pos2;
@@ -461,13 +479,12 @@ shared_ptr<DNA> ReadMerger::merge(shared_ptr<DNA> read1, shared_ptr<DNA> read2) 
     if (reversed && read2->getRevPrimDetect()) { merged->setRevPrimCut(); }
     const qual_score meanMismatch = errors == 0 ? 0
         : static_cast<qual_score>(round(static_cast<double>(mismatchQualSum) / errors));
+    // The inputs are not marked here: the caller decides whether the consensus
+    // is acceptable and then calls DNA::adoptMergeStats on the mates. Marking
+    // them first made rejected merges look merged (audit finding 2).
     merged->setMergeErrors(errors, meanMismatch);
-    read1->setMergeErrors(errors, meanMismatch);
-    read2->setMergeErrors(errors, meanMismatch);
     merged->stripLeadEndN();
     merged->setMergeLength(merged->length());
-    read1->setMergeLength(merged->length());
-    read2->setMergeLength(merged->length());
     return merged;
 }
 

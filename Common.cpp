@@ -42,17 +42,14 @@ void trim(std::string& str){
 //from http://stackoverflow.com/questions/8888748/how-to-check-if-given-c-string-or-char-contains-only-digits
 bool is_digits(const std::string &str)
 {
-    return std::all_of(str.begin(), str.end(), ::isdigit); // C++11
+    return std::all_of(str.begin(), str.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
 }
 
 
 
-string spaceX(unsigned int k){
-    string ret = "";
-    for (unsigned int i = 0; i < k; i++){
-        ret += ' ';
-    }
-    return ret;
+// Callers pass computed column widths that can be negative (long adapters, many digits).
+string spaceX(int k){
+    return k > 0 ? string(static_cast<size_t>(k), ' ') : string();
 }
 
 int digitsInt(int x){
@@ -69,13 +66,7 @@ int digitsFlt(float x){
 }
 
 string intwithcommas(int value) {
-    string numWithCommas = std::to_string((long long)value);
-    int insertPosition = (int)numWithCommas.length() - 3;
-    while (insertPosition > 0) {
-        numWithCommas.insert(insertPosition, ",");
-        insertPosition -= 3;
-    }
-    return (numWithCommas);
+    return intwithcommas(static_cast<int64_t>(value)); // the int64_t overload handles the sign
 }
 
 string intwithcommas(int64_t value) {
@@ -220,67 +211,15 @@ std::string header_stem(const std::string& header) {
         return header.substr(0, slash);
     }
 
-    std::array<size_t, 12> delim_pos;
-    size_t start = 0;
-    size_t idx = 0;
-    while (idx < 11) {
-        size_t p = header.find(": ", start);
-        if (p == std::string::npos) break;
-        delim_pos[idx++] = p;
-        start = p + 2;
+    // Split on any ':' or ' ' (Illumina "inst:run:flow:lane:tile:x:y 1:N:0:idx"),
+    // as the pre-refactor header_string_split(header, ": ") did.
+    const std::vector<std::string> t = header_string_split(header, ": ");
+    if (t.size() == 11) {
+        return t[0] + ":" + t[3] + ":" + t[4] + ":" + t[5] + ":" + t[6];
+    } else if (t.size() == 6 || t.size() == 7) {
+        return t[0] + ":" + t[2] + ":" + t[3] + ":" + t[4] + ":" + t[5];
     }
-
-    auto token_at = [&](size_t i) -> std::string_view {
-        if (i == 0) {
-            size_t end = (idx > 0) ? delim_pos[0] : header.size();
-            return std::string_view(header.data(), end);
-        }
-        if (i < idx) {
-            size_t s = delim_pos[i - 1] + 2;
-            size_t e = delim_pos[i];
-            return std::string_view(header.data() + s, e - s);
-        }
-        if (idx > 0 && i == idx) {
-            size_t s = delim_pos[idx - 1] + 2;
-            size_t e = header.size();
-            return std::string_view(header.data() + s, e - s);
-        }
-        return std::string_view();
-    };
-
-    size_t tokens_n = (idx == 0) ? 1 : (idx + 1);
-
-    if (tokens_n == 11) {
-        std::string out;
-        std::string_view t0 = token_at(0);
-        std::string_view t3 = token_at(3);
-        std::string_view t4 = token_at(4);
-        std::string_view t5 = token_at(5);
-        std::string_view t6 = token_at(6);
-        out.reserve(t0.size() + t3.size() + t4.size() + t5.size() + t6.size() + 4);
-        out.append(t0.data(), t0.size()); out.push_back(':');
-        out.append(t3.data(), t3.size()); out.push_back(':');
-        out.append(t4.data(), t4.size()); out.push_back(':');
-        out.append(t5.data(), t5.size()); out.push_back(':');
-        out.append(t6.data(), t6.size());
-        return out;
-    } else if (tokens_n == 6 || tokens_n == 7) {
-        std::string out;
-        std::string_view t0 = token_at(0);
-        std::string_view t2 = token_at(2);
-        std::string_view t3 = token_at(3);
-        std::string_view t4 = token_at(4);
-        std::string_view t5 = token_at(5);
-        out.reserve(t0.size() + t2.size() + t3.size() + t4.size() + t5.size() + 4);
-        out.append(t0.data(), t0.size()); out.push_back(':');
-        out.append(t2.data(), t2.size()); out.push_back(':');
-        out.append(t3.data(), t3.size()); out.push_back(':');
-        out.append(t4.data(), t4.size()); out.push_back(':');
-        out.append(t5.data(), t5.size());
-        return out;
-    } else {
-        throw std::runtime_error(std::string("fastq header format error: ") + header);
-    }
+    throw std::runtime_error(std::string("fastq header format error: ") + header);
 }
 
 void reverseTS(string & Seq) {
@@ -315,24 +254,29 @@ std::ptrdiff_t len_common_prefix_base(char const a[], char const b[])
     return std::distance(b, std::mismatch(b, b + std::strlen(b), a).first);
 }
 
+// Inserts ".<it>" and/or xtr before the file extension of x, keeping a .gz
+// suffix last: out.fq.gz -> out.1.fq.gz, out.gz -> out.1.gz (not out.gz.1, which
+// was written uncompressed), /data/run.2024/out -> /data/run.2024/out.1 (a dot in
+// a directory name is not an extension).
 string applyFileIT(string x, int it,const string xtr){
-
+    const size_t sep = x.find_last_of("/\\");
+    const size_t base = sep == string::npos ? 0 : sep + 1;
     size_t pos = x.find_last_of(".");
+    if (pos != string::npos && pos < base) { pos = string::npos; }
     if (pos != string::npos && isGZfile(x)) {
-        pos = x.find_last_of(".", pos-1);
+        const size_t inner = pos > base ? x.find_last_of(".", pos - 1) : string::npos;
+        if (inner != string::npos && inner >= base) { pos = inner; }
     }
-    if (it == 0) {
-        if (pos == string::npos) {
-            return x + xtr;
-        }
-        return x.substr(0, pos) + xtr + x.substr(pos);
+    string insert = xtr;
+    if (it != 0) {
+        std::ostringstream ss;
+        ss << it;
+        insert = "." + ss.str() + xtr;
     }
-    std::ostringstream ss;
-    ss << it;
     if (pos == string::npos) {
-        return x + "." + ss.str() + xtr ;
+        return x + insert;
     }
-    return x.substr(0,pos) + "."+ss.str() + xtr + x.substr(pos);
+    return x.substr(0, pos) + insert + x.substr(pos);
 }
 
 bool fileExists(const std::string& name, int i, bool extiffail) {

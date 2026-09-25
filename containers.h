@@ -31,6 +31,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <mutex>
 #include <thread>
 #include <map>
+#include <deque>
 
 #include <shared_mutex>
 
@@ -45,6 +46,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 
 //fwd declaration
+#include <algorithm>
+#include <functional>
+#include <limits>
+#include <stdexcept>
+class PartitionWorkPool;
+class ThreadPool;
 class UClinks;
 class Dereplicate;
 class Filters;
@@ -187,6 +194,8 @@ private:
 		};
 		auto parseSizeT = [](const std::string& value, size_t fallback) {
 			size_t parsedChars = 0;
+			// stoull wraps "-5" to a huge value; a negative size is never valid here.
+			if (value.find('-') != std::string::npos) { return fallback; }
 			try {
 				size_t parsed = std::stoull(value, &parsedChars);
 				if (parsedChars == value.size()) {
@@ -338,11 +347,8 @@ const std::string DEFAULT_5PR2cut = "0";
 string additionalFileName(const string& in);
 string additionalFileName2(const string& in);
 inline string getFileNoPath(string & s) {
-	size_t pos = s.find_last_of("/");
-	size_t pos2 = s.find_last_of("\\");
-	if (pos == string::npos || pos2 > pos) {
-		pos = pos2;
-	}
+	// Either separator; the old "pos2 > pos" test also fired for pos2 == npos on POSIX paths.
+	size_t pos = s.find_last_of("/\\");
 	if (pos == string::npos) {
 		return s;
 	}
@@ -390,15 +396,27 @@ private:
 bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r);
 
 
-class CoarseDereplication;
+#include "CoarseDereplication.h"
 
 class Dereplicate{
 public:
 	Dereplicate(OptContainer*, Filters* mf);//
 	~Dereplicate();
 	int getHighestBCoffset() { return (int)barcode_number_to_sample_id_.size(); }
-	//bool addDNA(shared_ptr<DNA> dna);
-	bool addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* filter = nullptr);
+	// Where a record set would be written if the dereplicator does not count it
+	// (the mid-quality tier). A set is either counted or written, never both, so
+	// pipelines that back-map the mid-quality output cannot count it twice.
+	struct DerepTierRoute { int idx1 = -1, cstr1 = 100, idx2 = -1, cstr2 = 100; };
+	using UncountedPublisher = std::function<void(const shared_ptr<DNA>&, const shared_ptr<DNA>&, const DerepTierRoute&)>;
+	void setUncountedPublisher(UncountedPublisher publisher) { publisher_ = std::move(publisher); }
+	// Applies every queued entry (publishing withheld sets); call when the
+	// output streams that the publisher writes to are about to close.
+	void flushPending();
+	// Returns the R1 pass state. With a route, the caller withholds the set's
+	// mid-quality write and this object publishes it if it is not counted;
+	// queued tells whether the entry was taken at all.
+	bool addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* filter = nullptr,
+		const DerepTierRoute* route = nullptr, bool* queued = nullptr);
 	string writeDereplDNA(Filters* fil, string SRblock);
 	void writeLog(string logF, string rep) {
 		ofstream logx;
@@ -429,6 +447,17 @@ public:
 	bool doSearchWithMerge() { return searchWithMerg; }
 	bool usesPrefixDereplication() const { return prefixMode_; }
     bool usesCoarseDereplication() const { return coarse_ != nullptr; }
+    size_t coarsePartitionCount() const { return coarse_ ? shards_.size() : 0; }
+
+	// Ordered admission (several workers). The reader numbers read blocks in
+	// input order (reserveBlock); a worker brackets its processing of a block
+	// with beginBlock/endBlock. Entries are applied per shard in block order,
+	// so admission, representatives and counts equal a single-threaded run no
+	// matter how the blocks are scheduled. Shards still apply in parallel.
+	static constexpr uint64_t kNoBlock = std::numeric_limits<uint64_t>::max();
+	uint64_t reserveBlock();
+	void beginBlock(uint64_t block);
+	void endBlock();
 
 
 private:
@@ -441,6 +470,12 @@ private:
 		int sample_id;
 		bool pass;
 		size_t shard;
+		// Global coarse index, ordered admission: search done before sealing.
+		CoarseDereplication::Probe probe{};
+		// Mid-quality output withheld by the caller: written by publish_uncounted
+		// if this set is not counted.
+		bool withheld = false;
+		DerepTierRoute route{};
 	};
 
 	struct alignas(64) ThreadLocalBatch {
@@ -448,10 +483,45 @@ private:
 		std::vector<PendingDerepEntry> pending;
 		Dereplicate* owner;
 		std::atomic<bool> active{false};
+		uint64_t block = kNoBlock; // block being processed (ordered admission)
+		// Global coarse index: reads this producer allocated, handed back by the
+		// threads that committed or applied them and freed here, in its own arena.
+		std::mutex returnedMutex;
+		std::vector<std::vector<PendingDerepEntry>> returnedEntries;
+		std::vector<std::vector<CoarseDereplication::Update>> returnedUpdates;
+	};
+	// A sealed block and the producer whose thread allocated its reads.
+	struct SealedBlock {
+		std::vector<PendingDerepEntry> entries;
+		ThreadLocalBatch* owner = nullptr;
 	};
 
-	bool apply_pending_entry_locked(const PendingDerepEntry& pending, HashDNA& tracker);
+	// deferring: the entry goes into a shard's deferred (rejected) table, which
+	// also accepts non-passing reads whose key is unknown.
+	bool apply_pending_entry_locked(const PendingDerepEntry& pending, HashDNA& tracker, bool deferring);
+    struct Shard;
+    void apply_pending_entry(const PendingDerepEntry& pending, Shard& shard,
+        const CoarseDereplication::Probe* probe = nullptr, std::vector<CoarseDereplication::Update>* deferred = nullptr);
+    // Non-passing reads never create a dereplicate. Whenever exact keys are the
+    // output unit they are deferred instead of dropped when their key is still
+    // unknown, so recovery does not depend on which copy of a sequence arrives
+    // first. Coarse-cluster output admits them to clusters directly.
+    // Variant-retaining modes (-derepStoreQuals/-derepStoreDiffs) store every
+    // counted read as an exact variant, so exact-key mode does not defer there
+    // (it would hold every failed read); prefix mode keeps its full evidence.
+    bool defersNonPassing() const { return !coarse_ || coarse_->outputsExact(); }
+    // Every counted read is also stored as an exact variant (-derepStoreQuals/-derepStoreDiffs).
+    bool retainsVariants() const { return coarse_ && (coarse_->storesQualities() || coarse_->storesDiffs()); }
+    bool exact_key_known(const PendingDerepEntry& pending, const Shard& shard) const;
+    void publish_uncounted(const PendingDerepEntry& pending);
+    UncountedPublisher publisher_;
 	void flush_batch(ThreadLocalBatch& batch);
+    // Global coarse index with several workers: candidate searches run
+    // concurrently against a snapshot, commits are exclusive and in batch
+    // order, and per-target updates run afterwards under striped locks.
+    void flush_global_coarse(ThreadLocalBatch& batch);
+    // Clears every shard (in parallel when idle workers exist). Needs LifecyclePause.
+    void clear_shards();
 	void flush_all_batches();
 	ThreadLocalBatch& get_or_create_thread_batch();
 
@@ -461,23 +531,82 @@ private:
 	//vector<shared_ptr<DNAunique>> Dnas;
 	//vector<shared_ptr<DNAunique>> DNApair;
 	vector<string> barcode_number_to_sample_id_;
-	struct Shard { std::mutex mutex; HashDNA tracker; HashDNA rejected; };
+    // Per-sample counts of deferred non-passing reads of one key: no read data,
+    // only what output-time recovery needs (FASTA output collects no qualities).
+    struct SampleTally {
+        std::vector<std::pair<int, uint64_t>> counts; // sorted by sample id
+        uint64_t total = 0;
+        void add(int sample, uint64_t copies = 1) {
+            if (sample < 0 || copies == 0) { return; }
+            auto it = std::lower_bound(counts.begin(), counts.end(), sample,
+                [](const std::pair<int, uint64_t>& entry, int s) { return entry.first < s; });
+            if (it == counts.end() || it->first != sample) { it = counts.emplace(it, sample, 0); }
+            if (copies > std::numeric_limits<uint64_t>::max() - it->second || copies > std::numeric_limits<uint64_t>::max() - total) {
+                throw std::overflow_error("Deferred dereplication count overflow");
+            }
+            it->second += copies;
+            total += copies;
+        }
+    };
+    typedef robin_hood::unordered_node_map<string, SampleTally> RejectedTallies;
+    // Exact-key mode: non-passing reads whose key has no passing dereplicate yet,
+    // kept as sample counts under a 64-bit hash of the key (no read, no key
+    // string: about 21 bytes per key). Nearly every key has one sample; keys
+    // seen in several samples move to `multi`. The table is capped (see
+    // kDeferredKeyCap), so its memory is bounded independently of the input.
+    struct DeferredCounts {
+        struct Single { int32_t sample; uint32_t copies; };
+        robin_hood::unordered_flat_map<uint64_t, Single> single;
+        robin_hood::unordered_map<uint64_t, std::vector<std::pair<int, uint64_t>>> multi;
+        size_t size() const { return single.size() + multi.size(); }
+        // false when the key is new and the table is full (the read is not kept).
+        bool add(uint64_t key, int sample, size_t cap);
+        void clear() { single.clear(); multi.clear(); }
+    };
+    static constexpr size_t kDeferredKeyCap = 4000000; // all shards together, ~85 MB
+    // Variant-retaining modes must record a recovered read as an exact variant,
+    // so they keep the (already allocated) reads, up to a fixed byte budget.
+    struct DeferredEvidence { std::shared_ptr<DNA> dna, dna2, merged; int sample; };
+    static constexpr uint64_t kDeferredEvidenceBytes = uint64_t(64) << 20;
+    std::atomic<uint64_t> deferredEvidenceBytes_{0};
+    static uint64_t deferredKeyHash(std::string_view key) { return robin_hood::hash<std::string_view>{}(key); }
+    struct Shard {
+        std::mutex mutex;
+        // Global coarse mode: shared for concurrent probes, exclusive for commits.
+        std::shared_mutex snapshot;
+        HashDNA tracker, rejected;
+        // Prefix mode: deferred non-passing reads when only their counts are needed.
+        RejectedTallies rejectedTallies;
+        DeferredCounts deferredCounts;
+        robin_hood::unordered_node_map<uint64_t, std::vector<DeferredEvidence>> deferredEvidence;
+        std::unique_ptr<CoarseDereplication> coarse;
+        struct AdmissionStats {
+            uint64_t high = 0, mid = 0, failed = 0, unmatched = 0, deferred = 0, published = 0, mergedKeys = 0;
+            uint64_t deferredDropped = 0; // deferred-key table full: read not kept
+        } admission;
+    };
     struct DerepOutputGroup {
         uint64_t count;
         std::string_view key;
         DNAuniqSet* representative;
         std::vector<DNAuniqSet*> members;
         std::shared_ptr<DNAunique> refined;
+        std::vector<std::pair<int, uint64_t>> recovered; // deferred sample counts attached to this group
+        std::vector<const DeferredEvidence*> evidence;   // deferred reads recorded as variants at write time
     };
-    std::vector<DerepOutputGroup> outputGroups(std::vector<uint64_t>& recoveredCounts);
+    // With a pool, shards are collected and the prefix-mode key sort runs in parallel.
+    std::vector<DerepOutputGroup> outputGroups(std::vector<uint64_t>& recoveredCounts, ThreadPool* pool);
 	std::vector<std::unique_ptr<Shard>> shards_;
 	//vector<int> counts;
 	string outfile;
 	bool b_usearch_fmt, b_singleLine;
 	bool b_pairedInput;
-	vector<int> minCopies;
-	size_t minCopiesSiz;
-	int minCopiesFastFailThreshold;
+	// -min_derep_copies: a sequence passes if any rule holds.
+	// "N": at least N copies in total across all samples (samples == 0).
+	// "X:Y": at least X copies in each of at least Y samples.
+	struct DerepCopyRule { int64_t copies; int samples; };
+	vector<DerepCopyRule> minCopyRules;
+	int64_t minCopiesFastFailThreshold;
 	string minCopiesStr;
 	//int passedSize;
 	int tmpCnt;
@@ -491,8 +620,76 @@ private:
 
 	int searchLength;
 	bool prefixMode_ = false;
-    std::unique_ptr<CoarseDereplication> coarse_;
-    std::mutex coarseMutex_;
+	// Deferred non-passing reads keep only a sample tally (FASTA output, no
+	// variant/quality retention); otherwise the DNAunique-based table is used.
+	bool deferCountsOnly_ = false; // prefix mode only; exact-key mode always uses DeferredCounts
+	size_t deferredKeyCapPerShard_ = kDeferredKeyCap;
+    // Non-owning first index: configuration is shared; mutable data belongs to each shard.
+    CoarseDereplication* coarse_ = nullptr;
+    std::unique_ptr<PartitionWorkPool> coarseWorkPool_;
+    bool parallelGlobalCoarse_ = false;
+    std::array<std::mutex, 256> coarseUpdateStripes_;
+    // Ordered admission state.
+    bool orderedAdmission_ = false;
+    std::unique_ptr<PartitionWorkPool> orderedPool_;
+    std::atomic<uint64_t> nextBlock_{0};
+    std::mutex sequenceMutex_;   // sealed_, nextSubmit_
+    std::mutex submitMutex_;     // serializes enqueues into orderedPool_
+    std::map<uint64_t, SealedBlock> sealed_;
+    uint64_t nextSubmit_ = 0;
+    // Applies whole blocks, in the given order, one partition job per shard and block.
+    // Afterwards each block's entries go back to their producer (see return_reads),
+    // unless that is `self`, the calling producer.
+    void apply_blocks_ordered(std::vector<SealedBlock>& blocks,
+        std::unique_lock<std::mutex>& submitLock, ThreadLocalBatch* self);
+    // Global coarse index, ordered admission: sealed blocks queue here in block
+    // order. The worker that finds no commit running becomes the committer and
+    // commits the queue; the others return to their next block.
+    // The committer posts each block's representative/count/variant updates to
+    // per-target lanes, in commit order. Any thread may apply a ready lane;
+    // one executor per lane keeps every target's updates in commit order.
+    // Producers help with the lanes (instead of reading on) while the queued
+    // blocks or updates exceed their backlog, since both hold reads in memory.
+    // The committer returns only once the queue and all lanes are empty.
+    std::mutex commitMutex_;     // everything below up to commitError_
+    std::condition_variable commitSpace_;
+    std::deque<SealedBlock> commitQueue_;
+    size_t commitBacklog_ = 0;   // queued blocks before producers help
+    bool committing_ = false;
+    static constexpr size_t kUpdateLanes = 64;
+    struct UpdateGroup {
+        std::vector<CoarseDereplication::Update> updates;
+        ThreadLocalBatch* owner = nullptr;
+    };
+    struct UpdateLane {
+        std::deque<UpdateGroup> queue;
+        bool running = false;
+    };
+    std::array<UpdateLane, kUpdateLanes> updateLanes_;
+    std::deque<size_t> readyLanes_;  // lanes with queued updates and no executor
+    size_t pendingUpdates_ = 0;      // queued or being applied
+    size_t updateBacklog_ = 0;       // pending updates before producers help
+    std::exception_ptr commitError_;
+    // Set while the committer waits for the exclusive snapshot lock; probes
+    // pause between chunks, since the lock itself prefers readers.
+    std::atomic<bool> commitWaiting_{false};
+    static constexpr size_t kProbeChunk = 8;
+    // Caller holds sequenceMutex_. Returns true if the caller must commit.
+    bool queue_global_commits(std::vector<SealedBlock>& blocks);
+    void commit_global_blocks();
+    void commit_global_block(SealedBlock& block);
+    void post_updates(std::vector<CoarseDereplication::Update>& updates, ThreadLocalBatch* owner);
+    // Hand reads back to the producer that allocated them (see ThreadLocalBatch).
+    void return_reads(ThreadLocalBatch* owner, std::vector<PendingDerepEntry>&& entries);
+    void return_reads(ThreadLocalBatch* owner, std::vector<CoarseDereplication::Update>&& updates);
+    void free_returned_reads(ThreadLocalBatch& batch);
+    // Applies one ready lane's queued updates; false if no lane is ready.
+    bool apply_ready_lane(std::unique_lock<std::mutex>& lock);
+    void fail_commits_locked(std::exception_ptr error);
+    void wait_for_commit_backlog();
+    // Lifecycle pause: submits sealed blocks left behind a missing block.
+    void drain_sealed_blocks();
+    void account_search_keys(const std::vector<PendingDerepEntry>& entries);
     bool writeSubclusters_ = false;
 
 
@@ -524,6 +721,8 @@ private:
 	void release_batch_activity(ThreadLocalBatch& batch);
 	std::atomic<uint64_t> srch_seq_total_len_{ 0 };
 	std::atomic<uint64_t> srch_seq_count_{ 0 };
+    std::atomic<uint64_t> skippedEmptyMates_{0};
+    std::atomic<uint64_t> skippedEmptyKeys_{0};
 	alignas(64) std::atomic<bool> lifecycle_pause_{ false };
 	mutable std::mutex lifecycle_wait_mtx_;
 	mutable std::condition_variable lifecycle_wait_cv_;
@@ -549,7 +748,7 @@ public:
 			cummMergeLen += mergLen;
 		}else { notMergeCnt++; }
 	}
-	bool whoIsBetter2(shared_ptr<DNAunique>);
+	bool whoIsBetter2(shared_ptr<DNAunique>, uint64_t candidateAbundance = 0);
 
 
 	shared_ptr<DNAunique> tdn1;
@@ -558,6 +757,9 @@ public:
 	uint len, mergLen;
 	uint mergeCnt, notMergeCnt;
 	long long cummMergeLen;
+    // Zero uses the DNAunique sample total (legacy HQ seeds). Reconstructed
+    // variants have multiplicities, but no variant-specific sample assignments.
+    uint64_t abundance = 0;
 };
 
 class UClinks{
@@ -595,7 +797,12 @@ private:
 	bool uclInOldDNA(const string&, const vector<int>&, float, Filters* fil);
 	bool uclInOldDNA_simple(const string&, const vector<int>&, int&);
 	bool getMAPPERline(string&, string&, float&, vector<int>&, bool addFromHDstring = false);
-	void besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1,  Filters* fil);
+    void addSeedCounts(const vector<int>&, shared_ptr<DNAunique>);
+    void besterDNA(const vector<int>&, shared_ptr<DNAunique>, Filters*,
+        bool addCounts = true, uint64_t candidateAbundance = 0);
+    shared_ptr<DNAunique> prepareSeedCandidate(shared_ptr<DNA>, shared_ptr<DNA>, Filters*);
+    void findSubclusterSeeds(shared_ptr<InputStreamer>, bool readFQ, Filters*);
+    string seedParentKey(string);
 	void setOTUnms();
 	void resetMarks();//reset the uc file format, in case of cd-hit/vsearch input
 
@@ -606,14 +813,25 @@ private:
 	inline void removeSampleID(string&, const string &, string&);
 	void readDerepInfo(const string);
 	uint64_t oneDerepLine(shared_ptr<DNAunique>);
+    bool nextDerepLine(string&);
+    uint64_t parseDerepLine(const string&, shared_ptr<DNAunique>, bool strictCounts);
 
 	inline bool getTMPmapperLine(string&);
+	bool readMapperFileLine(string&);
+	string clusterKey(string);
 
 	//pair_: important to keep track whether to remove BC etc.: -1 to remove BC (454); 0 not to (MID miSeq)
 	int CurSetPair;
     //store not matched DNA and keep track
 	// Combined mapping from sequence id to DNA object for unmatched DNA
 	unordered_map<string, shared_ptr<DNAunique>> unusedDNA;
+    struct SubclusterParent {
+        uint64_t expected = 0, observed = 0, lastVariant = 0;
+        vector<int> clusters;
+        float identity = 0.f;
+    };
+    unordered_map<string, SubclusterParent> subclusterParents;
+    bool seedSubclusters = false, subclusterMappingsLoaded = false;
 	//map<int,shared_ptr<DNA>> oldDNA;
 	//map<int,shared_ptr<DNA>> oldDNA2;
 	//DNAidmaps unusedID;

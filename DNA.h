@@ -43,12 +43,43 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <memory>
 #include <atomic>
 #include <unordered_map>
+#include <algorithm>
 
 #include "ThreadPool.h"
 #include "Benchmark.h"
 #include "DNAconsts.h"
 
+struct CompactDNAReferences;
+class CompactDNA;
+class CompactDerepSet;
+
+// A rarely set string (HTS BC:Z sample tags): one pointer instead of a 32-byte
+// std::string in every read and every stored dereplication object.
+class CompactOptionalString {
+public:
+    CompactOptionalString() = default;
+    CompactOptionalString(const CompactOptionalString& o)
+        : value_(o.value_ ? std::make_unique<std::string>(*o.value_) : nullptr) {}
+    CompactOptionalString(CompactOptionalString&&) noexcept = default;
+    CompactOptionalString& operator=(const CompactOptionalString& o) {
+        if (this != &o) { value_ = o.value_ ? std::make_unique<std::string>(*o.value_) : nullptr; }
+        return *this;
+    }
+    CompactOptionalString& operator=(CompactOptionalString&&) noexcept = default;
+    CompactOptionalString& operator=(std::string s) {
+        if (s.empty()) { value_.reset(); } else { value_ = std::make_unique<std::string>(std::move(s)); }
+        return *this;
+    }
+    const std::string& str() const { return value_ ? *value_ : emptyString(); }
+    operator const std::string&() const { return str(); }
+    bool empty() const { return !value_; }
+private:
+    static const std::string& emptyString() { static const std::string empty; return empty; }
+    std::unique_ptr<std::string> value_;
+};
+
 class DNA {
+    friend class CompactDNA;
     friend class DNAunique;
 public:
     using WhoIsBetterMergeStats = SeedComparisonHistory;
@@ -232,6 +263,9 @@ public:
         resetNewId();
     }
     void changeHeadPver(int ver);
+    // Rewrites an existing mate tag ("/1" "/2" or Illumina " 1:"/" 2:") to this mate number,
+    // e.g. after R1/R2 were swapped; headers without a tag are unchanged.
+    void setMateNumber(int mate);
     void setTA_cut(bool x) { FtsDetected.TA_cut = x; }
     bool getTA_cut() { return FtsDetected.TA_cut; }
     void setBarcodeCut() { FtsDetected.barcode_cut = true; FtsDetected.barcode_detected = true; }
@@ -408,6 +442,14 @@ public:
         FtsDetected.meanQInOverlapMismatch = meanQeoi;
     }
     void setMergeLength(int x) { FtsDetected.mergeLength = x; }
+    // Marks this mate with an accepted consensus's merge length and overlap
+    // errors. ReadMerger::merge leaves its inputs untouched, so a rejected
+    // consensus never makes a read look merged.
+    void adoptMergeStats(const DNA& merged) {
+        FtsDetected.errInOverlap = merged.FtsDetected.errInOverlap;
+        FtsDetected.meanQInOverlapMismatch = merged.FtsDetected.meanQInOverlapMismatch;
+        FtsDetected.mergeLength = merged.FtsDetected.mergeLength;
+    }
     int getMergeErrors() { return FtsDetected.errInOverlap; }
     qual_score getMergeErrorsQual() { return FtsDetected.meanQInOverlapMismatch; }
     bool isReversed() { return reversed_; }
@@ -472,7 +514,7 @@ protected:
 
 
     // Large aligned fields first; byte-sized state shares the final word.
-    string sample_barcode_;
+    CompactOptionalString sample_barcode_;
     string sequence_;
     string id_, new_id_;
     vector<qual_score> qual_;
@@ -529,6 +571,7 @@ struct DNAHasher
 // Shared arithmetic for selected representatives and detached merge history.
 // Uniform coverage avoids an allocation and a per-base increment stream.
 class DNAQualityEvidence {
+    friend class CompactDNA;
 public:
     using qual_accum_t = uint64_t;
     std::vector<qual_accum_t> quality_sum_per_base_;
@@ -548,15 +591,63 @@ private:
     qual_accum_t uniform_quality_coverage_ = 0;
 };
 
-class DNAunique : public DNA, public DNAQualityEvidence {//used for dereplication
+// A stored mate (R2) or merged consensus of a dereplicated unique: the read, its
+// quality evidence and the derep FASTQ writers. Sample counts, mate/merge links and
+// selection history exist only on the representative (DNAunique), saving memory per pair.
+class DerepRead : public DNA, public DNAQualityEvidence {
     friend class DNA;
+    friend class CompactDNA;
+    friend class DNAunique;
+public:
+    using qual_accum_t = uint64_t;
+    DerepRead() : DNA(), derep_fastq_offset_(0) {}
+    DerepRead(string s, string x) : DNA(std::move(s), std::move(x)), derep_fastq_offset_(0) {}
+    explicit DerepRead(const shared_ptr<DNA>& d) : DNA(*d), derep_fastq_offset_(0) {}
+
+    void prepSumQuals();
+    void sumQualities(const shared_ptr<DerepRead>& dna);
+    void sumQualities(const shared_ptr<DNA>& dna);
+    void releaseRawQualitiesIfPromoted();
+
+    void prepareDerepQualities(int ofastQver);
+    void writeDerepFastQ(ostream&, bool = true);
+    void writeFastQ(ostream&, bool = true);
+    string writeFastQ(bool = true);
+    void writeFastQ(string&, bool = true);
+
+    void saveMem();
+    shared_ptr<DerepRead> cloneForOutput() const { return std::make_shared<DerepRead>(*this); }
+    void compactForFastaDerepStorage();
+    std::vector<qual_accum_t> transferPerBaseQualitySum();
+
+    // Stored R2/merged objects omit headers that can be rebuilt from R1's header
+    // (R2: trailing "/1" -> "/2", or identical; merged: identical). Only exact
+    // matches are dropped, so restoring is lossless.
+    static string mateHeaderFrom(const string& r1Header);
+    const string& storedHeader() const { return newId(); }
+    void restoreMateHeader(const string& r1Header);
+
+protected:
+    void promoteQualitiesToSums(bool releaseRawQualities);
+    void clearStoredHeader() {
+        string().swap(id_);
+        string().swap(new_id_);
+        new_id_is_original_ = true;
+    }
+    // to calculate mean
+    qual_score derep_fastq_offset_;
+};
+
+class DNAunique : public DerepRead {//used for dereplication
+    friend class DNA;
+    friend class CompactDNA;
 public:
     // Constructors and Destructors
-    DNAunique() : DNA(), pair_(0), derep_fastq_offset_(0) {}
-    DNAunique(string s, string x) : DNA(std::move(s), std::move(x)), derep_fastq_offset_(0) {}
+    DNAunique() : DerepRead(), pair_(0) {}
+    DNAunique(string s, string x) : DerepRead(std::move(s), std::move(x)) {}
 
     // Mostly used constructor
-    DNAunique(shared_ptr<DNA>d, int BC) : DNA(*d), pair_(0), derep_fastq_offset_(0) {//best_seed_length_((uint)sequence_.size())
+    DNAunique(shared_ptr<DNA>d, int BC) : DerepRead(d), pair_(0) {//best_seed_length_((uint)sequence_.size())
         incrementSampleCounter(BC);
     }
     ~DNAunique() = default;
@@ -576,7 +667,7 @@ public:
         merge_quality_evidence_.reset();
     }
     void incrementSampleCounter(int sample_id);
-    void writeMap(ofstream& os, const string&, vector<uint64_t>&, const vector<int>&, vector<uint64_t>&, vector<int>&);
+    void writeMap(ostream& os, const string&, vector<uint64_t>&, const vector<int>&, vector<uint64_t>&, vector<int>&);
     //inline int getCount() { return count_; }
     uint64_t totalSum();
     //uint getBestSeedLength() { return best_seed_length_; }
@@ -588,19 +679,9 @@ public:
     //vector<pair_<int, int>> getDerepMapSort2(size_t wh);
     //void getDerepMapSort(vector<int>&, vector<int>&);
 
-    using qual_accum_t = uint64_t;
-
-
-    void prepSumQuals();
-    void sumQualities(const shared_ptr<DNAunique>& dna);
-    void sumQualities(const shared_ptr<DNA>& dna);
-    void releaseRawQualitiesIfPromoted();
-
-    void prepareDerepQualities(int ofastQver);
-    void writeDerepFastQ(ofstream&, bool = true);
-    void writeFastQ(ostream&, bool = true);
-    string writeFastQ(bool = true);
-    void writeFastQ(string&, bool = true);
+    using DerepRead::sumQualities;
+    // Exact overload so DNAunique arguments do not make the base overloads ambiguous.
+    void sumQualities(const shared_ptr<DNAunique>& dna) { DerepRead::sumQualities(std::static_pointer_cast<DerepRead>(dna)); }
 
     // Replaces the complete count/variant state, as used to create an output snapshot.
     void attachDiffDNA(std::shared_ptr<diffDNA> differences) { differences_ = differences ? *differences : diffDNA{}; }
@@ -620,16 +701,18 @@ public:
         differences_.add(sequence, samples, quality);
     }
     void clearDerepCounts() { differences_.clear(); }
-    void saveMem();
+    // Recovered deferred reads: counts only, no sequence or quality evidence.
+    void addSampleCount(int sample, uint64_t copies) { differences_.addSample(sample, copies); }
     shared_ptr<DNAunique> cloneForOutput() const;
     void sumMergeQualities(const shared_ptr<DNAunique>& other);
     void absorbDerepEvidence(const shared_ptr<DNAunique>& other, bool collectQualities);
 
-    void attachPair(shared_ptr<DNAunique> dna_unique);
-    shared_ptr<DNAunique> getPair(void);
+    void attachPair(shared_ptr<DerepRead> dna_unique);
+    shared_ptr<DerepRead> getPair(void);
+    void dropDerivableMateHeaders();
 
-    void attachMerge(shared_ptr<DNAunique> dnamerge);
-    shared_ptr<DNAunique> getMerge(void);
+    void attachMerge(shared_ptr<DerepRead> dnamerge);
+    shared_ptr<DerepRead> getMerge(void);
 
 
     //estimates if one sample occurence covers the unique counts required for sample specific derep min counts
@@ -638,8 +721,6 @@ public:
 
     void takeOver(shared_ptr<DNAunique> dna_unique_old);
     void takeOverDNA(shared_ptr<DNA> dna1, shared_ptr<DNA> dna2, shared_ptr<DNA> dnaMerge, bool keepQualities = true);
-    void compactForFastaDerepStorage();
-    std::vector<qual_accum_t> transferPerBaseQualitySum();
 
 
 private:
@@ -648,7 +729,6 @@ private:
     //int best_seed_length_;
 
     diffDNA differences_;
-    void promoteQualitiesToSums(bool releaseRawQualities);
     struct MergeQualityEvidence : DNAQualityEvidence {
         // Preserve the unpromoted case without allocating eight-byte sums yet.
         vector<qual_score> raw;
@@ -666,14 +746,12 @@ private:
         }
     };
 
-    shared_ptr<DNAunique> pair_;
+    shared_ptr<DerepRead> pair_;
 
-    shared_ptr<DNAunique> merge_;
+    shared_ptr<DerepRead> merge_;
     // Retain accepted consensus evidence if the chosen representative loses its merge.
     shared_ptr<MergeQualityEvidence> merge_quality_evidence_;
 
-    // to calculate mean
-    qual_score derep_fastq_offset_;
     WhoIsBetterMergeStats who_is_better_merge_stats_;
 
     //threadsafe
@@ -682,28 +760,65 @@ private:
 
 
 
+// Merge-offset subgroups of one dereplication key. Nearly every key has a single
+// subgroup, so a sorted vector (same ascending order as std::map) replaces a tree
+// node allocation per key. Callers must not keep iterators across operator[].
+class DerepSubgroupMap {
+public:
+    using value_type = std::pair<int, shared_ptr<DNAunique>>;
+    using iterator = std::vector<value_type>::iterator;
+    using const_iterator = std::vector<value_type>::const_iterator;
+    iterator begin() { return entries_.begin(); }
+    iterator end() { return entries_.end(); }
+    const_iterator begin() const { return entries_.begin(); }
+    const_iterator end() const { return entries_.end(); }
+    size_t size() const { return entries_.size(); }
+    iterator find(int key) {
+        auto it = lowerBound(key);
+        return it != entries_.end() && it->first == key ? it : entries_.end();
+    }
+    shared_ptr<DNAunique>& operator[](int key) {
+        auto it = lowerBound(key);
+        if (it == entries_.end() || it->first != key) { it = entries_.emplace(it, key, nullptr); }
+        return it->second;
+    }
+private:
+    iterator lowerBound(int key) {
+        return std::lower_bound(entries_.begin(), entries_.end(), key,
+            [](const value_type& entry, int k) { return entry.first < k; });
+    }
+    std::vector<value_type> entries_;
+};
+
 class DNAuniqSet {
 public:
-    DNAuniqSet() = default;
-    ~DNAuniqSet() {}
+    DNAuniqSet();
+    explicit DNAuniqSet(std::shared_ptr<const CompactDNAReferences> references);
+    ~DNAuniqSet();
+    bool isCompact() const { return bool(compact_); }
+    std::vector<diffDNA> compactVariants() const;
 
+    // One ordinary observation, retaining merge-offset selection and quality evidence.
+    void addObservation(shared_ptr<DNA> dna, shared_ptr<DNA> mate, shared_ptr<DNA> merged,
+        int mergePosition, int sample, bool asFasta, bool collectMergedQualities, bool markDereplicated = true);
     void addNewDNAuniq(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
         shared_ptr<DNA> dnaM, int MrgPos1, int sample_id, bool b_derep_as_fasta_, bool markDereplicated = true);
     shared_ptr<DNAunique>& operator[] (int x) {
         return DNUs[x];
     }
-    map<int, shared_ptr<DNAunique>>::iterator find(const int x);
-    const map<int, shared_ptr<DNAunique>>::iterator end();
-    const map<int, shared_ptr<DNAunique>>::iterator begin();
-    size_t size() { return DNUs.size(); }
+    DerepSubgroupMap::iterator find(const int x);
+    DerepSubgroupMap::iterator end();
+    DerepSubgroupMap::iterator begin();
+    size_t size() const;
     uint64_t totalSum() const;
     void addEvidenceTo(const shared_ptr<DNAunique>& target, bool collectQualities) const;
     void setBest(bool addCnts, bool collectQualities = true);
     shared_ptr<DNAunique> best(bool addCnts, bool collectQualities = true);
 
-    mutex lockMTX;
 private:
-    map<int, shared_ptr<DNAunique>> DNUs;
+    // (An unused per-key mutex was removed: shards already serialize updates.)
+    std::unique_ptr<CompactDerepSet> compact_;
+    DerepSubgroupMap DNUs;
     shared_ptr<DNAunique> bestDNU;
 
 };

@@ -15,6 +15,7 @@ Output filenames and report settings are command-line options. Filtering thresho
 | `-o_fna2 <file>`, `-o_qual2 <file>` | Additional FASTA and quality files for the less stringent tier. |
 | `-o_demultiplex <directory>` | One set of FASTQ files per sample; the directory must already exist. |
 | `-o_demultiplex_gz <0 or 1>` | Set to `1` to compress per-sample output with gzip. |
+| `-o_gzi <0 or 1>` | Set to `1` to write a `.gzi` block index next to every gzip output (BGZF). Off by default; the index only speeds up parallel re-reading by sdm and would otherwise clutter per-sample directories. |
 | `-o_dereplicate <file>` | Dereplicated sequences; see [dereplication](workflows.md#dereplication). |
 | `-o_fastq_noBC <file>` | Reads for which no barcode was detected. |
 
@@ -95,7 +96,23 @@ Detailed merge-position collection is enabled only when `-merg_readpos` or `-qua
 
 ## Dereplication output behavior
 
-Dereplicated FASTQ qualities, including merged consensus qualities, average the observations covering each base. Replacing a representative preserves the accumulated quality evidence, and combining subgroups combines their evidence and occurrence counts.
+Normal and coarse dereplication use the same standard files. For `-o_dereplicate derep.fas`:
+
+| File | Content |
+| --- | --- |
+| `derep.fas` | Passing representative sequences; FASTA by default, or FASTQ with `-derep_format fq`. Default coarse mode preserves exact R1 dereplicates. |
+| `derep.fas.rest` | Representatives below the minimum-copy cutoff, in the same format as the main file. |
+| `derep.map` | Sample counts for all parents, including those below the copy cutoff. |
+| `derep.1.hq.fq` | Standard HQ R1 file, also used for single-end input. |
+| `derep.2.hq.fq` | Standard HQ R2 file for paired input. |
+
+By default, coarse groups are internal search and compression references. The main FASTA and `.map` retain one representative and the sample counts for each **exact effective R1 key**, including the configured search/truncation cap. R2 differences do not split that parent; the existing paired better-seed selection can replace both mates. Minimum-copy rules apply to these exact dereplicates. Select `-derepCoarseClusters 1` only when the output should describe coarse clusters instead. `-derepReassign 1` also explicitly selects coarse-cluster output and performs final reassignment. `-derepGlobal 1` controls search scope, not output granularity.
+
+Without `-derepStoreQuals 1`, HQ files contain the usual selected representative mates. With that flag, they instead contain every retained exact sequence or pair, with selected qualities and generated `parent.subN;size=N;` IDs. No separate `.subclusters` FASTQ files or duplicate parent HQ records are written. The original cluster-anchor read, the currently selected representative, all other retained 100% variants, and singleton clusters share these same FASTQ files. Each distinct exact variant appears once with its own abundance; selecting a read as the cluster representative does not add another copy carrying the whole cluster count. Both mate records belong to the same observed fragment. Variant counts sum to the corresponding parent count in `.map`; use `-seedSubclusters 1` for seed extension from these HQ files so parent sample counts are consumed once. See [LotuS3 integration](lotus3-dereplication-io.md).
+
+`-derepPerSR 1` adds the sanitized run label to main outputs, for example `derep.runA.fas`. The normal `.map`, `.rest`, and HQ files accumulate across runs; retained variant HQ output uses this same rule. Optional `.diff` and exact-subcluster FASTA exports retain their run suffixes. `-suppressOutput` controls ordinary filtered outputs and does not suppress dereplication outputs.
+
+In ordinary exact/prefix mode, main dereplicated FASTQ qualities, including merged consensus qualities, average the observations covering each base. Coarse output uses selected representative qualities, and retained exact-variant HQ output uses selected observed quality vectors; those are not averages across coarse variants. Replacing a representative preserves the accumulated quality evidence, and combining subgroups combines their evidence and occurrence counts.
 
 Intermediate output snapshots include all merge-position subgroups. Each snapshot refreshes ordinary dereplication files; per-sequencing-run output remains cumulative. Final dereplication files are opened when written, so a missing input does not truncate an existing result during option setup.
 

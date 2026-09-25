@@ -7,17 +7,24 @@
 #include <tuple>
 
 bool PrimerVariantTracker::record(const std::string& readIdentity, int start, PrimerDirection direction,
-    const std::string& expected, const std::string& observed, bool isVariant) {
+    const std::string& expected, const std::string& observed, bool isVariant, bool detected) {
     std::lock_guard<std::mutex> lock(mutex);
-    const auto match = std::make_pair(readIdentity, direction);
-    if (!recordedMatches.insert(match).second) {
+    const uint8_t directionBit = direction == PrimerDirection::Reverse ? 2 : 1;
+    if (readIdentity != lastReadIdentity) {
+        lastReadIdentity = readIdentity;
+        lastReadDirections = 0;
+    }
+    if (lastReadDirections & directionBit) {
         return false;
     }
-    if (direction == PrimerDirection::Reverse) {
-        ++totalReverseMatches;
-    }
-    else {
-        ++totalForwardMatches;
+    lastReadDirections |= directionBit;
+    if (detected) {
+        if (direction == PrimerDirection::Reverse) {
+            ++totalReverseMatches;
+        }
+        else {
+            ++totalForwardMatches;
+        }
     }
     if (isVariant) {
         if (direction == PrimerDirection::Reverse) {
@@ -48,7 +55,8 @@ void PrimerVariantTracker::reset() {
     totalReverseMatches = 0;
     forwardVariants.clear();
     reverseVariants.clear();
-    recordedMatches.clear();
+    lastReadIdentity.clear();
+    lastReadDirections = 0;
 }
 
 const vector<uint64_t>& Statistics::get_rstat_Vmed(int x) {
@@ -159,9 +167,8 @@ void GAstats::addMissedGAs(int X) {
 
 
 void collectstats::addStats(shared_ptr<collectstats> cs, vector<int>& idx) {
-    if (BarcodeDetected.size() > (uint)10000) {
-        cerr << "Unrealistic number of barcodes (>10000) in addStats\n"; exit(79);
-    }
+    // (A cap of 10000 barcodes aborted here, after the whole input file had
+    // been processed; the loop below is bounded by idx.size() anyway.)
     int BCS = (int)BarcodeDetected.size();
     for (unsigned int i = 0; i < idx.size(); i++) {
         if (idx[i] >= BCS) { continue; }
@@ -225,6 +232,10 @@ void collectstats::reset() {
     primerSearchSucceededRevRead1 = 0; primerSearchSucceededRevRead2 = 0;
     multiFailReads = 0;
     ontAssigned = ontUnassigned = ontAmbiguous = ontConflictingEnds = 0;
+    // These eight were left over from the previous pass (numAccept =
+    // totalSuccess - totalMid could then wrap).
+    totalMid = 0; minLqualTrim = 0; AccErrTrimmed = 0; QWinTrimmed = 0;
+    BinomialErr = 0; dblTagFail = 0; reversedRds = 0; swappedRds = 0;
 
     //reportStats
     PostFilt.reset(); PreFilt.reset();
@@ -244,7 +255,7 @@ void ReportStats::addDNAStats(shared_ptr<DNA> d) {
     }
     //stats_mutex.lock();
     //pretty fast
-    addMeanStats(len, (int)avq, ace);
+    addMeanStats(len, (int)(avq + 0.5f), ace); // rounded, as Statistics::addDNAStats does
     //NT specific quality scores
 
 //    d->ntSpecQualScores(QperNT, NTcounts); // Thread safe
@@ -478,8 +489,12 @@ void ReportStats::calcSummaryStats(float remSeqs, unsigned int min_l, float min_
         rstat_Qmed = (int)calc_median(rstat_VQmed, 0.5f);
         USQS = 0.f;
     }
-    RSQS = (((float(rstat_NTs) / remSeqs) / (float)min_l) +
-        ((float(rstat_qualSum) / remSeqs) / min_q)) / 2.f;
+    // Relative to the length and quality thresholds; a disabled threshold (0)
+    // divided by zero. Only the configured terms contribute.
+    float terms = 0.f, sum = 0.f;
+    if (min_l > 0) { sum += (float(rstat_NTs) / remSeqs) / (float)min_l; terms += 1.f; }
+    if (min_q > 0.f) { sum += (float(rstat_qualSum) / remSeqs) / min_q; terms += 1.f; }
+    RSQS = terms > 0.f ? sum / terms : 0.f;
 }
 
 vector<size_t> ReportStats::getVrange(int which) {
@@ -598,6 +613,8 @@ void GAstats::addStats(shared_ptr<GAstats> o) {
         GALENperBC[idx] += o->GALENperBC[idx];
         rdLENperBC[idx] += o->rdLENperBC[idx];
         GAfailsPerBC[idx] += o->GAfailsPerBC[idx];
+        inCorPrimPerBC[idx] += o->inCorPrimPerBC[idx];
+        missGAsPerBC[idx] += o->missGAsPerBC[idx];
         if (GALDISperBC[idx].size() < o->GALDISperBC[idx].size() ) {
             size_t oSze = o->GALDISperBC[idx].size();
             GALDISperBC[idx].resize(oSze );
@@ -706,13 +723,9 @@ void GAstats::printSummary(ostream& give) {
 
 
 void Statistics::merge(Statistics &statistics, vector<int> &idx) {
-    if (BarcodeDetected.size() > (uint) 10000) {
-        cerr << "Unrealistic number of barcodes (>10000) in addStats\n";
-        exit(79);
-    }
     int BCS = (int) BarcodeDetected.size();
     for (unsigned int i = 0; i < idx.size(); i++) {
-        if (idx[i] >= BCS) return;
+        if (idx[i] >= BCS) continue; // was return: skipped every scalar counter below
         BarcodeDetected[idx[i]] += statistics.BarcodeDetected[i];
         BarcodeDetectedFail[idx[i]] += statistics.BarcodeDetectedFail[i];
     }

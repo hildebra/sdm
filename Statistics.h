@@ -92,10 +92,16 @@ struct PrimerVariantTracker {
     uint64_t totalReverseMatches = 0;
     std::map<std::pair<std::string, std::string>, uint64_t> forwardVariants;
     std::map<std::pair<std::string, std::string>, uint64_t> reverseVariants;
-    std::set<std::pair<std::string, PrimerDirection>> recordedMatches;
+    // Count a fragment once per direction. Its checks (R1, R2, sub-amplicons) arrive
+    // consecutively on one per-thread filter, so only the last fragment is kept;
+    // a set of every read ID grew by one entry per read (GBs on large runs).
+    std::string lastReadIdentity;
+    uint8_t lastReadDirections = 0;
 
+    // detected: the match satisfied PrimerErrs and counts toward the "primer
+    // detected" totals; variants beyond that threshold are only reported.
     bool record(const std::string& readIdentity, int start, PrimerDirection direction,
-        const std::string& expected, const std::string& observed, bool isVariant);
+        const std::string& expected, const std::string& observed, bool isVariant, bool detected = true);
     void mergeFrom(const PrimerVariantTracker& other);
     void reset();
 };

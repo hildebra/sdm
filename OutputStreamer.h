@@ -17,13 +17,31 @@
 #include <deque>
 #include <thread>
 #include <shared_mutex>
+#include <type_traits>
+
+class AsyncOutputWriter;
+
+// Output buffer bytes are always written before they are read, so creating or
+// growing a buffer need not zero it (megabytes per output stream otherwise).
+template <class T>
+struct UninitializedAllocator : std::allocator<T> {
+	UninitializedAllocator() = default;
+	template <class U> UninitializedAllocator(const UninitializedAllocator<U>&) noexcept {}
+	template <class U> void construct(U* p) noexcept(std::is_nothrow_default_constructible_v<U>) { ::new (static_cast<void*>(p)) U; }
+	template <class U, class... Args> void construct(U* p, Args&&... args) { ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...); }
+};
+using OutputBuffer = std::vector<char, UninitializedAllocator<char>>;
 
 //static mutex output_mtx;
+// Buffered output file. Appends only copy into the buffer under output_mtx.
+// With multithreaded I/O, full buffers are handed in order to one shared
+// writer thread (AsyncOutputWriter), so no appender ever waits for write()
+// or BGZF compression while it holds this stream's (or a caller's) lock.
 class ofbufstream {//: private std::streambuf, public std::ostream {
 public:
-    ofbufstream() :file("T"), keeper(0), keeperW(0), modeIO(ios::app), used(0), usedW(0),
+    ofbufstream() :file("T"), keeper(0), modeIO(ios::app), used(0),
      coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(5* 1024 * 1024) {}
-	ofbufstream(size_t bufferS) :file("T"), keeper(0), keeperW(0), modeIO(ios::app), used(0), usedW(0),
+	ofbufstream(size_t bufferS) :file("T"), keeper(0), modeIO(ios::app), used(0),
 		coutW(true), isGZ(false), doMC(false), primary(nullptr), bufS(bufferS) {
 
     }
@@ -32,30 +50,34 @@ public:
     void finishWrites();
     bool operator! (void);
     void operator<< (const string& X);
+    void append(const char* data, size_t size);
+    // Hands buffered bytes to the file and waits until they were written.
     void emptyStream();
     void activate();
+    // Flushes and finalizes the file; a retained stream is only flushed.
     void deactivate();
+    // Retained streams stay open when their OutputStreamer closes them; they
+    // are finalized by OutputStreamRetention::closeAll().
+    void setRetained(bool retained) { retained_ = retained; }
+    const string& fileName() const { return file; }
     // end
 
 private:
-    mutex append_mtx_;
+    friend class AsyncOutputWriter;
     mutex output_mtx;
-    bool internalWrite(bool closeThis);
-    bool internalWriteBuffer(std::vector<char>&& buf, bool closeThis);
-    void write(std::string s, std::string file);
-    void writeStream(bool doKickoff = true);
-	void enqueueBuffer(std::vector<char>&& buf);
-	void writerLoop();
-	void startWriterThread();
-	void stopWriterThread();
 	bool shouldUseAsyncWriter() const;
+	// Caller holds output_mtx: queues the filled keeper and installs a spare buffer.
+	void handOffLocked();
+	// Writer thread: writes one queued buffer and recycles it.
+	void writeQueued(OutputBuffer& buffer, size_t size);
+	void releaseQueued(OutputBuffer&& buffer);
+	void waitForQueuedWrites();
 
     //functions
     string file;
-    std::vector<char> keeper;
-    std::vector<char> keeperW;
+    OutputBuffer keeper;
     int modeIO;
-    size_t used, usedW;
+    size_t used;
     //write to cout? gzip input? do multicore?
     bool coutW, isGZ, doMC;
     std::unique_ptr<std::ostream> primary;
@@ -63,22 +85,28 @@ private:
 
     size_t bufS;
 
-    // Multithreading throw threadpool
-	//ThreadPool *pool = nullptr;//currently just used to check if MC or not
-	// Use a persistent thread-pool for task submission
-	bool use_thread_pool = false;
-    // end
     bool asyncWriterEnabled = false;
-	bool stopWriter = false;
-	bool writerStarted = false;
-	size_t maxQueuedBuffers = 16;
-	std::deque<std::vector<char>> pendingBuffers;
-	std::condition_variable queue_cv;
-	std::thread writerThread;
-
+    bool retained_ = false;
+    // Queued-buffer bookkeeping shared with the writer thread.
+    std::mutex asyncMtx_;
+    std::condition_variable asyncDone_;
+    size_t inflight_ = 0;
+    std::vector<OutputBuffer> spare_;
+    std::exception_ptr asyncError_;
 };
 
 typedef ofbufstream ostr;
+
+// Keeps main output streams open for the whole run instead of finalizing and
+// re-opening them (in append mode) for every input file. Streams opened while
+// retention is disabled behave exactly as before.
+namespace OutputStreamRetention {
+	void enable(bool on);
+	bool enabled();
+	std::shared_ptr<ofbufstream> open(const string& path, int mode, bool isMC, size_t bufferS = 5 * 1024 * 1024);
+	// Finalizes every retained stream; rethrows the first failure after closing all.
+	void closeAll();
+}
 
 class Filters;
 class Dereplicate;
@@ -140,7 +168,14 @@ public:
 	void writeSelectiveStream(shared_ptr<DNA> d, int Pair, int FS);//1=pair1;2=pair2;3=singl1,4=singl2  ;; FS: different multi FileStreams to be used
 
 	 void writeForWrite(const shared_ptr<DNA>& d1, int Pair1, int Cstream1,
-		const shared_ptr<DNA>& d2, int Pair2, int Cstream2);
+		const shared_ptr<DNA>& d2, int Pair2, int Cstream2, int curThread = -1);
+	// Per-worker output batching. While enabled, records written by worker
+	// `curThread` are staged in its own buffers and published once per block
+	// by flushWriteBatch(), instead of taking the output locks for every read.
+	// Disabled when output rotation or read limits need per-record accounting.
+	void beginWriteBatching();
+	void flushWriteBatch(int curThread);
+	void endWriteBatching();
 	//pretty final bool, aborts all, so careful with this
 	//collects stats on read, writes then. Keep read pairs together by using "writeForWrite"in second mutext step
 	bool saveForWrite(const shared_ptr<DNA>& d, int Pair, int thr, int& Cstr, bool = true);//Pair:1=pair1;2=pair2;3=singleton
@@ -165,7 +200,6 @@ public:
 	//int getFastqMod(){return MFil->FastqModifier();}
 	int getFastqVer() { return fastQver; }
 	int getfastQoutVer() { return fastQoutVer; }
-	bool haveToRestartSet() { return MFil->haveToRestartSet(); }
 	void resetOutFilesAndFilter();//MD->closeOutStreams();
 	void setBCfixed(bool b, bool fwd) { MFil->setBCfixed(b, fwd); write2File = b; }
 	void setSubfilters(int num);
@@ -177,13 +211,21 @@ public:
 	void attachDereplicator(shared_ptr<Dereplicate> de);
 	//void dereplicateDNA(shared_ptr<DNA>);
 	//dereplicate DNA by looking in dereplicator for 100% id seq. is treadsafe
-  void dereplicateDNA(const shared_ptr<DNA>&, const shared_ptr<DNA>&, int curThread = 0);
+	// idx1/idx2 are the output slots the set would be written to. Returns true
+	// when the set's mid-quality write is withheld: the dereplicator writes it
+	// later if it does not count it, so the caller must not write it.
+	bool dereplicateDNA(const shared_ptr<DNA>&, const shared_ptr<DNA>&, int curThread, int idx1, int idx2);
+	// Output tier of a record as saveForWrite selects it: 0 primary, 1 mid-quality, 100 none.
+	int outputTier(const shared_ptr<DNA>& d, int thr);
+	// Applies queued dereplication entries, publishing withheld sets, while
+	// the output streams are still open.
+	void flushDereplication();
 	//debug function to look closer at nonBC reads, threadsafe
     void writeNonBCReads(const shared_ptr<DNA>& d, const shared_ptr<DNA>& d2);
 	void setReadLimit(uint64_t x) { maxRdsOut = x; }
 
 	//demultiplex related
- void write2Demulti(const shared_ptr<DNA>&, int, int BCoffset);
+ void write2Demulti(const shared_ptr<DNA>&, int, int BCoffset, int curThread = -1);
 	//write DNA to demultiplexed files, is threadsafe
   void write2Demulti(const shared_ptr<DNA>&, const shared_ptr<DNA>&, int BCoffset, int curThread);
 	void generateDemultiOutFiles(string, Filters*, std::ios_base::openmode = ios::out, bool = false);
@@ -218,14 +260,48 @@ public:
 	//void attachReadMerger(ReadMerger* merg) { if (merger.size() > 0 && merger.back() == nullptr) { merger.back() = merg; } else { merger.push_back(merg); } }
 	bool Demulti2Fls() { return bDoDemultiplexIntoFiles; }
 	bool doDeriplicate() { return	b_doDereplicate; }
-	bool doWriteNonBCrds() { return fqNoBCFile.size() == 2; }
+	bool doWriteNonBCrds() { return !fqNoBCFile.empty(); } // one path (single/interleaved) or R1,R2
 	bool doDerepMrgSrch() { if (dereplicator != nullptr) { return dereplicator->doSearchWithMerge(); } else { return false; } }
+	// Ordered dereplication admission: blocks are numbered by the reader in
+	// input order and bracketed by the worker that processes them.
+	uint64_t reserveDerepBlock() {
+		return (b_doDereplicate && dereplicator) ? dereplicator->reserveBlock() : Dereplicate::kNoBlock;
+	}
+	void beginDerepBlock(uint64_t block) {
+		if (block != Dereplicate::kNoBlock && dereplicator) { dereplicator->beginBlock(block); }
+	}
+	void endDerepBlock(uint64_t block) {
+		if (block != Dereplicate::kNoBlock && dereplicator) { dereplicator->endBlock(); }
+	}
 
 
 private:
-	bool writeDemultiRecords(int idx, const string& first, const string& second, uint64_t bases, bool merged);
+	bool writeDemultiRecords(int idx, const string& first, const string& second, uint64_t bases, bool merged,
+		int curThread = -1);
 	bool writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int Cstream1,
-		const shared_ptr<DNA>& d2, int Pair2, int Cstream2, const string* mergedFastq = nullptr);
+		const shared_ptr<DNA>& d2, int Pair2, int Cstream2, const string* mergedFastq = nullptr,
+		int curThread = -1);
+	struct WriteBatch;
+	// Stream slots selected for one record; callers either copy the shared_ptrs
+	// (per-record path, which may race with rotation) or use them in place.
+	struct StreamSlots {
+		const std::shared_ptr<dualOfBufStream>* fqPair = nullptr;
+		const std::shared_ptr<ostr>* fq1 = nullptr;
+		const std::shared_ptr<ostr>* fq2 = nullptr;
+		const std::shared_ptr<ostr>* seq1 = nullptr;
+		const std::shared_ptr<ostr>* seq2 = nullptr;
+		const std::shared_ptr<ostr>* qual1 = nullptr;
+		const std::shared_ptr<ostr>* qual2 = nullptr;
+	};
+	StreamSlots selectStreams(bool writeFastq, bool isStrictPairedWrite, bool mergedOutput,
+		int Pair1, int Cstream1, int Pair2, int Cstream2) const;
+	WriteBatch* writeBatch(int curThread);
+	void publishBatchLocked(WriteBatch& batch);
+	void publishDemultiBatch(WriteBatch& batch);
+	void flushAllWriteBatchesLocked();
+	bool reserveDemultiBases(bool merged, uint64_t bases);
+	std::vector<std::unique_ptr<WriteBatch>> writeBatches_;
+	std::atomic<bool> batchWrites_{false};
 	void setwriteMode(std::ios_base::openmode wm) { wrMode = wm; }
 	inline void setFilePos(ofstream& str, streamoff& pos) {
 		str.seekp(0, ios_base::end);	pos = str.tellp();
@@ -278,14 +354,15 @@ private:
 	int fastQver; //33, 62 or 59
 	int fastQoutVer; //33, 62 or 59
 	//write out quality file, is the input paired End sequenced
-	bool BWriteQual, BWriteFastQ;
+	// Atomic: output rotation re-applies these (unchanged) while workers read them.
+	std::atomic<bool> BWriteQual, BWriteFastQ;
 	bool b_multiOutStream;
 	int pairedSeq; //1=single, 2=PE, 3=PE+MID
 	bool b_changeFQheadVer; // linked to fastQheadVer
 	bool b_checkedHeaderChange;
 	bool b_oneLinerFasta; // write one line per sequence?
-	bool b_writeGreenQual;
-	bool b_writeYellowQual;
+	std::atomic<bool> b_writeGreenQual;
+	std::atomic<bool> b_writeYellowQual;
 
 	//asynchronous threads
 	//std::vector<std::future<ulong>> threads; 

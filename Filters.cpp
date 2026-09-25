@@ -99,7 +99,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	min_l(0), min_l_merged(0), alt_min_l(0), min_l_p(-1.f), alt_min_l_p(-1.f),
 	maxReadLength(0), norm2fiveNTs(false),
 	max_l(10000), min_q(0.f), alt_min_q(0.f),
-	BcutPrimer(true), alt_BcutPrimer(true), bPrimerR(false),
+	BcutPrimer(true), bPrimerR(false),
 	BextensivePrimerChecks(false),
 	bRequireRevPrim(false), alt_bRequireRevPrim(false),
 	bRequireFwdPrim(false), alt_bRequireFwdPrim(false), BcutTag(true),
@@ -120,9 +120,9 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	alt_maxAccumQP(-1),
 	pairedSeq(-1),
 	//revConstellationN(0),
-	BCdFWDREV(2),
+	runState_(std::make_shared<SharedRunState>()),
 	firstXreadsW(0), firstXreadsR(0),
-	restartSet(false), b_optiClusterSeq(false),
+	b_optiClusterSeq(false),
 	b_subselectionReads(false), b_doQualFilter(true),
 	b_doFilter(true),
 	bDoDereplicate(false), bDoSeedExtension(false), bDoCombiSamples(false),
@@ -183,6 +183,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
     }
 
 	bool alt_bRequireRevPrimSet = false;
+	bool alt_bRequireFwdPrimSet = false;
 
 	string optF("");
 	if (cmdArgs->find("-options") != cmdArgs->end()) {
@@ -239,6 +240,12 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		}
 	}
 
+	// Unsigned members: a negative value would wrap to a huge cut.
+	for (const char* option : {"-5PR1cut", "-5PR2cut"}) {
+		if (atoi((*cmdArgs)[option].c_str()) < 0) {
+			throw std::invalid_argument(string(option) + " must not be negative: " + (*cmdArgs)[option]);
+		}
+	}
 	cut5PR1 = atoi((*cmdArgs)["-5PR1cut"].c_str());
 	cut5PR2 = atoi((*cmdArgs)["-5PR2cut"].c_str());
 	//cerr<<(*cmdArgs)["-o_qual_offset"]<<endl;
@@ -282,6 +289,8 @@ Filters::Filters(OptContainer* cmdArgs1) :
     const bool explicitDerepSubclusters = cmdArgs->contains("-derepSubclusterFasta");
     const bool explicitDerepHomopolymer = cmdArgs->contains("-derepSeedHomopolymer");
     const bool explicitDerepReassign = cmdArgs->contains("-derepReassign");
+    const bool explicitDerepClusters = cmdArgs->contains("-derepCoarseClusters");
+    const bool explicitDerepGlobal = cmdArgs->contains("-derepGlobal");
 	ifstream opt;
 	opt.open(optF.c_str(), ios::in);
 	if (!opt || optF == "") {
@@ -291,6 +300,8 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	}
 	string line;
 	while (getline(opt, line, '\n')) {
+		// Options files written on Windows: "T\r" must still compare equal to "T".
+		if (!line.empty() && line.back() == '\r') { line.pop_back(); }
 
 		if (line.length() <= 1 || line.substr(0, 1) == "#") {
 			continue;
@@ -311,6 +322,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		if (strcmp(segs.c_str(), "minSeqLength") == 0) {
 			if (addMod) {
 				float tmp = (float)atof(segs2.c_str());
+				alt_min_l_set = true;
 				if (tmp > 1.f) {
 					alt_min_l = (int)tmp;
 				}
@@ -330,6 +342,10 @@ Filters::Filters(OptContainer* cmdArgs1) :
 			explicitDerepSearchLength_ = true;
         } else if (strcmp(segs.c_str(), "derepPrefix") == 0) {
             if (!explicitDerepPrefix) { (*cmdArgs)["-derepPrefix"] = segs2; }
+        } else if (segs == "derepCoarseClusters") {
+            if (!explicitDerepClusters) { trim(segs2); (*cmdArgs)["-derepCoarseClusters"] = segs2; }
+        } else if (segs == "derepGlobal") {
+            if (!explicitDerepGlobal) { trim(segs2); (*cmdArgs)["-derepGlobal"] = segs2; }
         } else if (segs == "derepIdentity" || segs == "derepStoreQuals" || segs == "derepStoreDiffs" || segs == "derepSeedHomopolymer" || segs == "derepSubclusterFasta" || segs == "derepReassign") {
             const bool explicitOption = segs == "derepStoreQuals" ? explicitDerepQuals : segs == "derepIdentity" ? explicitDerepIdentity :
                 (segs == "derepStoreDiffs" ? explicitDerepDiffs :
@@ -348,7 +364,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		else if (strcmp(segs.c_str(), "maxAmbiguousNT") == 0) {
 			if (addMod) {
 				alt_MaxAmb = atoi(segs2.c_str());
-				if (MaxAmb != alt_MaxAmb) { addModConf = true; }
+				if (maxAmb != alt_MaxAmb) { addModConf = true; }
 			}
 			else {
 				maxAmb = atoi(segs2.c_str());
@@ -444,8 +460,8 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		}
 		else if (strcmp(segs.c_str(), "keepPrimerSeq") == 0) {
 			if (addMod) {
-				atoi(segs2.c_str()) == 0 ? alt_BcutPrimer = false : alt_BcutPrimer = true;
-				if (alt_BcutPrimer != keepPrimer) { addModConf = true; }
+				// Was parsed into a value nothing read; both tiers use keepPrimerSeq.
+				cerr << "Warning: *keepPrimerSeq is not supported and is ignored; keepPrimerSeq applies to both filtering tiers.\n";
 			}
 			else {
 				atoi(segs2.c_str()) == 0 ? keepPrimer = false : keepPrimer = true;
@@ -486,6 +502,13 @@ Filters::Filters(OptContainer* cmdArgs1) :
 				userReqFastqVer = FastqVerMod(atoi(segs2.c_str()));
 			}
 		}
+		else if (segs == "MergeMinOverlap") {
+			const int bases = atoi(segs2.c_str());
+			if (bases < 8 || !is_digits(segs2)) {
+				throw std::invalid_argument("MergeMinOverlap must be an integer of at least 8 bases, not '" + segs2 + "'");
+			}
+			ReadMerger::setMinOverlap(static_cast<unsigned>(bases));
+		}
 		else if (segs == "ExtensivePrimerChecks") {
 			if (segs2 == "T") {
 				BextensivePrimerChecks = true;
@@ -509,7 +532,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 		}
 		else if (segs == "RejectSeqWithoutFwdPrim") {
 			if (addMod) {
-				alt_bRequireFwdPrim = true;
+				alt_bRequireFwdPrimSet = true;
 				if (segs2 == "T") {
 					alt_bRequireFwdPrim = true;
 				}
@@ -592,6 +615,7 @@ Filters::Filters(OptContainer* cmdArgs1) :
 	//alternative options (mid qual filtering)
 	if (addModConf) {
 		if (!alt_bRequireRevPrimSet) { alt_bRequireRevPrim = bRequireRevPrim; }
+		if (!alt_bRequireFwdPrimSet) { alt_bRequireFwdPrim = bRequireFwdPrim; }
 		if (cmdArgs->find("-o_fna") != cmdArgs->end() && (*cmdArgs)["-o_fna"].length() > 1) {
 			if (cmdArgs->find("-o_fna2") == cmdArgs->end()) {
 				(*cmdArgs)["-o_fna2"] = additionalFileName((*cmdArgs)["-o_fna"]);
@@ -747,11 +771,12 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	bAdditionalOutput(of->bAdditionalOutput), b2ndRDBcPrimCk(of->b2ndRDBcPrimCk),
 	bRevRdCk(of->bRevRdCk),
 	min_l(of->min_l), min_l_merged(of->min_l_merged), alt_min_l(of->alt_min_l), min_l_p(of->min_l_p), alt_min_l_p(of->alt_min_l_p),
+	alt_min_l_set(of->alt_min_l_set),
 	maxReadLength(0), norm2fiveNTs(of->norm2fiveNTs),
 	max_l(of->max_l), min_q(of->min_q), alt_min_q(of->alt_min_q),
 
 
-	BcutPrimer(of->BcutPrimer), alt_BcutPrimer(of->alt_BcutPrimer),
+	BcutPrimer(of->BcutPrimer),
 	bPrimerR(of->bPrimerR),
 
 	bRequireRevPrim(of->bRequireRevPrim), alt_bRequireRevPrim(of->alt_bRequireRevPrim),
@@ -780,9 +805,11 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	//BChit, BCrevhit initialize to 0 - new set, new luck
 	pairedSeq(of->pairedSeq),
 	//revConstellationN(0),
-	BCdFWDREV(of->BCdFWDREV),
+	// Per-thread sub-filters (takeAll) share the file set's state; a new
+	// per-file filter starts a fresh decision ("new set, new luck").
+	runState_(takeAll ? of->runState_ : std::make_shared<SharedRunState>()),
+	barcodesReversedLocally_(takeAll ? of->barcodesReversedLocally_ : std::array<bool, 2>{false, false}),
 	firstXreadsW(of->firstXreadsW), firstXreadsR(of->firstXreadsR),
-	restartSet(false),
 	b_optiClusterSeq(of->b_optiClusterSeq), b_subselectionReads(of->b_subselectionReads),
 	b_doQualFilter(of->b_doQualFilter),
 	b_doFilter(of->b_doFilter),
@@ -804,7 +831,6 @@ Filters::Filters(Filters* of, int BCnumber, bool takeAll, size_t threads)
 	cdbg("New Filter object from copy\n");
 	ReadsWritten = of->writtenReads();
 	OFileIncre = of->getFileIncrementor();
-	BCdFWDREV[0].reset(); BCdFWDREV[1].reset();
 	//collectStatistics.resize(2); statAddition.resize(2);
 	//csMTX[0] = new mutex(); csMTX[1] = new mutex();
 
@@ -870,6 +896,10 @@ Filters* Filters::newFilterPerBCgroup(const vector<int> idxi) {
 	// number of mapping file lines associated with that unique fastx
 	unsigned int tarSize = (unsigned int)idxi.size();
 	filter->allResize(tarSize);
+	// PrimerIdx was copied from the main filter (indices into its primer list);
+	// reset so samples without a primer do not inherit another sample's index.
+	filter->PrimerIdx.assign(tarSize, -1);
+	filter->PrimerIdxRev.assign(tarSize, -1);
 
 	int tarID = -1;
 	bool isDoubleBarcoded = this->doubleBarcodes();
@@ -1139,7 +1169,13 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 	if (!this->isGoldAxe() || this->isPaired() != 1) {
 		return retDNA;
 	}
-	if (tdn[0]->length() < 100) { return retDNA; }
+	// An empty result makes the caller count the read as processed and
+	// rejected (it used to vanish from every statistic).
+	if (tdn[0]->length() < 100) {
+		tdn[0]->QualCtrl.minL = true;
+		tdn[0]->failed();
+		return retDNA;
+	}
 	int idx = tdn[0]->getBCnumber();
 	if (idx >= 0) { idx -= BCoffset; }
 
@@ -1172,6 +1208,7 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
 		if (idx >= 0) { tdn[0]->setBCnumber(idx, getBCoffset()); }
 	}
 	if (idx < 0) {
+		tdn[0]->QualCtrl.TagFail = true;
 		tdn[0]->failed();	//retDNA.push_back(tdn[0]);
 		//this->addGAstats(tdn[0], retDNA);
 		GAstatistics->addBaseGAStats(tdn[0], retDNA, 0, BCoffset);
@@ -1243,6 +1280,11 @@ vector<shared_ptr<DNA>>  Filters::GoldenAxe(vector< shared_ptr<DNA>>& tdn) {
             dn->getDNAsubseq((int)posF[i], (int)(posR[i] + reversePrimer.length()),
                 dn->getId() + "_" + itos((int)i))
 		);
+		// The sample is already known from the parent and the sub-read starts at
+		// the forward primer: mark the barcode as resolved, or filtering re-scans
+		// for a barcode (with keepBarcodeSeq 1 the parent was never marked cut)
+		// and fails every sub-read as "barcode not identified".
+		retDNA.back()->setBarcodeCut();
 		BCintoHead(idx, retDNA.back(), "", -1, false, true);
 
 		if (i > 0) {
@@ -1312,6 +1354,8 @@ bool Filters::swapReverseDNApairs(vector< shared_ptr<DNA>>& tdn) {
 			read2->reverse_compliment();
 			swap(read2, read1);
 			read2->setpairREV();		read1->setpairFWD();
+			// Mate tags follow the output position, not the input file.
+			read1->setMateNumber(1);	read2->setMateNumber(2);
 			collectStatistics[0]->swappedRds++;
 			collectStatistics[0]->reversedRds++;
 			collectStatistics[1]->reversedRds++;
@@ -1323,6 +1367,8 @@ bool Filters::swapReverseDNApairs(vector< shared_ptr<DNA>>& tdn) {
 		else if (checkIfPrimerHits(read2, 0, 0)) {//switched pairs only
 			swap(read2, read1);
 			read2->setpairREV();		read1->setpairFWD();
+			// Mate tags follow the output position, not the input file.
+			read1->setMateNumber(1);	read2->setMateNumber(2);
 			collectStatistics[0]->swappedRds++;
 			return true;
 
@@ -1404,16 +1450,25 @@ void Filters::preFilterSeqStat(const shared_ptr<DNA>& d, int pair) {
 	//csMTX[easyPair]->unlock();
 }
 
-std::mutex updateMaxSeqMutex;
 void Filters::updateMaxSeqL(int x) {
-	{
-		std::lock_guard<std::mutex> updateMaxSeqLLck(updateMaxSeqMutex);
-		if (x < maxReadLength) { return; }
-		maxReadLength = x;
-		if (min_l_p != -1.f) {
-			min_l = (int)((float)maxReadLength * min_l_p);
-			min_l_merged = min_l;
-		}
+	// Runs for every read. The running maximum is shared by the file set's
+	// filters (all worker threads), so a fractional minSeqLength no longer
+	// depends on which thread a read lands in. Each filter object is used by
+	// one thread; it re-derives its own minimum lengths when the shared
+	// maximum has grown past the value it last applied.
+	auto& shared = runState_->maxReadLength;
+	int maximum = shared.load(std::memory_order_relaxed);
+	while (x > maximum && !shared.compare_exchange_weak(maximum, x, std::memory_order_relaxed)) {}
+	if (x > maximum) { maximum = x; }
+	if (maximum <= maxReadLength) { return; }
+	maxReadLength = maximum;
+	if (min_l_p != -1.f) {
+		min_l = (int)((float)maximum * min_l_p);
+		min_l_merged = min_l;
+	}
+	// A fractional *minSeqLength leaves alt_min_l at -1, which would rescue every short read.
+	if (alt_min_l_p != -1.f) {
+		alt_min_l = (int)((float)maximum * alt_min_l_p);
 	}
 }
 void Filters::setSeqLength(float minL, int maxL) {
@@ -1426,9 +1481,12 @@ void Filters::setSeqLength(float minL, int maxL) {
 		min_l_p = minL;
 	}
 	min_l_merged = min_l;
-	max_l = maxL;
-	if (max_l < 0) {
+	// max_l is unsigned: test the signed argument, otherwise -1 wraps to 0xFFFFFFFF
+	// and (int)max_l == -1 rejects every read.
+	if (maxL < 0) {
 		max_l = (uint)1e9; //100 mil should be good enough for infinite length
+	} else {
+		max_l = (uint)maxL;
 	}
 }
 
@@ -1553,10 +1611,6 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		d->failed();
 		success = false;
 	};
-	auto markRejected = [&](FailureReasonBit reason) {
-		addFailureReason(failureMask, reason);
-		success = false;
-	};
 	auto setYellowIfNotFailed = [&]() {
 		if (!d->isFailed()) {
 			d->setYellowQual(true);
@@ -1591,7 +1645,9 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 	}
 	if ((bDoBarcode || bDoBarcode2) && tagIdx < 0) {
 		d->QualCtrl.TagFail = true;
-		markRejected(FailureReasonBit::Tag);
+		// Fail (not just reject) so no later alternative threshold can rescue the read
+		// as mid-quality; remaining checks still run for failure-reason statistics.
+		markFailed(FailureReasonBit::Tag);
 		canUsePrimerIdx = false;
 	}
 
@@ -1603,30 +1659,34 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 	}
 
 	if (!ontMode_ && !isMerged && canUsePrimerIdx && BextensivePrimerChecks) {
-		if (checkIfRevPrimerHits(d, PrimerIdx[tagIdx], 0, bShortAmplicons)) {
+		// pair was hard-coded to 0: read 2 was tested for the forward primer's
+		// reverse complement at its 3' end, which normal read-through contains.
+		if (checkIfRevPrimerHits(d, PrimerIdx[tagIdx], pair, bShortAmplicons)) {
 			d->reverse_compliment(false);
 		}
 	}
 	//bShortAmplicons checks for reverse primer on 1st read
+	// Primer variants are diagnostics: record them only in final filtering, so seeding
+	// re-checks of already counted reads do not count them again.
 	if (canUsePrimerIdx && (BcutPrimer || Bcheck4illuAdapts ||
         (ontMode_ && (!PrimerL.empty() || !PrimerR.empty())))) {
        if (pair == 1) {//pair_ == 1, check for fwd primer in pair_ 2 (rev-compl)
 			bool revCheck = false;
 			reverseSearchAttempted = true;
-			cutPrimerRev(d, PrimerIdxRev[tagIdx], revCheck, false, !isMerged);
+			cutPrimerRev(d, PrimerIdxRev[tagIdx], revCheck, false, shouldCommitDiagnostics);
 			if (bShortAmplicons || isMerged) {//also check other end of primer..
 				forwardSearchAttempted = true;
-				cutPrimer(d, PrimerIdx[tagIdx], revCheck, pair, false, !isMerged);
+				cutPrimer(d, PrimerIdx[tagIdx], revCheck, pair, false, shouldCommitDiagnostics);
 			}
 		}
 		else {//pair 0 or -1
 			bool fwdRC = false;
 			forwardSearchAttempted = true;
-			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, !ontMode_ && BextensivePrimerChecks, !isMerged);
+			cutPrimer(d, PrimerIdx[tagIdx], fwdRC, pair, !ontMode_ && BextensivePrimerChecks, shouldCommitDiagnostics);
 			if (ontMode_ || bShortAmplicons || isMerged) {//also check the reverse primer in single-end ONT reads
                bool revRC = true;
 				reverseSearchAttempted = true;
-				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, !ontMode_ && BextensivePrimerChecks, !isMerged);
+				cutPrimerRev(d, PrimerIdxRev[tagIdx], revRC, !ontMode_ && BextensivePrimerChecks, shouldCommitDiagnostics);
 				//case for 1) long read 2) look for both primers 3) rev required
 			}
 		}
@@ -1673,7 +1733,15 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 
 	if (b_doQualFilter) {
 		//second cut off low qual_
-		d->qualWinPos(EWwidth, EWthr);	// { qualWinTrim = true; }
+		if (d->qualWinPos(EWwidth, EWthr)) {
+			// The trim ran after the length check: re-check, as the accumulated-
+			// error trim does (a read trimmed below minSeqLength, even to zero
+			// bases, was still written as passing).
+			if (d->length() == 0 || check_lengthXtra(d, 0, -1, isMerged)) {
+				d->QualCtrl.minLqualTrim = true;
+				markFailed(FailureReasonBit::MinLengthAfterTrim);
+			}
+		}
 		//cut off accumulation error larger than maxAccumQP
 		if (maxAccumQP > 0.0) {
 			int cP = d->qualAccumulate(maxAccumQP);
@@ -1735,6 +1803,11 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 			if (qualityWindowResult.shouldFail()) {
 				markFailed(FailureReasonBit::QualityWindow);
 			}
+			else {
+				// Rescued by the alternate window: second tier, like the other rescues.
+				rescuedQuality = true;
+				setYellowIfNotFailed();
+			}
 		}
 		if (b_BinFilBothPairs || pair == 0) {
 			float ExpErr = d->binomialFilter((int)BinFilErr, BinFilP);
@@ -1752,7 +1825,7 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 			d->QualCtrl.HomoNT = true;
 			markFailed(FailureReasonBit::Homonucleotide);
 		}
-		const PrimaryAltThresholdResult maxAmbResult = evaluatePrimaryAlt(MaxAmb >= 0 && ambNTs > MaxAmb, alt_MaxAmb != -1, ambNTs >= alt_MaxAmb);
+		const PrimaryAltThresholdResult maxAmbResult = evaluatePrimaryAlt(MaxAmb >= 0 && ambNTs > MaxAmb, alt_MaxAmb != -1, ambNTs > alt_MaxAmb);
 		if (maxAmbResult.primaryFailed) {
 			d->QualCtrl.MaxAmb = true;
 			if (maxAmbResult.shouldFail()) {
@@ -1804,27 +1877,29 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		}
 	};
 
+	// Remove leading bases after barcode/primer removal, with or without a
+	// mapping file (it was applied only without one).
+	if (!isMerged && TrimStartNTs > 0) {
+		const size_t readLen = d->length();
+		if (readLen <= (unsigned int)TrimStartNTs) {
+			d->QualCtrl.minL = true;
+			markFailed(FailureReasonBit::MinLength);
+		}
+		else if (readLen - TrimStartNTs > max_l) {//length check
+			d->QualCtrl.maxL = true; //sMaxLength(pair_);
+			markFailed(FailureReasonBit::MaxLength);
+		}
+		//remove start NTs
+		if (!d->isFailed()) {
+			d->cutSeq(0, TrimStartNTs);
+			if (check_lengthXtra(d)) {
+				markFailed(d->QualCtrl.maxL ? FailureReasonBit::MaxLength : FailureReasonBit::MinLengthAfterTrim);
+			}
+		}
+	}
+
 	//adapter removed, quality filtering done. If no map is provided, that is all that is needed
 	if (!bDoMultiplexing) {
-		if (!isMerged && TrimStartNTs > 0) {
-           const size_t readLen = d->length();
-			if (readLen <= (unsigned int)TrimStartNTs) {
-				d->QualCtrl.minL = true;
-				markFailed(FailureReasonBit::MinLength);
-			}
-			else if (readLen - TrimStartNTs > max_l) {//length check
-				d->QualCtrl.maxL = true; //sMaxLength(pair_);
-				markFailed(FailureReasonBit::MaxLength);
-			}
-			//remove start NTs
-			if (!d->isFailed()) {
-				d->cutSeq(0, TrimStartNTs);
-                if (check_lengthXtra(d)) {
-                    markFailed(d->QualCtrl.maxL ? FailureReasonBit::MaxLength : FailureReasonBit::MinLengthAfterTrim);
-                }
-			}
-
-		}
 		if (!d->isYellowQual() && !d->isFailed() && success) {
 			d->setPassed(true);
 		}
@@ -1982,12 +2057,14 @@ void Filters::dblBCeval(int& tagIdx, int& tagIdx2, string& presentBC,
 	presentBC = BC1 + "|" + BC2;
 	//add new BC info to DNA
 	//also reset BC in DNA
+	// pair1 selects the barcode table for orig_bc: read 1 carries Barcode, read 2 Barcode2
+	// (the flags were swapped, so each header named the other mate's barcode).
 	if (tdn != NULL) {
-		BCintoHead(tagIdx, tdn, presentBC, -1, false, true);
+		BCintoHead(tagIdx, tdn, presentBC, -1, true, true);
 		//already done in BCintoHead
 	}
 	if (tdn2 != NULL) {
-		BCintoHead(tagIdx2, tdn2, presentBC, -1, true, true);
+		BCintoHead(tagIdx2, tdn2, presentBC, -1, false, true);
 	}
 }
 
@@ -2032,14 +2109,17 @@ int Filters::findTag(const shared_ptr<DNA>& d, string& presentBC, int& c_err,
 
 	//cout << "FIND TAG DO HEAD " << bDoHeadSmplID << endl;
 	if (bDoHeadSmplID) {
+		// Longest matching tag wins: with first-wins, "S1" claimed every "S10" read.
+		int best = -1; size_t bestPos = string::npos, bestLen = 0;
+		const string& oldId = d->getOldId();
 		for (unsigned int i = 0; i < HeadSmplID.size(); i++) {
-			size_t pos = d->getOldId().find(HeadSmplID[i]);
-			if (pos != string::npos) {
-				SampleIntoHead(i, d, pos);
-				return i;
+			const size_t pos = oldId.find(HeadSmplID[i]);
+			if (pos != string::npos && HeadSmplID[i].size() > bestLen) {
+				best = (int)i; bestPos = pos; bestLen = HeadSmplID[i].size();
 			}
 		}
-		return -1;
+		if (best >= 0) { SampleIntoHead(best, d, bestPos); }
+		return best;
 	}
 	/*BCdecide & locBCD(BCdFWD);
 	if ( !isPair1 ) {
@@ -2056,22 +2136,24 @@ int Filters::findTag(const shared_ptr<DNA>& d, string& presentBC, int& c_err,
 		scanRegion = d->length() - minBCLength1_ + 1;
 	}
 
+	// Apply a reversal another thread decided before scanning with this copy's tables.
+	syncBarcodeOrientation(isPair1);
 	scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1, false, endCheck);
 
-	if (!BCdFWDREV[!isPair1].b_BCdirFix) {
+	auto& orientation = runState_->barcodes[isPair1 ? 0 : 1];
+	if (!orientation.fixed.load()) {
 		if (start == -1) {//check reverse transcription
-			//d->reverseTranscribe();
 			scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1, true, endCheck);
 			if (start != -1) {
-				BCdFWDREV[!isPair1].BCrevhit++;
+				orientation.reverseHits.fetch_add(1, std::memory_order_relaxed);
 			}
 		}
 		else {
-			BCdFWDREV[!isPair1].BChit++;
+			orientation.hits.fetch_add(1, std::memory_order_relaxed);
 		}
-		//check if BC direction can be fixed
-		if (BCdFWDREV[!isPair1].BCrevhit + BCdFWDREV[!isPair1].BChit > DNA_MAX_IN_MEM) {
-			if (!eval_reversingBC(isPair1)) { return -1; }
+		//check if BC direction can be fixed (hits of all threads of this file set)
+		if (orientation.reverseHits.load(std::memory_order_relaxed) + orientation.hits.load(std::memory_order_relaxed) > DNA_MAX_IN_MEM) {
+			eval_reversingBC(isPair1);
 		}
 	}
 	else if (idx < 0 && revChecks > 0) {
@@ -2243,18 +2325,21 @@ int Filters::detectCutBC(const shared_ptr<DNA>& d, bool isPair1) {
 	//ok, really start looking for BC in seq
 	int idx(-1);
 	if (bDoHeadSmplID) {
-		unsigned int i = 0;
-		for (; i < HeadSmplID.size(); i++) {
-			size_t pos = d->getOldId().find(HeadSmplID[i]);
-			if (pos != string::npos) {
-				if (!bDoBarcode2) {
-					SampleIntoHead(i, d, pos);
-				}//this has to be done AFTER two BCs are read (on a higher lvl)
-				else {
-					d->setBCnumber(i, BCoffset);
-				}
-				idx = i;
-				break;
+		// Longest matching tag wins (see findTag).
+		size_t bestPos = string::npos, bestLen = 0;
+		const string& oldId = d->getOldId();
+		for (unsigned int i = 0; i < HeadSmplID.size(); i++) {
+			const size_t pos = oldId.find(HeadSmplID[i]);
+			if (pos != string::npos && HeadSmplID[i].size() > bestLen) {
+				idx = (int)i; bestPos = pos; bestLen = HeadSmplID[i].size();
+			}
+		}
+		if (idx >= 0) {
+			if (!bDoBarcode2) {
+				SampleIntoHead(idx, d, bestPos);
+			}//this has to be done AFTER two BCs are read (on a higher lvl)
+			else {
+				d->setBCnumber(idx, BCoffset);
 			}
 		}
 		return idx;
@@ -2264,7 +2349,7 @@ int Filters::detectCutBC(const shared_ptr<DNA>& d, bool isPair1) {
 		d->setBCnumber(0, this->currentBCnumber());
 
 		// needs to be locked when multithreading
-		BCintoHead(0, d, "FileName", isPair1, false);
+		BCintoHead(0, d, "FileName", 0, isPair1);
 
 		return 0;
 	}
@@ -2427,40 +2512,33 @@ void Filters::countBCdetected(int BC, int Pair, bool MidQ) {
 		}
 	}
 }
-bool Filters::eval_reversingBC(bool fwd) {
+// Decides the barcode orientation once for the file set, from the hits of all
+// threads. Reads seen before the decision were accepted in whichever
+// orientation matched (the former "restart" of the file set had no caller, and
+// the read that triggered the decision was dropped); afterwards only the chosen
+// orientation is searched. Every copy swaps its own tables in
+// syncBarcodeOrientation.
+void Filters::eval_reversingBC(bool fwd) {
 	if (!fwd && !bDoBarcode2) {
-		return true;
+		return;
 	}
-    if (BCdFWDREV.size() < 2) {
-		return true;
+	auto& orientation = runState_->barcodes[fwd ? 0 : 1];
+	std::lock_guard<std::mutex> lock(runState_->decision);
+	if (orientation.fixed.load()) { return; }
+	if (orientation.reverseHits.load() > orientation.hits.load() * 8) {//use reversed_ BC ..
+		orientation.reversed.store(true);
 	}
-	/*BCdecide lbcd(BCdFWD);
-	if ( !fwd ) {
-		lbcd = BCdREV;
-	}*/
-	if (BCdFWDREV[!fwd].b_BCdirFix) { return true; }
-  BCdFWDREV[!fwd].b_BCdirFix = true;
-	if (lMD != nullptr) {
-		lMD->setBCfixed(true, fwd);
-	}
-	if (BCdFWDREV[!fwd].BCrevhit > BCdFWDREV[!fwd].BChit * 8) {//use reversed_ BC ..
-		BCdFWDREV[!fwd].reversedBCs = true;
-		if (fwd) {
-			reverseTS_all_BC();
-		}
-		else {
-			reverseTS_all_BC2();
-		}
-		if (BCdFWDREV[!fwd].BChit > 0) {
-			restartSet = true;
-			return false;
-		}
-	}
-	else if (BCdFWDREV[!fwd].BCrevhit > 0) {
-		restartSet = true;
-		return false;
-	}
-	return true;
+	orientation.fixed.store(true); // after reversed: a reader seeing fixed also sees reversed
+	syncBarcodeOrientation(fwd);
+}
+
+void Filters::syncBarcodeOrientation(bool isPair1) {
+	const int direction = isPair1 ? 0 : 1;
+	if (barcodesReversedLocally_[direction] || !runState_->barcodes[direction].reversed.load()) { return; }
+	reverse_all_BC(); // fills the reverse-complemented tables if this copy has none yet
+	if (isPair1) { reverseTS_all_BC(); }
+	else { reverseTS_all_BC2(); }
+	barcodesReversedLocally_[direction] = true;
 }
 
 
@@ -2771,8 +2849,10 @@ void Filters::scanBC(shared_ptr<DNA> d, int& start, int& stop, int& idx, int& c_
 
 bool Filters::checkIfRevPrimerHits(shared_ptr<DNA> d, int primerID, int pair, bool twoPrimers) {
     if (primerID < 0) { return false; }
+	// Forward primer already found: orientation is confirmed, so the read is not reversed
+	// (returning true here made callers reverse-complement a correctly oriented read).
 	if (d->getFwdPrimDetect()) {
-		return true;
+		return false;
 	}
 	int start(-1), stop(-1);
 	int tolerance(30); //, startSearch(0);
@@ -2848,7 +2928,7 @@ bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, boo
 	else { limit = 22; }//in this case nothing is known about 5' end
 	if (extensivePrimerCheck) {
 		int QS = (int)d->length(); limit = min(QS - 1, max(((int)((float)d->length() * 0.75)), 250));
-		limit2 = (d->length() - 100);;
+		limit2 = max(50, QS - 100); // length() is unsigned: short reads wrapped to <= 0
 	}
 
 	if (!BcutTag) {
@@ -2892,7 +2972,8 @@ bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, boo
 			else {
 				variantStart = d->matchSeqRev(PrimerL_RC[primerID], primerVariantMaxMismatches_, limit2, startSearch);
 			}
-			if (recordVariants) { recordPrimerVariant(d, PrimerL[primerID], variantStart, RC, PrimerVariantTracker::PrimerDirection::Forward); }
+			// A variant beyond PrimerErrs is reported, but not as a detected primer.
+			if (recordVariants) { recordPrimerVariant(d, PrimerL[primerID], variantStart, RC, PrimerVariantTracker::PrimerDirection::Forward, false); }
 			//statAddition.PrimerFail++;
 			return false;
 		}
@@ -2918,7 +2999,7 @@ bool Filters::cutPrimer(shared_ptr<DNA> d, int primerID, bool& RC, int pair, boo
 }
 
 void Filters::recordPrimerVariant(const shared_ptr<DNA>& d, const string& primer, int start, bool reverseComplement,
-	PrimerVariantTracker::PrimerDirection direction) {
+	PrimerVariantTracker::PrimerDirection direction, bool detected) {
 	const string matchingPrimer = reverseComplement ? reverseTS2(primer) : primer;
 	auto details = d->getPrimerMatchDetails(matchingPrimer, start);
 	if (!details.fullLength || details.mismatches > primerVariantMaxMismatches_) {
@@ -2928,7 +3009,7 @@ void Filters::recordPrimerVariant(const shared_ptr<DNA>& d, const string& primer
 		reverseTS(details.observed);
 	}
 	collectStatistics[0]->primerVariants.record(d->getPositionFreeId(), start, direction,
-		primer, details.observed, details.mismatches > 0);
+		primer, details.observed, details.mismatches > 0, detected);
 }
 bool Filters::findPrimer(shared_ptr<DNA> d, int primerID, bool RC, int pair) {
 	//only adapted to singular BC
@@ -2967,7 +3048,8 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extra
 	int limit2 = 50;
 	if (true) {
 		limit = min(QS - 1, max(((int)((float)d->length() * 0.75)), 250));
-		limit2 = (d->length() - 100);
+		// length() is unsigned: reads <= 100 bp wrapped to a window <= 0 and never matched.
+		limit2 = max(50, QS - 100);
 	}
 	limit = min(limit, legacyLimit);
 	if (primerID >= 0 && (size_t)primerID < PrimerR_RC.size()) {
@@ -3004,7 +3086,7 @@ bool Filters::cutPrimerRev(shared_ptr<DNA> d, int primerID, bool& RC, bool extra
 		else {
 			variantStart = d->matchSeq(PrimerR[primerID], primerVariantMaxMismatches_, limit2, 0, extraCheck);
 		}
-		if (recordVariants) { recordPrimerVariant(d, PrimerR[primerID], variantStart, RC, PrimerVariantTracker::PrimerDirection::Reverse); }
+		if (recordVariants) { recordPrimerVariant(d, PrimerR[primerID], variantStart, RC, PrimerVariantTracker::PrimerDirection::Reverse, false); }
 		//d->QualCtrl.PrimerRevFail = true;
 		return false;
 	}
@@ -3427,7 +3509,8 @@ void Filters::checDoubleSampleID() {
 	}
 
 	string prevCSID = SampleID_Combi[0];
-	for (unsigned int i = 1; i < SampleID_Combi.size(); i++) {
+	// Start at 0 so a blank group for the first sample is filled as well.
+	for (unsigned int i = 0; i < SampleID_Combi.size(); i++) {
 		if (SampleID_Combi[i] != prevCSID) {
 			bDoCombiSamples = true;
 		}
@@ -3488,6 +3571,16 @@ void Filters::BarcodePreStats() {
 	}
 	if (minBCLength1_ == maxBCLength1_) {
 		bBarcodeSameSize = true;
+	}
+	// One empty BarcodeSequence set the minimum length to 0, which made scanBC
+	// return at once: every read of the file group failed "barcode not identified".
+	if (bDoBarcode && !bDoHeadSmplID && !bOneFileSample && minBCLength1_ == 0 && maxBCLength1_ > 0) {
+		for (size_t i = 0; i < Barcode.size(); ++i) {
+			if (Barcode[i].empty()) {
+				throw std::invalid_argument("Mapping file: BarcodeSequence is empty for sample " +
+					(i < SampleID.size() ? SampleID[i] : std::to_string(i)) + " while other samples have barcodes");
+			}
+		}
 	}
 	minBCLength2_ = 100000; maxBCLength2_ = 0;
 	for (unsigned int i = 0; i < Barcode2.size(); i++) {
@@ -3754,7 +3847,7 @@ void Filters::printHisto(ostream& give, int which, int set) {
 		else {
 			give << "Length\tFilterObs" << endl;
 		}
-		for (size_t i = ra[0]; i < ra[1]; i++) {
+		for (size_t i = ra[0]; i < std::min(ra[1], colStats.size()); i++) {
 			give << i << "\t" << colStats[i] << endl;
 		}
 	}
@@ -3984,7 +4077,7 @@ string Filters::shortStats(const string& file) {
 		//		sprintf(buffer,"Pair 2: %.3f%% of %d", (100.f*float(cst->total - cst->totalRejected) / (float)cst->total), cst->total); ret += buffer;
 		//		sprintf(buffer," reads accepted (%.3f%% end - trimmed)\n", (100.f* float(cst->total - cst->Trimmed) / (float)cst->total)); ret += buffer;
 	}
-	ret = os.str();
+	ret += os.str();
 	return ret;
 }
 void Filters::printGC(ostream& os, int Npair) {
@@ -4253,12 +4346,12 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 	*/
 	if (p2stat) {
 		const uint64_t totalPairs = std::min(totalReads1, totalReads2);
-		const uint64_t minAcceptedPairs = std::min(cst->totalSuccess, cst2->totalSuccess);
+		const uint64_t maxAcceptedPairs = std::min(cst->totalSuccess, cst2->totalSuccess);
 		const uint64_t acceptedImbalance = cst->totalSuccess >= cst2->totalSuccess
 			? cst->totalSuccess - cst2->totalSuccess
 			: cst2->totalSuccess - cst->totalSuccess;
 		printSection("Paired-read consistency");
-		printValueRow("Minimum pairs with both reads accepted", formatCountPct(minAcceptedPairs, totalPairs), "n/a");
+		printValueRow("Maximum pairs with both reads accepted", formatCountPct(maxAcceptedPairs, totalPairs), "n/a");
 		printValueRow("Accepted-read imbalance |R1-R2|", formatCountPct(acceptedImbalance, totalPairs), "n/a");
 	}
 
@@ -4404,22 +4497,22 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 
 			if (bDoBarcode2) {
 				string barcodeMode = "Dual-index barcodes enabled";
-				if (BCdFWDREV[0].reversedBCs || BCdFWDREV[1].reversedBCs) {
+				if (barcodesReversed(true) || barcodesReversed(false)) {
 					barcodeMode += " (reversed ";
-					if (BCdFWDREV[1].reversedBCs && BCdFWDREV[0].reversedBCs) {
+					if (barcodesReversed(false) && barcodesReversed(true)) {
 						barcodeMode += "fwd & rev";
 					}
-					else	if (BCdFWDREV[0].reversedBCs) {
+					else	if (barcodesReversed(true)) {
 						barcodeMode += "fwd";
 					}
-					else	if (BCdFWDREV[1].reversedBCs) {
+					else	if (barcodesReversed(false)) {
 						barcodeMode += "rev";
 					}
 					barcodeMode += " barcodes)";
 				}
 				printInfoRow(barcodeMode);
 			}
-			else if (BCdFWDREV[0].reversedBCs) {
+			else if (barcodesReversed(true)) {
 				printInfoRow("All barcodes reversed");
 			}
 
@@ -4758,22 +4851,22 @@ void Filters::printStats_old(ostream& give, string file, string outf, bool green
 
 			if (bDoBarcode2) {
 				give << "    -used dual index barcodes";
-				if (BCdFWDREV[0].reversedBCs || BCdFWDREV[1].reversedBCs) {
+				if (barcodesReversed(true) || barcodesReversed(false)) {
 					give << " (reversed_ ";
-					if (BCdFWDREV[1].reversedBCs && BCdFWDREV[0].reversedBCs) {
+					if (barcodesReversed(false) && barcodesReversed(true)) {
 						give << " fwd & rev";
 					}
-					else	if (BCdFWDREV[0].reversedBCs) {
+					else	if (barcodesReversed(true)) {
 						give << " fwd";
 					}
-					else	if (BCdFWDREV[1].reversedBCs) {
+					else	if (barcodesReversed(false)) {
 						give << " rev";
 					}
 					give << " BCs)" << endl;
 				}
 
 			}
-			else if (BCdFWDREV[0].reversedBCs) {
+			else if (barcodesReversed(true)) {
 				give << "    -reversed_ all barcodes" << endl;
 			}
 
@@ -4859,8 +4952,8 @@ void Filters::SmplSpecStats(ostream& give) {
 		give << SampleID[i] << "\t";
 		if (bDoCombiSamples) { give << SampleID_Combi[i] << "\t"; }
 		if (p2stat) {
-			give << Barcode[i] << "\t";
-			if (bDoBarcode2) { give << Barcode2[i] << "\t"; }
+			give << (bDoHeadSmplID ? HeadSmplID[i] : Barcode[i]) << "\t";
+			if (!bDoHeadSmplID && bDoBarcode2) { give << Barcode2[i] << "\t"; }
 			give << cst->BarcodeDetected[i] << "\t" << cst->BarcodeDetectedFail[i] << "\t";
 			float totSum = (float(cst->BarcodeDetected[i]) + float(cst->BarcodeDetectedFail[i]));
 			if (totSum > 0) {
@@ -4877,8 +4970,8 @@ void Filters::SmplSpecStats(ostream& give) {
 			give << endl;
 		}
 		else {
-			give << Barcode[i] << "\t";
-			if (bDoBarcode2) { give << Barcode2[i] << "\t"; }
+			give << (bDoHeadSmplID ? HeadSmplID[i] : Barcode[i]) << "\t";
+			if (!bDoHeadSmplID && bDoBarcode2) { give << Barcode2[i] << "\t"; }
 			give << cst->BarcodeDetected[i]
 				<< "\t" << cst->BarcodeDetectedFail[i] << "\t";
 

@@ -31,7 +31,7 @@ using std::string;
 using std::vector;
 
 // Utility functions used across DNA and InputStream
-string spaceX(unsigned int k);
+string spaceX(int k);
 int digitsInt(int x);
 int digitsFlt(float x);
 string intwithcommas(int value);

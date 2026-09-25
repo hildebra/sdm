@@ -10,10 +10,14 @@ sdm
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
+.build
+
 
 Makefile_d
 MakefileD
 MakefileF
+
+docs/benchmarks
 
 Makefile.old
 deprecated/

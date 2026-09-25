@@ -57,13 +57,38 @@ bool recordBufferHasData(const std::vector<std::string>& record) {
 	});
 }
 
+// normalizedRecordId without copying: remove_paired_info only truncates, so the
+// same rules can be applied to a view of the header.
+std::string_view normalizedRecordIdView(std::string_view id) {
+	if (id.empty()) { return id; }
+	if (id[0] == '@' || id[0] == '>') { id.remove_prefix(1); }
+	if (id.empty()) { return id; }
+	const size_t space = id.find(' ');
+	if (space != std::string_view::npos) { id = id.substr(0, space); }
+	if (id.size() >= 4) {
+		const size_t legacyPos = id.size() - 4;
+		if (id[legacyPos] == '#' && (id[legacyPos + 1] == '1' || id[legacyPos + 1] == '2') &&
+			id[legacyPos + 2] == ':' && id[legacyPos + 3] == '0') {
+			return id.substr(0, legacyPos);
+		}
+	}
+	if (id.size() < 2) { return id; }
+	const std::string_view suffix = id.substr(id.size() - 2);
+	if (suffix == "/1" || suffix == "/2" || suffix == ".1" || suffix == ".2") {
+		return id.substr(0, id.size() - 2);
+	}
+	return id;
+}
+
+// Runs on the reader thread for every record set: compare views, and only
+// build strings for the error message.
 void validateSynchronizedHeaders(const std::vector<std::string>& first,
 	const std::vector<std::string>& second, const char* secondLabel) {
-	const std::string firstId = first.empty() ? std::string() : normalizedRecordId(first[0]);
-	const std::string secondId = second.empty() ? std::string() : normalizedRecordId(second[0]);
+	const std::string_view firstId = first.empty() ? std::string_view() : normalizedRecordIdView(first[0]);
+	const std::string_view secondId = second.empty() ? std::string_view() : normalizedRecordIdView(second[0]);
 	if (firstId.empty() || secondId.empty() || firstId != secondId) {
-		throw std::runtime_error("Input records are not synchronized: R1 id '" + firstId +
-			"' does not match " + secondLabel + " id '" + secondId + "'");
+		throw std::runtime_error("Input records are not synchronized: R1 id '" + std::string(firstId) +
+			"' does not match " + secondLabel + " id '" + std::string(secondId) + "'");
 	}
 }
 
@@ -584,15 +609,22 @@ bool InputStreamer::getDNAlines(multi_tmp_lines* tmpO, int blocks, bool MIDuse,b
 			tmpO->setSize(k);
 			return false;
 		}
-		const bool b1 = this->getDNAlines(tmpO->tmp[k][0], 0);
-		bool b2 = true;
-		if (numPairs > 1) {
-			b2 = this->getDNAlines(tmpO->tmp[k][1], 1);
-		}
-		bool b3 = true;
-		if (MIDuse) {
-			b3 = this->getDNAlines(tmpO->tmp[k][2], 2);
-		}
+		bool b1, b2, b3;
+		do {
+			// With -ignore_IO_errors, a malformed record in any stream drops the whole
+			// R1/R2/MID set (mates stay synchronized) and reading continues; before,
+			// the discarded record looked like end of input and the rest was lost.
+			malformedRecordSkipped_ = false;
+			b1 = this->getDNAlines(tmpO->tmp[k][0], 0);
+			b2 = true;
+			if (numPairs > 1) {
+				b2 = this->getDNAlines(tmpO->tmp[k][1], 1);
+			}
+			b3 = true;
+			if (MIDuse) {
+				b3 = this->getDNAlines(tmpO->tmp[k][2], 2);
+			}
+		} while (malformedRecordSkipped_);
 
 		const bool partial1 = !b1 && recordBufferHasData(tmpO->tmp[k][0]);
 		const bool partial2 = numPairs > 1 && !b2 && recordBufferHasData(tmpO->tmp[k][1]);
@@ -645,7 +677,7 @@ bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 	else {
 		if (ret.size() < 4) { ret.resize(4); }
 	}
-	std::fill(ret.begin(), ret.end(), std::string());
+	for (auto& line : ret) { line.clear(); } // keeps each line's capacity for the next record
 	//vector<string>tmpLines(4, "");
 	if (isFasta) {//get DNA from fasta + qual_ files
 		stillMore = readFastaRecord(fasta_istreams[pos], quality_istreams[pos], ret);
@@ -682,6 +714,7 @@ bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
 				IO_Error(malformedMessage + "; discarding malformed record");
 				ret.assign(4, std::string());
 				stillMore = false;
+				malformedRecordSkipped_ = true; // not end of input; block reader skips this set
 			}
 		}
 		/*for (int xx = 0; xx < 4; xx++) {
@@ -690,9 +723,10 @@ bool InputStreamer::getDNAlines(vector<string>& ret, int pos) {
         if (stillMore) {
 			lnCnt[pos] += 4;
 		}
-     if (stillMore && fastQver == 0) {
-		 fastQver = auto_fq_version(ret);
-		 QverSet = true;			
+		if (stillMore && fastQver == 0) {
+			// Decided only when this record's range rules out one encoding;
+			// otherwise later records (the probe block) add evidence.
+			if (auto_fq_version(ret) != 0) { QverSet = true; }
 		}
 	}
 	if (stillMore) {
@@ -750,6 +784,8 @@ shared_ptr<DNA> InputStreamer::getDNAUnlocked(int pos){
 		vector<string>tmpLines(4, "");
 		stillMore = getDNAlines(tmpLines,pos);
 		if (stillMore) {
+			// This record is converted right away, so the offset must be settled now.
+			finalizeFastqVersion();
 			ret = str2DNA(tmpLines, keepPairHD, fastQver,pos);
 		}
 
@@ -760,9 +796,8 @@ shared_ptr<DNA> InputStreamer::getDNAUnlocked(int pos){
 			corrupt = true;
 		}
 
-		if (ret != nullptr && !keepPairHD) {//better cut in early
-			ret->setHeader(ret->getPositionFreeId());
-		}
+		// str2DNA already stripped the paired suffix when !keepPairHD; stripping again
+		// turned e.g. "SRR1.1.1" into "SRR1" (differs from the block-reader path).
 		if (corrupt) {
 			ret = nullptr;
 			repairInStream = true;
@@ -938,6 +973,7 @@ bool InputStreamer::setupFastaQual2(string p1, string p2, string file_type) {
 	fasta_istreams[pos] = DBG_NEW ifbufstream(p1, INPUT_BUFFER_SIZE, doTIO);
 	if (fasta_istreams[pos]->eof()) {
 		cerr << "\nWarning: Could not open or empty " << file_type << " " << p1 << " — skipping this input.\n";
+		delete fasta_istreams[pos];
 		fasta_istreams[pos] = nullptr;
 		return false;
 	}
@@ -949,10 +985,12 @@ bool InputStreamer::setupFastaQual2(string p1, string p2, string file_type) {
 		quality_istreams[pos] = DBG_NEW ifbufstream(p2, INPUT_BUFFER_SIZE, doTIO);
 		if (quality_istreams[pos]->eof()) {
 			cerr << "\nWarning: Could not open or empty quality file " << p2 << " — continuing without quality stream.\n";
+			delete quality_istreams[pos];
 			quality_istreams[pos] = nullptr;
 			qualAbsent = true;
 		}
-		else {
+		else if (pos == 0) {
+			// Mate 2 must not clear a missing mate-1 quality stream.
 			qualAbsent = false;
 		}
 	}
@@ -1006,6 +1044,7 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 		fastq_istreams[0] = DBG_NEW ifbufstream(p1, (size_t)round(bufS * 0.8), doTIO);
 		if (fastq_istreams[0]->eof()) {
 			cerr << "\nWarning: Could not open or empty " << file_type << " " << p1 << " — skipping this input.\n";
+			delete fastq_istreams[0];
 			fastq_istreams[0] = nullptr;
 			return false;
 		}
@@ -1017,6 +1056,7 @@ bool InputStreamer::setupFastq_2(string p1, string p2, string midp) {
 		fastq_istreams[1] = DBG_NEW ifbufstream(p2, (size_t)round(bufS * 1.2), doTIO);
 		if (fastq_istreams[1]->eof()) {
 			cerr << "\nWarning: Could not open or empty " << file_type << " " << p2 << " — skipping this input.\n";
+			delete fastq_istreams[1];
 			fastq_istreams[1] = nullptr;
 			return false;
 		}
@@ -1080,21 +1120,20 @@ void InputStreamer::setupFna(string in) {
 	}
 }
 
-qual_score InputStreamer::auto_fq_version() {
-	if (fastQver != 0) {
-		return fastQver;
-	}
-
-	return (qual_score)auto_fq_version(minQScore, maxQScore);
-}
-
-qual_score InputStreamer::auto_fq_version(qual_score minQScoreIn, qual_score maxQScoreIn) {
-  // minQScoreIn/maxQScoreIn are raw ASCII quality characters from FASTQ lines.
-	// Prefer Phred+33 unless there is strong evidence for legacy +64.
-	if ((int)minQScoreIn < 59) { return 33; }
-	if ((int)maxQScoreIn > 74) { return 64; }
+// minAscii/maxAscii are the raw ASCII quality characters seen so far. Values
+// below 59 (';', Solexa Q-5) never occur in Phred+64 data and values above 105
+// ('i', Q41) never occur in Phred+64 either, so either one settles on Phred+33.
+// The range 59..105 fits both encodings; only with force does the legacy rule
+// apply (anything above 74 'J' is taken as Phred+64). Deciding from a single
+// record turned PacBio HiFi reads (all bases >= Q26, some at Q93 '~') into +64.
+qual_score InputStreamer::auto_fq_version(qual_score minAscii, qual_score maxAscii, bool force) {
+	if ((int)maxAscii > 105) { return 33; }
+	if ((int)minAscii < 59) { return 33; }
+	if (!force) { return 0; }
+	if ((int)maxAscii > 74) { return 64; }
 	return 33;
 }
+
 qual_score InputStreamer::auto_fq_version(const vector<string>& ret) {
 	qual_score minAscii = SCHAR_MAX;
 	qual_score maxAscii = 0;
@@ -1106,6 +1145,7 @@ qual_score InputStreamer::auto_fq_version(const vector<string>& ret) {
 
 	if (minAscii < minQScore) { minQScore = minAscii; }
 	if (maxAscii > maxQScore) { maxQScore = maxAscii; }
+	++fqAutoRecords_;
 
 	const bool modernIlluminaHeader =
 		(ret[0].find(" 1:N:") != string::npos) ||
@@ -1118,9 +1158,20 @@ qual_score InputStreamer::auto_fq_version(const vector<string>& ret) {
 		fqSolexaFmt = false;
 	}
 	else {
-		fastQver = static_cast<qual_score>(auto_fq_version(minQScore, maxQScore));
+		fastQver = auto_fq_version(minQScore, maxQScore, false);
 	}
 	return fastQver;
+}
+
+void InputStreamer::finalizeFastqVersion() {
+	if (fastQver != 0) { return; }
+	fastQver = auto_fq_version(minQScore, maxQScore, true);
+	QverSet = true;
+	if (fastQver == 64 && verbose > 0) {
+		cerr << "Quality encoding auto-detected as Phred+64 from " << fqAutoRecords_
+			<< " read(s) (ASCII range " << (int)minQScore << "-" << (int)maxQScore
+			<< "); set -i_qual_offset 33 if the data is Phred+33.\n";
+	}
 }
 
 

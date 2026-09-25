@@ -62,7 +62,7 @@ Even against their known error-free templates, only **2,799 of 5,000 reads (55.9
 
 The complete 5,000-read result was checked against exhaustive clustering, which took 1.48 s outside the timed repetitions. All lossless index variants matched it. An additional 10,000 long-read comparisons checked the packed and existing byte verifiers against direct mismatch counting.
 
-The [simulation program](../tests/Test99OntSimulation.cpp) includes and reuses [Test99Candidates.cpp](../tests/Test99Candidates.cpp). It generates its own templates and reads from fixed RNG seeds, so no input files or external database are needed:
+The [simulation program](../.claude/archive/benchmarks/Test99OntSimulation.cpp) includes and reuses [Test99Candidates.cpp](../.claude/archive/benchmarks/Test99Candidates.cpp). It generates its own templates and reads from fixed RNG seeds, so no input files or external database are needed:
 
 ```sh
 make -j4 WITH_HTS=0 STATIC=0 BUILD_DIR=/tmp/sdm-99-ont-build \

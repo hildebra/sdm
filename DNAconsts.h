@@ -177,7 +177,29 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //      Streaming substitution dereplication with homopolymer-filtered seeds and optional diffDNA storage.
 //3.52: 13.9.26: selected qualities for exact single/pair variants, shared fragment counts,
 //      paired reassignment, synchronized subcluster FASTQ, and linked SDMDIFF3 pair export.
-static const char* sdm_version = "3.52";
+//3.54: 14.9.26: fixed coarse derep output, better load balance
+//3.55: 24.9.26: audit fixes: maxSeqLength -1, -specificReads output, -ignore_IO_errors recovery,
+//      empty FASTA records, clean error exits, barcode failures fail reads, bounded primer-variant
+//      memory; min_derep_copies X:Y means X copies in each of Y samples (bare N = total copies);
+//      paired reads without map or options file are written as pairs, not singletons.
+//3.60: 24.9.26: derep memory: mates/merged reads stored as slim DerepRead objects, R2/merged headers
+//      rebuilt from R1 at write time (-4..-13% peak RSS); mate tags (/1 /2, Illumina 1:N/2:N) follow
+//      the output file after CheckForMixedPairs swaps; PEheaderPairFmt 1 keeps the sample label;
+//      unit/regression tests consolidated in tests/, run with make test.
+//3.61: 25.9.26: audit release (docs/io-audit.md, derep-audit.md, general-audit.md).
+//      I/O: FASTQ offset detected over the probe block (HiFi no longer read as +64), failed writes
+//      of demultiplexed/rotated outputs fail the run, .gzi index opt-in (-o_gzi 1).
+//      Derep: failed/mid-quality reads counted in any input order (deferred, bounded tables);
+//      mid-quality sets are counted or written to the mid-quality output, never both; merge
+//      marks only on accepted consensus; coarse-cluster output uses the global index and the
+//      nearest anchor. Selection: overlap errors used, errors per base, subgroups by abundance;
+//      merges need 16 bp overlap (MergeMinOverlap), exact below 20 bp.
+//      Filtering/seeds: second-tier length and window rescues, length re-check after 3' trim,
+//      read-2 primer orientation, barcode orientation and fractional minSeqLength decided once
+//      for all threads, best-offset barcode matching, TrimStartNTs also with a map, UPARSE
+//      chimera parsing, integer OTU matrix, PAF coverage/secondaries, -dere_size_fmt 1 in seed
+//      extension, cd-hit/.uc parsing fixes; thread pools no longer deadlock on worker submits.
+static const char* sdm_version = "3.61";
 static const char* sdm_status = "beta";
 
 

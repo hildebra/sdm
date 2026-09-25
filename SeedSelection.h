@@ -70,7 +70,11 @@ if (d1 == nullptr || r1 == nullptr) {
 	if (d1Ncnt > 0 || r1Ncnt > 0) {
 		CanoScore = 1.f - (float)(d1Ncnt - r1Ncnt) / (float)(d1Ncnt + r1Ncnt + 10);
 	}
+	// Overlap errors of the two consensus reads (mismatches in the overlap plus
+	// their mean quality), normalized so that the cleaner merge scores 1.
+	// overlapRatio > 1 favors the candidate; 1 unless both reads merged.
 	float dmergErrSco = 0.f; 	float refMergErrSco = 0.f;
+	double overlapRatio = 1.;
 	if (r1->getMergeLength() >=0 && d1->getMergeLength() >=0) {
 		if (d1->getMergeErrors() > 0) {
 			dmergErrSco = (float)d1->getMergeErrors();
@@ -83,19 +87,16 @@ if (d1 == nullptr || r1 == nullptr) {
 		if (maxMerr > 0.f) {
 			dmergErrSco /= maxMerr; 	refMergErrSco /= maxMerr;
 			dmergErrSco = 1.f - dmergErrSco; refMergErrSco = 1.f - refMergErrSco;
+			overlapRatio = pointFiveRatio(dmergErrSco, refMergErrSco, 0.5);
 		}
 	}
 	Read* dx = nullptr; Read* rx = nullptr;
 	bool allowMergeGuide = dMerge && rMerg;
 	if (allowMergeGuide && dM != nullptr) { dx = dM; 	d2 = nullptr; } 	else { dx = d1; }
 	if (allowMergeGuide && rM != nullptr) { rx = rM; r2 = nullptr;}else { rx = r1; }
-	float thScore =  dx->getAvgQual(); 
-	float rScore =  rx->getAvgQual();
-	float maxScore = max(thScore, rScore);
-	if (maxScore > 0.f) {
-		thScore /= maxScore; 	rScore /= maxScore;
-	}
-	double dAccuE = dx->getAccumError(); double rAccuE = rx->getAccumError();
+	// Expected errors per base: the sum alone penalized longer reads.
+	double dAccuE = dx->getAccumError() / std::max(1.0, (double)dx->length());
+	double rAccuE = rx->getAccumError() / std::max(1.0, (double)rx->length());
 	double AccErrRatio = pointFiveRatio(rAccuE, dAccuE,0.25);
 	double dQ=dx->getAvgQual(); double rQ=rx->getAvgQual();
 	if (d2 != nullptr) { dQ += d2->getAvgQual();  }
@@ -134,33 +135,30 @@ if (d1 == nullptr || r1 == nullptr) {
 		}
 		return v;
 	};
-	double wCano = 0.10;
-	double wAccErr = 0.20;
-	double wQual = 0.25;
-	double wLen = 0.10;
-	double wId = 0.15;
-	double wMergePref = 0.08;
-	double wSize = 0.06;
-	double wMergeLenDev = 0.06;
+	// Weights sum to 1.28 (seed) and 1.40 (dereplication), as before the
+	// overlap-error term was added; its weight came off wAccErr/wMergeLenDev.
+	double wCano, wAccErr, wQual, wLen, wId, wMergePref, wSize, wMergeLenDev, wOverlap;
 	if (forSeed) {
-		wCano = 0.08; 
-		wAccErr = 0.44; 
-		wQual = 0.14; 
+		wCano = 0.08;
+		wAccErr = 0.34;
+		wQual = 0.14;
 		wLen = 0.08;
 		wId = 0.42;
 		wMergePref = 0.10;
 		wSize = 0.02;
 		wMergeLenDev = 0.00;
+		wOverlap = 0.10;
 	}
 	else {
 		wCano = 0.08;
-		wAccErr = 0.32;
+		wAccErr = 0.28;
 		wQual = 0.16;
 		wLen = 0.08;
 		wId = 0.0;
 		wMergePref = 0.34;
 		wSize = 0.04;
-		wMergeLenDev = 0.38;
+		wMergeLenDev = 0.30;
+		wOverlap = 0.12;
 	}
 	double cumulativeQualityScore =
 		std::pow(clampScore(CanoScore), wCano) *
@@ -170,7 +168,8 @@ if (d1 == nullptr || r1 == nullptr) {
 		std::pow(clampScore(ratId), wId) *
 		std::pow(clampScore(mergePreference), wMergePref) *
 		std::pow(clampScore(logsizeRatio), wSize) *
-		std::pow(clampScore(mergeLenDevRatio), wMergeLenDev);
+		std::pow(clampScore(mergeLenDevRatio), wMergeLenDev) *
+		std::pow(clampScore(overlapRatio), wOverlap);
 	if (cumulativeQualityScore > thresh) {
 		return true;
 	}

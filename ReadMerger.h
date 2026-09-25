@@ -46,7 +46,8 @@ struct MergeResult {
 struct mergeStats {
 	mergeStats():mismatchFwd(0), mismatchRev(0), matchFwd(0), matchRev(0),
 		percFwd(0), percRev(0), maxF(0),maxR(0){}
-	vector<float> mismatchFwd, mismatchRev, matchFwd, matchRev;
+	// Integer counters: float ++ stops changing after 2^24 observations.
+	vector<uint64_t> mismatchFwd, mismatchRev, matchFwd, matchRev;
 	vector<float> percFwd, percRev;
 	float maxF, maxR;
 	void prepStats();
@@ -63,6 +64,12 @@ struct qualStats {
 };
 
 class ReadMerger {
+public:
+    // Minimum overlap (bases) findSeed accepts; options file MergeMinOverlap.
+    // Below 20 bases the overlap must match exactly (5-mer seeds otherwise admit
+    // chance overlaps of non-overlapping mates).
+    static void setMinOverlap(unsigned bases) { min_overlap_.store(std::max(8u, bases)); }
+    static unsigned minOverlap() { return min_overlap_.load(); }
 private:
     // initial distance from beginning/end of the read to start finding seeds
     const size_t seed_margin_ = 0;
@@ -75,8 +82,8 @@ private:
     // Lengh of the seed
     const size_t seed_size_ = 5;
 
-    //Minimum overlap to consider read mergable
-    const size_t min_overlap_ = 12; // used to be 16
+    //Minimum overlap to consider read mergable (12 between 2024 and 2026-09; 16 before and since)
+    inline static std::atomic<unsigned> min_overlap_{16};
 
     // threshold of percent identity necessary to allow merge
     const float percent_identity_threshold_ = 0.9f;
@@ -146,9 +153,10 @@ public:
 
 	std::string reverseComplement(std::string str);
 
-	double percentIdentity(std::string_view sequence1, std::string_view sequence2, int mismatches = -1);
+	// Fraction of equal bytes, or -1 once more than `mismatches` differ. Stateless.
+	static double percentIdentity(std::string_view sequence1, std::string_view sequence2, int mismatches = -1);
 
-	double percentIdentity(const char* sequence1, const char* sequence2, 
+	static double percentIdentity(const char* sequence1, const char* sequence2, 
 		int length, int mismatches = -1);
    
 

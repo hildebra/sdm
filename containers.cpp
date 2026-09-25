@@ -19,12 +19,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include <algorithm>
 #include <cassert>
+#include <deque>
+#include <future>
 #include <limits>
 #include <filesystem>
+#include <sstream>
 #include "OutputFileStream.h"
 #include <mutex>
 #include "Common.h"
 #include "containers.h"
+#include "PartitionWorkPool.h"
+#include "ThreadPool.h"
 #include "CoarseDereplication.h"
 #include "Filters.h"
 #include "OutputStreamer.h"
@@ -33,6 +38,127 @@ using namespace std;
 
 namespace {
 	OptContainer* g_opt_container = nullptr;
+
+	// Runs task(0 .. count-1) on the pool and waits for all of them; the first
+	// failure is rethrown once every submitted task has finished. Never call this
+	// from one of the pool's own workers.
+	template <class Task>
+	void runOnPool(ThreadPool& pool, size_t count, const Task& task) {
+		std::vector<std::future<void>> done;
+		done.reserve(count);
+		std::exception_ptr failure;
+		try {
+			for (size_t i = 0; i < count; ++i) { done.push_back(pool.submit([&task, i]() { task(i); })); }
+		} catch (...) { failure = std::current_exception(); }
+		for (auto& future : done) {
+			try { future.get(); } catch (...) { if (!failure) { failure = std::current_exception(); } }
+		}
+		if (failure) { std::rethrow_exception(failure); }
+	}
+
+	// Sorts `items` in place by `less`. With a pool and enough items, every
+	// segment is split at its median (std::nth_element), all segments of a level
+	// in parallel, until there is one segment per worker; the segments are then
+	// sorted in parallel. Needs no memory per item. `less` must be a strict total
+	// order (no equivalent items), so the result is exactly std::sort's.
+	template <class T, class Less>
+	void sortOnPool(std::vector<T>& items, const Less& less, ThreadPool* pool) {
+		constexpr size_t kSegment = 16384;
+		if (!pool || items.size() < 2 * kSegment) { std::sort(items.begin(), items.end(), less); return; }
+		std::vector<size_t> bounds{0, items.size()};
+		while (bounds.size() - 1 < pool->size() && items.size() / (bounds.size() - 1) >= 2 * kSegment) {
+			const size_t segments = bounds.size() - 1;
+			std::vector<size_t> next(2 * segments + 1);
+			for (size_t s = 0; s < segments; ++s) {
+				next[2 * s] = bounds[s];
+				next[2 * s + 1] = bounds[s] + (bounds[s + 1] - bounds[s]) / 2;
+			}
+			next[2 * segments] = items.size();
+			runOnPool(*pool, segments, [&](size_t s) {
+				std::nth_element(items.begin() + next[2 * s], items.begin() + next[2 * s + 1], items.begin() + next[2 * s + 2], less);
+			});
+			bounds.swap(next);
+		}
+		runOnPool(*pool, bounds.size() - 1, [&](size_t s) { std::sort(items.begin() + bounds[s], items.begin() + bounds[s + 1], less); });
+	}
+
+	// Formatted output of one dereplication output chunk, kept in fixed-size
+	// segments taken from a shared pool. Growing and freeing a string per
+	// chunk on many threads leaves large freed buffers in each worker's malloc
+	// arena; recycled segments keep the memory at what is actually in flight.
+	class SegmentPool {
+	public:
+		static constexpr size_t kSegmentSize = size_t(1) << 20;
+		using Segment = std::unique_ptr<char[]>;
+		Segment take() {
+			std::lock_guard<std::mutex> lock(mutex_);
+			if (free_.empty()) { return Segment(new char[kSegmentSize]); }
+			Segment segment = std::move(free_.back());
+			free_.pop_back();
+			return segment;
+		}
+		void give(Segment segment) {
+			std::lock_guard<std::mutex> lock(mutex_);
+			free_.push_back(std::move(segment));
+		}
+	private:
+		std::mutex mutex_;
+		std::vector<Segment> free_;
+	};
+
+	class SegmentBuffer final : public std::streambuf {
+	public:
+		explicit SegmentBuffer(SegmentPool& pool) : pool_(pool) {}
+		SegmentBuffer(const SegmentBuffer&) = delete;
+		SegmentBuffer& operator=(const SegmentBuffer&) = delete;
+		~SegmentBuffer() override { release(); }
+		// Writes the buffered bytes and returns the segments to the pool.
+		void writeTo(std::ostream& out) {
+			for (size_t i = 0; i < segments_.size(); ++i) {
+				const size_t used = i + 1 == segments_.size() ? static_cast<size_t>(pptr() - pbase()) : SegmentPool::kSegmentSize;
+				out.write(segments_[i].get(), static_cast<std::streamsize>(used));
+			}
+			release();
+		}
+	protected:
+		int_type overflow(int_type ch) override {
+			if (traits_type::eq_int_type(ch, traits_type::eof())) { return traits_type::not_eof(ch); }
+			grow();
+			*pptr() = traits_type::to_char_type(ch);
+			pbump(1);
+			return ch;
+		}
+		std::streamsize xsputn(const char* data, std::streamsize count) override {
+			std::streamsize written = 0;
+			while (written < count) {
+				if (pptr() == epptr()) { grow(); }
+				const std::streamsize amount = std::min<std::streamsize>(epptr() - pptr(), count - written);
+				std::memcpy(pptr(), data + written, static_cast<size_t>(amount));
+				pbump(static_cast<int>(amount));
+				written += amount;
+			}
+			return written;
+		}
+	private:
+		void grow() {
+			segments_.push_back(pool_.take());
+			char* begin = segments_.back().get();
+			setp(begin, begin + SegmentPool::kSegmentSize);
+		}
+		void release() {
+			for (auto& segment : segments_) { pool_.give(std::move(segment)); }
+			segments_.clear();
+			setp(nullptr, nullptr);
+		}
+		SegmentPool& pool_;
+		std::vector<SegmentPool::Segment> segments_;
+	};
+
+	struct SegmentStream {
+		explicit SegmentStream(SegmentPool& pool) : buffer(pool), stream(&buffer) {}
+		SegmentBuffer buffer;
+		std::ostream stream;
+	};
 }
 
 void setGlobalOptContainer(OptContainer* options) {
@@ -72,7 +198,8 @@ RemainderStrPos(-1), newHD(0), outFiles(0), outFilesIdx(0) {
 
 	//check read subset format
 	while (!safeGetline(in, line).eof()) {
-		if (line.substr(0, 1) == "#"){ skips++; continue; }
+		// Same rows as the parser below reads: it skips comments and lines under 5 characters.
+		if (line.substr(0, 1) == "#" || line.length() < 5){ skips++; continue; }
 		string segments;
 		int ColsPerRow = 0; // Initialize counter.
 		stringstream ss;
@@ -86,12 +213,11 @@ RemainderStrPos(-1), newHD(0), outFiles(0), outFilesIdx(0) {
 		}
 		else {
 			if (ColsPerRow != ini_ColPerRow){
-				cerr << "Number of columns in read subset file on line " << cnt + skips << " is " << ColsPerRow << ". Expected " << ini_ColPerRow << " columns.\n";
+				cerr << "Number of columns in read subset file on line " << cnt + skips + 1 << " is " << ColsPerRow << ". Expected " << ini_ColPerRow << " columns.\n";
 				exit(91);
 			}
-			if (cnt > 1000){
-				break;
-			}
+			// Every row is checked: a short row after the first 1000 misaligned
+			// the header and output-file columns (out-of-bounds outFilesIdx).
 		}
 		cnt++;
 	}
@@ -111,7 +237,7 @@ RemainderStrPos(-1), newHD(0), outFiles(0), outFilesIdx(0) {
 	//parameters were set for in matrix, now read line by line
 	while (!safeGetline(in, line).eof()) {
 		//	while(getline(in,line,'\n')) {
-		if (cnt != 0 && line.substr(0, 1) == "#"){ continue; }
+		if (line.substr(0, 1) == "#"){ continue; } // comment/header, as in the format check above
 		if (line.length() < 5){ continue; }
 		stringstream ss; string segments; int cnt2 = 0;
 		ss << line;
@@ -208,6 +334,9 @@ void ReadSubset::findMatches(shared_ptr<InputStreamer> IS, OutputStreamer* MD, b
             match[0]->setHeader(newHD[idx] + "#1:0");
             match[1]->setHeader(newHD[idx] + "#2:0");
 		}
+		else if (b_doHD && newHD[idx] != "") {
+			match[0]->setHeader(newHD[idx]); // single-end subsets were never renamed
+		}
 		MD->writeSelectiveStream(match[0], 0, outFilesIdx[idx]);
 		if (pairs > 1) {
 			MD->writeSelectiveStream(match[1], 1, outFilesIdx[idx]);
@@ -247,35 +376,159 @@ Dereplicate::ThreadLocalBatch& Dereplicate::get_or_create_thread_batch() {
 }
 
 size_t Dereplicate::tracker_size_total() const {
-    if (coarse_) { return coarse_->groups().size(); }
     size_t size = 0;
-    for (const auto& shard : shards_) { size += shard->tracker.size(); }
+    for (const auto& shard : shards_) { size += shard->coarse ? (shard->coarse->outputsExact() ? shard->coarse->exactGroups().size() : shard->coarse->groups().size()) : shard->tracker.size(); }
     return size;
 }
 
-bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending, HashDNA& tracker) {
+bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending, HashDNA& tracker, bool deferring) {
     auto it = tracker.find(pending.srchSeq);
-    if (it == tracker.end() && !pending.pass && !prefixMode_) { return true; }
+    if (it == tracker.end() && !pending.pass && !deferring) { return false; }
     bool fresh = it == tracker.end();
     if (fresh) { it = tracker.try_emplace(pending.srchSeq, std::make_unique<DNAuniqSet>()).first; }
     auto& group = it->second;
-    auto representative = group->find(pending.mergePos);
-    // Prefix-mode failures are buffered separately. They become evidence only
+    if (coarse_ && deferring && !pending.pass &&
+            (!coarse_->outputsExact() || coarse_->storesQualities() || coarse_->storesDiffs())) {
+        // Reuse the ordinary deferred-prefix table, retaining the observations
+        // needed for variant export as well as their counts. These reads never
+        // supply the output representative; outputGroups attaches their evidence
+        // only if a passing exact/prefix anchor exists.
+        auto representative = group->find(pending.mergePos);
+        if (representative == group->end()) {
+            group->addNewDNAuniq(pending.dna, coarse_->storesQualities() ? pending.dna2 : nullptr,
+                b_merge_pairs_derep_ ? pending.dna_merged : nullptr, pending.mergePos, -1, true, false);
+            if (coarse_->storesQualities() || coarse_->storesDiffs()) {
+                const auto& source = searchWithMerg && pending.dna_merged ? pending.dna_merged : pending.dna;
+                auto reference = std::make_shared<const string>(coarse_->storesQualities() ? std::string_view(source->getSequence()) : source->getSeqPseudoView());
+                auto mateReference = coarse_->storesQualities() && pending.dna2 ?
+                    std::make_shared<const string>(pending.dna2->getSequence()) : nullptr;
+                (*group)[pending.mergePos]->attachDiffDNA(std::make_shared<diffDNA>(reference, false,
+                    coarse_->storesQualities(), mateReference));
+            }
+        }
+        auto& dna = (*group)[pending.mergePos];
+        if (coarse_->storesQualities() && pending.dna2) { dna->recordDiffPairQuality(*pending.dna, *pending.dna2, pending.sample_id); }
+        else if (coarse_->storesQualities()) { dna->recordDiffQuality(*pending.dna, pending.sample_id); }
+        else {
+            const auto& source = searchWithMerg && pending.dna_merged ? pending.dna_merged : pending.dna;
+            dna->recordDiffDNA(source->getSeqPseudoView(), pending.sample_id);
+        }
+        return true;
+    }
+    // Deferred failures are buffered separately. They become evidence only
     // if a passing anchor exists at output time; buffering is not acceptance.
-    const bool evidenceOnly = prefixMode_ && !pending.pass;
+    const bool evidenceOnly = deferring && !pending.pass;
     // Deferred failures can never supply an output representative. Keep only
     // R1 evidence and, when requested for output, merged quality evidence.
     // Their mates and unused merged products need not be retained in memory.
-    if (representative == group->end()) {
-        group->addNewDNAuniq(pending.dna, evidenceOnly ? nullptr : pending.dna2,
-            evidenceOnly && !b_merge_pairs_derep_ ? nullptr : pending.dna_merged,
-            pending.mergePos, pending.sample_id, b_derep_as_fasta_, !evidenceOnly);
-    } else {
-        representative->second->matchedDNA(pending.dna, evidenceOnly ? nullptr : pending.dna2,
-            evidenceOnly && !b_merge_pairs_derep_ ? nullptr : pending.dna_merged,
-            pending.sample_id, b_derep_as_fasta_, b_merge_pairs_derep_, !evidenceOnly);
+    group->addObservation(pending.dna, evidenceOnly ? nullptr : pending.dna2,
+        evidenceOnly && !b_merge_pairs_derep_ ? nullptr : pending.dna_merged,
+        pending.mergePos, pending.sample_id, b_derep_as_fasta_, b_merge_pairs_derep_, !evidenceOnly);
+    return true;
+}
+
+void Dereplicate::apply_pending_entry(const PendingDerepEntry& pending, Shard& shard,
+    const CoarseDereplication::Probe* probe, std::vector<CoarseDereplication::Update>* deferred) {
+    // Called with a shard lock or exclusive work-pool ownership. Statistics are
+    // finalized here, not while filtering still has this observation queued.
+    auto& stats = shard.admission;
+    stats.mergedKeys += searchWithMerg && bool(pending.dna_merged);
+    // A non-passing read whose key already has a passing dereplicate is counted
+    // right away. Otherwise a set with withheld mid-quality output is written
+    // instead of counted (a pipeline back-maps it; never both), while a set
+    // without such output is deferred: attached at output to the passing group
+    // of its key (prefix mode: every non-passing read), or dropped, never
+    // reaching .rest or the map on its own.
+    if (!pending.pass && defersNonPassing()) {
+        const bool known = exact_key_known(pending, shard);
+        if (pending.withheld) {
+            if (!known) { publish_uncounted(pending); ++stats.published; return; }
+        } else if (prefixMode_) {
+            if (deferCountsOnly_) { shard.rejectedTallies[pending.srchSeq].add(pending.sample_id); }
+            else { apply_pending_entry_locked(pending, shard.rejected, true); }
+            ++stats.deferred;
+            return;
+        } else if (!known) {
+            bool kept;
+            if (retainsVariants()) {
+                // The reads themselves (already allocated), within a byte budget.
+                auto bytes = [](const shared_ptr<DNA>& d) -> uint64_t {
+                    return d ? sizeof(DNA) + 2 * uint64_t(d->mem_length()) + 2 * d->getId().size() : 0;
+                };
+                const uint64_t size = bytes(pending.dna) + bytes(pending.dna2) + bytes(pending.dna_merged);
+                kept = deferredEvidenceBytes_.fetch_add(size, std::memory_order_relaxed) + size <= kDeferredEvidenceBytes;
+                if (kept) {
+                    shard.deferredEvidence[deferredKeyHash(pending.srchSeq)].push_back(
+                        DeferredEvidence{pending.dna, pending.dna2, pending.dna_merged, pending.sample_id});
+                }
+                else { deferredEvidenceBytes_.fetch_sub(size, std::memory_order_relaxed); }
+            }
+            else {
+                // Sample counts only, under a key hash, in a capped table.
+                kept = shard.deferredCounts.add(deferredKeyHash(pending.srchSeq), pending.sample_id, deferredKeyCapPerShard_);
+            }
+            if (kept) { ++stats.deferred; }
+            else { ++stats.unmatched; ++stats.deferredDropped; } // as 3.60: not counted
+            return;
+        }
     }
-    return fresh;
+    bool admitted;
+    if (shard.coarse && (!pending.srchSeq.empty() || !shard.coarse->storageOnly())) {
+        const auto& source = searchWithMerg && pending.dna_merged ? pending.dna_merged : pending.dna;
+        admitted = shard.coarse->add(pending.srchSeq, source->getSeqPseudoView(), pending.dna, pending.dna2,
+            pending.dna_merged, pending.sample_id, pending.pass, searchLength,
+            b_derep_as_fasta_, b_merge_pairs_derep_, pending.mergePos, probe, deferred) != CoarseDereplication::npos;
+    } else {
+        admitted = apply_pending_entry_locked(pending, shard.tracker, false);
+    }
+    if (!admitted) {
+        if (pending.withheld) { publish_uncounted(pending); ++stats.published; }
+        else { ++stats.unmatched; }
+    }
+    else if (pending.pass) { ++stats.high; }
+    else if (pending.dna->isYellowQual()) { ++stats.mid; }
+    else { ++stats.failed; }
+}
+
+void Dereplicate::publish_uncounted(const PendingDerepEntry& pending) {
+    if (!publisher_) { throw std::logic_error("Dereplicate: a withheld record set has no publisher"); }
+    publisher_(pending.dna, pending.dna2, pending.route);
+}
+
+void Dereplicate::flushPending() {
+    LifecyclePause pause(*this);
+    flush_all_batches();
+}
+
+bool Dereplicate::DeferredCounts::add(uint64_t key, int sample, size_t cap) {
+    if (sample < 0) { return true; } // no sample: nothing to count (diffDNA ignores it as well)
+    auto bump = [sample](std::vector<std::pair<int, uint64_t>>& counts) {
+        for (auto& entry : counts) { if (entry.first == sample) { ++entry.second; return; } }
+        counts.emplace_back(sample, 1);
+    };
+    if (auto several = multi.find(key); several != multi.end()) { bump(several->second); return true; }
+    auto one = single.find(key);
+    if (one == single.end()) {
+        if (size() >= cap) { return false; }
+        single.emplace(key, Single{sample, 1});
+        return true;
+    }
+    if (one->second.sample == sample && one->second.copies < std::numeric_limits<uint32_t>::max()) {
+        ++one->second.copies;
+        return true;
+    }
+    std::vector<std::pair<int, uint64_t>> counts{{one->second.sample, one->second.copies}};
+    single.erase(one);
+    bump(counts);
+    multi.emplace(key, std::move(counts));
+    return true;
+}
+
+bool Dereplicate::exact_key_known(const PendingDerepEntry& pending, const Shard& shard) const {
+    if (shard.coarse && (!pending.srchSeq.empty() || !shard.coarse->storageOnly())) {
+        return shard.coarse->hasExactKey(pending.srchSeq);
+    }
+    return shard.tracker.find(pending.srchSeq) != shard.tracker.end();
 }
 
 void Dereplicate::flush_batch(ThreadLocalBatch& batch) {
@@ -285,40 +538,106 @@ void Dereplicate::flush_batch(ThreadLocalBatch& batch) {
 	srch_seq_total_len_.fetch_add(searchBases, std::memory_order_relaxed);
 	srch_seq_count_.fetch_add(batch.pending.size(), std::memory_order_relaxed);
 	struct ClearBatch { ThreadLocalBatch& batch; ~ClearBatch() { batch.pending.clear(); } } clear{batch};
-    if (coarse_) {
-        std::lock_guard<std::mutex> guard(coarseMutex_);
-        for (const auto& entry : batch.pending) {
-            const auto& source = searchWithMerg && entry.dna_merged ? entry.dna_merged : entry.dna;
-            coarse_->add(entry.srchSeq, source->getSeqPseudoView(), entry.dna, entry.dna2,
-                entry.dna_merged, entry.sample_id, entry.pass, searchLength);
-        }
+    if (parallelGlobalCoarse_) {
+        flush_global_coarse(batch);
         return;
     }
 	thread_local std::vector<std::vector<size_t>> grouped;
 	grouped.resize(shards_.size());
 	for (auto& indices : grouped) { indices.clear(); }
 	for (size_t i = 0; i < batch.pending.size(); ++i) { grouped[batch.pending[i].shard].push_back(i); }
+    if (coarseWorkPool_) {
+        std::vector<PartitionWorkPool::Work> work;
+        work.reserve(shards_.size());
+        for (size_t i = 0; i < grouped.size(); ++i) {
+            if (!grouped[i].empty()) { work.push_back({i, grouped[i].size()}); }
+        }
+        // Capture the submitting thread's grouping explicitly. A helper must
+        // not resolve the thread_local variable to its own current batch.
+        auto* indices = &grouped;
+        coarseWorkPool_->run(work, [this, &batch, &work, indices](size_t task) {
+            auto& shard = *shards_[work[task].partition];
+            // Pool ownership serializes this index, without a shard mutex wait.
+            for (size_t index : (*indices)[work[task].partition]) {
+                apply_pending_entry(batch.pending[index], shard);
+            }
+        });
+        return;
+    }
+	// Shards are independent: apply to every shard that is free right away and
+	// only then wait for the busy ones, instead of queueing behind other
+	// workers in a fixed shard order.
+	thread_local std::vector<size_t> busy;
+	busy.clear();
 	for (size_t i = 0; i < shards_.size(); ++i) {
 		if (grouped[i].empty()) { continue; }
 		auto& shard = *shards_[i];
+		std::unique_lock<std::mutex> guard(shard.mutex, std::try_to_lock);
+		if (!guard.owns_lock()) { busy.push_back(i); continue; }
+        for (size_t index : grouped[i]) {
+            apply_pending_entry(batch.pending[index], shard);
+        }
+	}
+	for (size_t i : busy) {
+		auto& shard = *shards_[i];
 		std::lock_guard<std::mutex> guard(shard.mutex);
         for (size_t index : grouped[i]) {
-            const auto& pending = batch.pending[index];
-            apply_pending_entry_locked(pending, prefixMode_ && !pending.pass ? shard.rejected : shard.tracker);
+            apply_pending_entry(batch.pending[index], shard);
         }
 	}
 }
 
+void Dereplicate::flush_global_coarse(ThreadLocalBatch& batch) {
+    auto& shard = *shards_.front();
+    auto& coarse = *shard.coarse;
+    thread_local CoarseDereplication::SearchScratch scratch;
+    thread_local std::vector<CoarseDereplication::Probe> probes;
+    thread_local std::vector<CoarseDereplication::Update> updates;
+    probes.assign(batch.pending.size(), CoarseDereplication::Probe{});
+    updates.clear();
+    struct ClearUpdates { ~ClearUpdates() { updates.clear(); } } clearUpdates;
+    {
+        // Phase 1: candidate searches (most of the work) against a snapshot.
+        std::shared_lock<std::shared_mutex> snapshot(shard.snapshot);
+        for (size_t i = 0; i < batch.pending.size(); ++i) {
+            const auto& pending = batch.pending[i];
+            if (prefixMode_ && !pending.pass) { continue; } // deferred prefix evidence, no search
+            probes[i] = coarse.probe(pending.srchSeq, pending.dna, pending.dna2, pending.pass, searchLength, scratch);
+        }
+    }
+    {
+        // Phase 2: commit in batch order. Exact keys are re-checked and only
+        // anchors created after each snapshot are searched again, so the
+        // result equals committing this batch serially at this point.
+        std::lock_guard<std::mutex> guard(shard.mutex);
+        std::unique_lock<std::shared_mutex> exclusive(shard.snapshot);
+        for (size_t i = 0; i < batch.pending.size(); ++i) {
+            apply_pending_entry(batch.pending[i], shard, &probes[i], &updates);
+        }
+    }
+    // Phase 3: representative, count and variant updates touch only their own
+    // target; updates of one target stay in batch order under its stripe.
+    for (const auto& update : updates) {
+        const size_t stripe = (reinterpret_cast<uintptr_t>(update.target) >> 6) % coarseUpdateStripes_.size();
+        std::lock_guard<std::mutex> guard(coarseUpdateStripes_[stripe]);
+        coarse.apply(update);
+    }
+}
+
 void Dereplicate::flush_all_batches() {
+	drain_sealed_blocks();
 	std::vector<std::shared_ptr<ThreadLocalBatch>> batches;
 	{ std::lock_guard<std::mutex> guard(batch_registry_mtx_); batches = batch_registry_; }
-	for (auto& batch : batches) { flush_batch(*batch); }
+	for (auto& batch : batches) {
+		flush_batch(*batch);
+		free_returned_reads(*batch);
+	}
 }
 
 Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
         barcode_number_to_sample_id_(0), b_usearch_fmt(true), b_singleLine(true), b_pairedInput(false),
-        minCopies(1,0), minCopiesStr("0"), //default minCopies accepts every derep
-		minCopiesSiz(1), minCopiesFastFailThreshold(-1),
+        minCopyRules(1, DerepCopyRule{0, 0}), minCopiesStr("0"), //default accepts every derep
+		minCopiesFastFailThreshold(-1),
 		tmpCnt(0), curBCoffset(0), b_derep_as_fasta_(true), b_derepPerSR(false),
 		b_wroteMapHD(false), b_merge_pairs_derep_(false),merger(nullptr),
 		searchLength(150),
@@ -339,6 +658,10 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
     }
     const string reassignOption = cmdArgs->get("-derepReassign", "0");
     if (reassignOption != "0" && reassignOption != "1") { throw std::invalid_argument("-derepReassign must be 0 or 1"); }
+    const string clusterOption = cmdArgs->get("-derepCoarseClusters", "0");
+    if (clusterOption != "0" && clusterOption != "1") { throw std::invalid_argument("-derepCoarseClusters must be 0 or 1"); }
+    // Explicit final reassignment also requests coarse cluster output.
+    const bool exactOutput = clusterOption != "1" && reassignOption != "1";
     const string qualityOption = cmdArgs->get("-derepStoreQuals", "0");
     if (qualityOption != "0" && qualityOption != "1") { throw std::invalid_argument("-derepStoreQuals must be 0 or 1"); }
     if (qualityOption == "1") {
@@ -360,9 +683,9 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
             if (cmdArgs->get(option) == "1") { throw std::invalid_argument(std::string("-derepStoreQuals requires unmerged input; disable ") + option); }
         }
     }
-    if (identity < CoarseDereplication::identityScale || diffOption == "1" || reassignOption == "1" || qualityOption == "1") {
-        coarse_ = std::make_unique<CoarseDereplication>(identity, homopolymer, diffOption == "1", reassignOption == "1", qualityOption == "1");
-    }
+    const string globalOption = cmdArgs->get("-derepGlobal", "0");
+    if (globalOption != "0" && globalOption != "1") { throw std::invalid_argument("-derepGlobal must be 0 or 1"); }
+    const bool coarseMode = identity < CoarseDereplication::identityScale || diffOption == "1" || reassignOption == "1" || qualityOption == "1";
     const string prefixOption = cmdArgs->contains("-derepPrefix") ? (*cmdArgs)["-derepPrefix"] : "auto";
     if (prefixOption != "auto" && prefixOption != "0" && prefixOption != "1") {
         throw std::invalid_argument("-derepPrefix must be auto, 0, or 1");
@@ -374,7 +697,7 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 	}
 
 	string baseOF = std::filesystem::path(outfile).replace_extension().string();
-    if (coarse_ && coarse_->storesDiffs() && outfile == baseOF + ".diff") {
+    if (coarseMode && diffOption == "1" && outfile == baseOF + ".diff") {
         throw std::invalid_argument("The dereplicate output cannot be its own .diff sidecar; choose a FASTA/FASTQ output filename");
     }
 	mapF = baseOF + ".map";
@@ -387,16 +710,37 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 
 	// Reserve hash map capacity to avoid costly rehashing during heavy dereplication.
 	// Allow user to override via -derep_reserve; default to 500k slots.
-	size_t reserveSize = coarse_ ? 0 : runtimeOpts.derepReserve;
+	size_t reserveSize = coarseMode ? 0 : runtimeOpts.derepReserve;
 // Independent sequence keys can update concurrently. Keep each key in one
 	// shard so occurrence counts, quality evidence, and selection stay atomic.
-	constexpr size_t shardCount = 64;
+    // Approximate groups may stay independent. Exact-prefix and explicitly global
+    // clustering/reassignment retain one index so cross-key matching stays global.
+    // Explicit coarse-cluster output also needs the global index: approximate
+    // matches in different partitions would never be grouped, and the
+    // partitioned mode exists to save memory for exact-parent output.
+    const bool globalCoarse = runtimeOpts.threads <= 1 || globalOption == "1" ||
+        reassignOption == "1" || clusterOption == "1" || identity == CoarseDereplication::identityScale;
+    const size_t shardCount = coarseMode && globalCoarse ? 1 : 64;
 	shards_.reserve(shardCount);
 	for (size_t i = 0; i < shardCount; ++i) {
 		auto shard = std::make_unique<Shard>();
 		shard->tracker.reserve(reserveSize / shardCount + (reserveSize % shardCount != 0));
+        if (coarseMode) {
+            shard->coarse = std::make_unique<CoarseDereplication>(identity, homopolymer, diffOption == "1", reassignOption == "1", qualityOption == "1", exactOutput);
+        }
 		shards_.push_back(std::move(shard));
 	}
+    if (coarseMode) { coarse_ = shards_.front()->coarse.get(); }
+    if (coarseMode && shardCount > 1) { coarseWorkPool_ = std::make_unique<PartitionWorkPool>(shardCount); }
+    parallelGlobalCoarse_ = coarseMode && shardCount == 1 && runtimeOpts.threads > 1;
+    orderedAdmission_ = runtimeOpts.threads > 1;
+    if (orderedAdmission_ && !coarseWorkPool_ && !parallelGlobalCoarse_) { orderedPool_ = std::make_unique<PartitionWorkPool>(shardCount); }
+    // Enough queued blocks to keep the committer busy while every other worker
+    // processes its next block; queued blocks keep their reads in memory.
+    commitBacklog_ = std::max<size_t>(4, 2 * size_t(runtimeOpts.threads));
+    // A few blocks' worth: enough for every lane to have work, small enough
+    // that the committer's final drain stays short.
+    updateBacklog_ = 256 * size_t(runtimeOpts.threads);
 
 
 	if (runtimeOpts.hasDereSizeFmt && runtimeOpts.disableUsearchSizeFmt) {
@@ -407,45 +751,40 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 	}
 
 	if (runtimeOpts.hasMinDerepCopies) {
-		minCopies[0] = -1;//in this case reset to -1 the first entry..
 		minCopiesStr = runtimeOpts.minDerepCopies;
 		string x = runtimeOpts.minDerepCopies;
+		std::replace(x.begin(), x.end(), ';', ','); // "8:1;3:4" is accepted like "8:1,3:4"
+		minCopyRules.clear();
 
 		vector<string> xs = splitByCommas(x, ',');
 		for (size_t i = 0; i < xs.size(); i++) {
+			if (xs[i].empty()) { continue; }
 			vector<string> tmp = splitByComma(xs[i], false, ':');
 			if (tmp.size() > 2) {
 				cerr << "Derep string " << xs[i] << " has to be two integers seqparated by \":\"\n"; exit(623);
 			}
-			int pos = 1; int cnt = -1;
-			if (tmp.size() == 1) {//this is the 1 sample position, if not set
-				cnt = atoi(tmp[0].c_str());
-			}else{
-				pos = atoi(tmp[1].c_str());//number of samples
-				cnt = atoi(tmp[0].c_str());//16s copy numbers
+			// A bare number counts copies across all samples; "X:Y" needs X copies in each of Y samples.
+			DerepCopyRule rule{ atoll(tmp[0].c_str()), 0 };
+			if (tmp.size() == 2) {
+				rule.samples = atoi(tmp[1].c_str());//number of samples
+				if (rule.samples <= 0) { cerr << "wrong derplicate position (<=0):" << xs[i] << endl; exit(312); }
+				if (rule.samples > 3000) { cerr << "too large derplicate position (>3000):" << xs[i] << endl; exit(313); }
 			}
-			if (pos <= 0) { cerr << "wrong derplicate position (<=0):" << xs[i] << endl; exit(312); }
-			if (pos > 3000) { cerr << "too large derplicate position (>3000):" << xs[i] << endl; exit(313); }
-			if (minCopies.size() < (size_t)pos) {
-				minCopies.resize(pos, -1);
-			}
-			minCopies[pos-1] = cnt;
+			minCopyRules.push_back(rule);
 		}
-		minCopiesSiz = minCopies.size();
-		//minCopies = atoi((*cmdArgs)["-min_derep_copies"].c_str());
-
-	}
-   else {
-		minCopiesSiz = minCopies.size();
+		if (minCopyRules.empty()) { minCopyRules.push_back(DerepCopyRule{ 0, 0 }); }
 	}
 
+	// Smallest total count any rule can pass with (-1: some rule accepts everything).
 	minCopiesFastFailThreshold = -1;
-	for (size_t i = 0; i < minCopies.size(); ++i) {
-		if (minCopies[i] <= 0) {
-			continue;
+	for (const DerepCopyRule& rule : minCopyRules) {
+		const int64_t needed = rule.copies * std::max(1, rule.samples);
+		if (needed <= 0) {
+			minCopiesFastFailThreshold = -1;
+			break;
 		}
-		if (minCopiesFastFailThreshold == -1 || minCopies[i] < minCopiesFastFailThreshold) {
-			minCopiesFastFailThreshold = minCopies[i];
+		if (minCopiesFastFailThreshold == -1 || needed < minCopiesFastFailThreshold) {
+			minCopiesFastFailThreshold = needed;
 		}
 	}
 	// set up output format of dereplication:
@@ -488,12 +827,12 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
     const int fixedLength = mf->fixedDereplicationLength(searchWithMerg);
     const int clusteringCap = mf->dereplicationLengthLimit();
     const bool explicitCap = mf->hasExplicitDerepSearchLength() && searchLength > 0;
-    prefixMode_ = !coarse_ && (prefixOption == "1" || (prefixOption == "auto" && !explicitCap && fixedLength == 0));
-    if (coarse_) {
+    prefixMode_ = (!coarse_ || coarse_->outputsExact()) && (prefixOption == "1" || (prefixOption == "auto" && !explicitCap && fixedLength == 0));
+    if (prefixMode_) {
+        searchLength = clusteringCap;
+    } else if (coarse_) {
         if (!explicitCap) { searchLength = -1; }
         if (clusteringCap > 0 && (searchLength < 0 || searchLength > clusteringCap)) { searchLength = clusteringCap; }
-    } else if (prefixMode_) {
-        searchLength = clusteringCap;
     } else if (prefixOption == "auto") {
         if (!explicitCap && fixedLength > 0) { searchLength = fixedLength; }
         if (clusteringCap > 0 && (searchLength < 0 || searchLength > clusteringCap)) {
@@ -502,6 +841,17 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
     }
     cerr << "Dereplication matching: " << (coarse_ ? cmdArgs->get("-derepIdentity", "100") + "% streaming substitution clusters" : (prefixMode_ ? "100% prefix" : "exact length"))
          << (searchLength > 0 ? " (search cap " + to_string(searchLength) + ")" : " (full logical sequence)") << "\n";
+    if (coarse_) {
+        cerr << "Coarse dereplication: " << shards_.size() << (shards_.size() > 1 ?
+            " independent partitions; no final consolidation\n" : " global index\n");
+        if (coarseWorkPool_) { cerr << "Coarse scheduling: shared partition work pool (existing workers)\n"; }
+        if (parallelGlobalCoarse_) { cerr << "Coarse scheduling: concurrent snapshot searches, ordered commits\n"; }
+    }
+    // Prefix mode: FASTA output collects no quality evidence from deferred
+    // reads, so only their sample counts need to be kept; retained variants and
+    // FASTQ output keep the read (as before). Exact-key mode keeps counts only.
+    deferCountsOnly_ = b_derep_as_fasta_ && !(coarse_ && (coarse_->storesQualities() || coarse_->storesDiffs()));
+    deferredKeyCapPerShard_ = std::max<size_t>(1, kDeferredKeyCap / std::max<size_t>(1, shards_.size()));
 }
 
 Dereplicate::~Dereplicate() {
@@ -562,13 +912,18 @@ Dereplicate::LifecyclePause::~LifecyclePause() {
 	owner.lifecycle_wait_cv_.notify_all();
 }
 
-bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* filter) {
+bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* filter,
+    const DerepTierRoute* route, bool* queued) {
+    if (queued) { *queued = false; }
     if (coarse_ && coarse_->storesQualities() && bool(dna2) != b_pairedInput) {
         throw std::invalid_argument("-derepStoreQuals requires complete pairs for paired input, or consistently single-end input");
     }
-    if (coarse_ && coarse_->storesQualities() && dna2 && dna2->length() == 0) { return false; }
 	ThreadLocalBatch& threadBatch = get_or_create_thread_batch();
 	ActiveAddGuard activeGuard(*this, threadBatch);
+    if (coarse_ && coarse_->storesQualities() && dna2 && dna2->mem_length() == 0) {
+        skippedEmptyMates_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
 	//1st build hash of DNA
 	if (!dna->getBarcodeDetected()) {
 		return false;
@@ -600,6 +955,9 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* fil
         if (dna_merged && !mergedFilter->checkMergedDNA(dna_merged)) {
             dna_merged.reset();
         }
+        // Only an accepted consensus marks its mates as merged (length and
+        // overlap errors feed representative selection and the report).
+        if (dna_merged) { dna->adoptMergeStats(*dna_merged); dna2->adoptMergeStats(*dna_merged); }
 	}
 
     if (dna_merged && searchWithMerg){
@@ -618,8 +976,15 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* fil
 		srchSeqPtr = &srchSeqBuffer;
 	}
 	const string& srchSeq = *srchSeqPtr;
-	if ((prefixMode_ || coarse_) && srchSeq.empty()) { return false; }
+	if ((prefixMode_ || (coarse_ && !coarse_->storageOnly())) && srchSeq.empty()) {
+        skippedEmptyKeys_.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
 
+    // Exact dereplication is keyed by R1/search sequence, including in coarse
+    // mode. Different R2s must reach the same owner to compete as best seeds.
+    const size_t keyHash = coarse_ && coarse_->storageOnly() && shards_.size() > 1 ?
+        coarse_->storagePartitionHash(srchSeq) : robin_hood::hash<string>{}(srchSeq);
 	threadBatch.pending.push_back(PendingDerepEntry{
 		srchSeq,
 		dna,
@@ -628,15 +993,316 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* fil
 		MrgPos1,
 		sample_id,
 		pass,
-		robin_hood::hash<string>{}(srchSeq) % shards_.size()
+		keyHash % shards_.size()
 		});
+	if (route) { threadBatch.pending.back().withheld = true; threadBatch.pending.back().route = *route; }
+	if (queued) { *queued = true; }
+	// Inside an ordered block, entries are applied when the block is sealed.
 	bool flushNow = threadBatch.pending.size() >= kThreadBatchFlushThreshold;
 
-	if (flushNow || lifecycle_pause_.load(std::memory_order_acquire)) {
+	if (threadBatch.block == kNoBlock && (flushNow || lifecycle_pause_.load(std::memory_order_acquire))) {
 		flush_batch(threadBatch);
 	}
 
 	return pass;
+}
+
+uint64_t Dereplicate::reserveBlock() {
+	return orderedAdmission_ ? nextBlock_.fetch_add(1, std::memory_order_relaxed) : kNoBlock;
+}
+
+void Dereplicate::beginBlock(uint64_t block) {
+	if (block == kNoBlock) { return; }
+	ThreadLocalBatch& batch = get_or_create_thread_batch();
+	if (!batch.pending.empty()) {
+		// Entries added outside any block keep their unordered path.
+		ActiveAddGuard activeGuard(*this, batch);
+		flush_batch(batch);
+	}
+	batch.block = block;
+}
+
+void Dereplicate::account_search_keys(const std::vector<PendingDerepEntry>& entries) {
+	uint64_t searchBases = 0;
+	for (const auto& entry : entries) { searchBases += entry.srchSeq.size(); }
+	srch_seq_total_len_.fetch_add(searchBases, std::memory_order_relaxed);
+	srch_seq_count_.fetch_add(entries.size(), std::memory_order_relaxed);
+}
+
+void Dereplicate::endBlock() {
+	ThreadLocalBatch& batch = get_or_create_thread_batch();
+	if (batch.block == kNoBlock) { return; }
+	const uint64_t block = batch.block;
+	batch.block = kNoBlock;
+	free_returned_reads(batch);
+	bool queued = false;
+	{
+		ActiveAddGuard activeGuard(*this, batch);
+		std::vector<PendingDerepEntry> entries;
+		entries.swap(batch.pending);
+		batch.pending.reserve(kThreadBatchFlushThreshold);
+		account_search_keys(entries);
+		if (parallelGlobalCoarse_ && !entries.empty()) {
+			// The candidate search (most of the work) runs here, concurrently with
+			// other workers, against a snapshot; the ordered commit reuses it.
+			auto& shard = *shards_.front();
+			thread_local CoarseDereplication::SearchScratch scratch;
+			for (size_t begin = 0; begin < entries.size(); begin += kProbeChunk) {
+				// The shared lock prefers readers: step aside for a waiting commit.
+				while (commitWaiting_.load(std::memory_order_acquire)) { commitWaiting_.wait(true, std::memory_order_acquire); }
+				std::shared_lock<std::shared_mutex> snapshot(shard.snapshot);
+				const size_t end = std::min(entries.size(), begin + kProbeChunk);
+				for (size_t i = begin; i < end; ++i) {
+					auto& pending = entries[i];
+					if (prefixMode_ && !pending.pass) { continue; } // deferred prefix evidence, no search
+					pending.probe = shard.coarse->probe(pending.srchSeq, pending.dna, pending.dna2, pending.pass, searchLength, scratch);
+				}
+			}
+		}
+		std::vector<SealedBlock> ready;
+		std::unique_lock<std::mutex> submitLock(submitMutex_, std::defer_lock);
+		bool commit = false;
+		{
+			std::lock_guard<std::mutex> lock(sequenceMutex_);
+			sealed_.emplace(block, SealedBlock{std::move(entries), &batch});
+			while (!sealed_.empty() && sealed_.begin()->first == nextSubmit_) {
+				ready.push_back(std::move(sealed_.begin()->second));
+				sealed_.erase(sealed_.begin());
+				++nextSubmit_;
+			}
+			// An earlier block is still being processed: its worker (or whoever
+			// completes the gap) applies this block after it.
+			if (ready.empty()) { return; }
+			// Queued, or the submit lock taken, before releasing sequenceMutex_,
+			// so whoever takes the next blocks can only enqueue them after these.
+			if (parallelGlobalCoarse_) { commit = queue_global_commits(ready); }
+			else { submitLock.lock(); }
+		}
+		if (!parallelGlobalCoarse_) { apply_blocks_ordered(ready, submitLock, &batch); }
+		else if (commit) { commit_global_blocks(); }
+		else { queued = true; }
+	}
+	// Outside the activity guard: a lifecycle pause need not wait for this.
+	if (queued) { wait_for_commit_backlog(); }
+}
+
+bool Dereplicate::queue_global_commits(std::vector<SealedBlock>& blocks) {
+	std::lock_guard<std::mutex> lock(commitMutex_);
+	if (commitError_) { std::rethrow_exception(commitError_); }
+	for (auto& block : blocks) { commitQueue_.push_back(std::move(block)); }
+	if (committing_) { return false; }
+	committing_ = true;
+	return true;
+}
+
+void Dereplicate::commit_global_blocks() {
+	// Only one committer at a time (committing_). It drains the queue, including
+	// blocks queued meanwhile, and every update lane before it returns, so
+	// queued work always has an active committer (which a lifecycle pause
+	// waits for) and helpers only ever run while it is active.
+	std::unique_lock<std::mutex> lock(commitMutex_);
+	while (!commitError_) {
+		if (!commitQueue_.empty()) {
+			SealedBlock block = std::move(commitQueue_.front());
+			commitQueue_.pop_front();
+			commitSpace_.notify_all();
+			lock.unlock();
+			try {
+				commit_global_block(block);
+				return_reads(block.owner, std::move(block.entries));
+			} catch (...) {
+				lock.lock();
+				fail_commits_locked(std::current_exception());
+				continue;
+			}
+			lock.lock();
+		} else if (!apply_ready_lane(lock)) {
+			if (!pendingUpdates_) { break; }
+			commitSpace_.wait(lock); // the remaining lanes are being applied by helpers
+		}
+	}
+	// After a failure, lanes still being applied must finish before returning.
+	commitSpace_.wait(lock, [this] { return !pendingUpdates_; });
+	committing_ = false;
+	commitSpace_.notify_all();
+	if (commitError_) { std::rethrow_exception(commitError_); }
+}
+
+void Dereplicate::commit_global_block(SealedBlock& block) {
+	auto& shard = *shards_.front();
+	thread_local std::vector<CoarseDereplication::Update> updates;
+	updates.clear();
+	{
+		// Commit in block order. Exact keys are re-checked and only anchors
+		// created after each probe's snapshot are searched again, so the
+		// result equals applying these entries serially at this point.
+		std::lock_guard<std::mutex> guard(shard.mutex);
+		commitWaiting_.store(true, std::memory_order_release);
+		std::unique_lock<std::shared_mutex> exclusive(shard.snapshot);
+		commitWaiting_.store(false, std::memory_order_release);
+		commitWaiting_.notify_all();
+		for (auto& pending : block.entries) { apply_pending_entry(pending, shard, &pending.probe, &updates); }
+	}
+	post_updates(updates, block.owner);
+}
+
+void Dereplicate::post_updates(std::vector<CoarseDereplication::Update>& updates, ThreadLocalBatch* owner) {
+	if (updates.empty()) { return; }
+	// Updates only touch their own target, and a target always maps to the
+	// same lane: grouping keeps each target's updates in commit order.
+	thread_local std::array<std::vector<CoarseDereplication::Update>, kUpdateLanes> byLane;
+	for (auto& update : updates) {
+		byLane[(reinterpret_cast<uintptr_t>(update.target) >> 6) % kUpdateLanes].push_back(std::move(update));
+	}
+	updates.clear();
+	std::lock_guard<std::mutex> lock(commitMutex_);
+	for (size_t id = 0; id < kUpdateLanes; ++id) {
+		if (byLane[id].empty()) { continue; }
+		auto& lane = updateLanes_[id];
+		pendingUpdates_ += byLane[id].size();
+		if (lane.queue.empty() && !lane.running) { readyLanes_.push_back(id); }
+		lane.queue.push_back(UpdateGroup{std::move(byLane[id]), owner});
+		byLane[id].clear();
+	}
+	commitSpace_.notify_all();
+}
+
+bool Dereplicate::apply_ready_lane(std::unique_lock<std::mutex>& lock) {
+	if (readyLanes_.empty()) { return false; }
+	const size_t id = readyLanes_.front();
+	readyLanes_.pop_front();
+	auto& lane = updateLanes_[id];
+	lane.running = true;
+	std::deque<UpdateGroup> work;
+	work.swap(lane.queue);
+	lock.unlock();
+	size_t count = 0;
+	std::exception_ptr error;
+	try {
+		auto& coarse = *shards_.front()->coarse;
+		for (const auto& group : work) {
+			for (const auto& update : group.updates) {
+				// Stripes serialize with unordered flushes (flush_global_coarse).
+				const size_t stripe = (reinterpret_cast<uintptr_t>(update.target) >> 6) % coarseUpdateStripes_.size();
+				std::lock_guard<std::mutex> guard(coarseUpdateStripes_[stripe]);
+				coarse.apply(update);
+			}
+		}
+	} catch (...) { error = std::current_exception(); }
+	for (auto& group : work) {
+		count += group.updates.size();
+		return_reads(group.owner, std::move(group.updates));
+	}
+	work.clear();
+	lock.lock();
+	lane.running = false;
+	pendingUpdates_ -= count;
+	if (error) { fail_commits_locked(error); }
+	else if (!lane.queue.empty()) { readyLanes_.push_back(id); }
+	commitSpace_.notify_all();
+	return true;
+}
+
+void Dereplicate::fail_commits_locked(std::exception_ptr error) {
+	if (!commitError_) { commitError_ = error; }
+	commitQueue_.clear();
+	for (auto& lane : updateLanes_) {
+		for (const auto& group : lane.queue) { pendingUpdates_ -= group.updates.size(); }
+		lane.queue.clear();
+	}
+	readyLanes_.clear();
+	commitSpace_.notify_all();
+}
+
+void Dereplicate::wait_for_commit_backlog() {
+	// Queued blocks and updates hold their reads: while either backlog is
+	// exceeded, apply updates rather than start a new block.
+	std::unique_lock<std::mutex> lock(commitMutex_);
+	while (committing_ && !commitError_ &&
+		(commitQueue_.size() > commitBacklog_ || pendingUpdates_ > updateBacklog_)) {
+		if (!apply_ready_lane(lock)) { commitSpace_.wait(lock); }
+	}
+	if (commitError_) { std::rethrow_exception(commitError_); }
+}
+
+// Freeing a read in another thread's malloc arena contends with that thread's
+// own allocations, so committed entries and applied updates go back to the
+// producer that allocated them; it frees them before its next block.
+void Dereplicate::return_reads(ThreadLocalBatch* owner, std::vector<PendingDerepEntry>&& entries) {
+	if (!owner || entries.empty()) { return; }
+	std::lock_guard<std::mutex> lock(owner->returnedMutex);
+	owner->returnedEntries.push_back(std::move(entries));
+}
+
+void Dereplicate::return_reads(ThreadLocalBatch* owner, std::vector<CoarseDereplication::Update>&& updates) {
+	if (!owner || updates.empty()) { return; }
+	std::lock_guard<std::mutex> lock(owner->returnedMutex);
+	owner->returnedUpdates.push_back(std::move(updates));
+}
+
+void Dereplicate::free_returned_reads(ThreadLocalBatch& batch) {
+	std::vector<std::vector<PendingDerepEntry>> entries;
+	std::vector<std::vector<CoarseDereplication::Update>> updates;
+	{
+		std::lock_guard<std::mutex> lock(batch.returnedMutex);
+		entries.swap(batch.returnedEntries);
+		updates.swap(batch.returnedUpdates);
+	}
+}
+
+void Dereplicate::apply_blocks_ordered(std::vector<SealedBlock>& blocks,
+	std::unique_lock<std::mutex>& submitLock, ThreadLocalBatch* self) {
+	struct Task { size_t block, shard; std::vector<size_t> indices; };
+	std::vector<Task> tasks;
+	std::vector<PartitionWorkPool::Work> work;
+	std::vector<std::vector<size_t>> grouped(shards_.size());
+	for (size_t b = 0; b < blocks.size(); ++b) {
+		for (size_t i = 0; i < blocks[b].entries.size(); ++i) { grouped[blocks[b].entries[i].shard].push_back(i); }
+		for (size_t s = 0; s < grouped.size(); ++s) {
+			if (grouped[s].empty()) { continue; }
+			work.push_back({s, grouped[s].size()});
+			tasks.push_back({b, s, std::move(grouped[s])});
+			grouped[s].clear();
+		}
+	}
+	PartitionWorkPool& pool = coarseWorkPool_ ? *coarseWorkPool_ : *orderedPool_;
+	// A shard's jobs run in enqueue order, i.e. block order; different shards
+	// (independent keys) run concurrently on the workers waiting here.
+	pool.run(work, [&](size_t index) {
+		const Task& task = tasks[index];
+		auto& shard = *shards_[task.shard];
+		std::lock_guard<std::mutex> guard(shard.mutex);
+		for (size_t entry : task.indices) {
+			apply_pending_entry(blocks[task.block].entries[entry], shard);
+		}
+	}, [&submitLock] { submitLock.unlock(); });
+	if (submitLock.owns_lock()) { submitLock.unlock(); }
+	// This thread may have taken over blocks sealed by other producers. Freeing
+	// their reads here would lock those producers' malloc arenas (and did, for up
+	// to half of all arena lock waits): hand them back to be freed by their owner.
+	for (auto& block : blocks) {
+		if (block.owner != self) { return_reads(block.owner, std::move(block.entries)); }
+	}
+}
+
+void Dereplicate::drain_sealed_blocks() {
+	// Caller holds LifecyclePause. Only blocks after a missing (failed) block
+	// can still be waiting here; apply them in order.
+	std::vector<SealedBlock> ready;
+	std::unique_lock<std::mutex> submitLock(submitMutex_, std::defer_lock);
+	bool commit = false;
+	{
+		std::lock_guard<std::mutex> lock(sequenceMutex_);
+		if (sealed_.empty()) { return; }
+		for (auto& entry : sealed_) { ready.push_back(std::move(entry.second)); }
+		nextSubmit_ = sealed_.rbegin()->first + 1;
+		sealed_.clear();
+		if (parallelGlobalCoarse_) { commit = queue_global_commits(ready); }
+		else { submitLock.lock(); }
+	}
+	if (!parallelGlobalCoarse_) { apply_blocks_ordered(ready, submitLock, nullptr); }
+	// No producer is active, so no committer is running either.
+	else if (commit) { commit_global_blocks(); }
 }
 
 void Dereplicate::BCnamesAdding(Filters* fil) {
@@ -657,46 +1323,162 @@ void Dereplicate::reset() {
 	//passedSize = 0; 
 	tmpCnt = 0;
 	//barcode_number_to_sample_id_.resize(0);
-	for (auto& shard : shards_) {
-		std::lock_guard<std::mutex> guard(shard->mutex);
-		shard->tracker.clear();
-		shard->rejected.clear();
-	}
-	if (coarse_) { coarse_->clear(); }
+	clear_shards();
+    if (coarseWorkPool_) { coarseWorkPool_->resetStats(); }
 	srch_seq_total_len_.store(0, std::memory_order_release);
 	srch_seq_count_.store(0, std::memory_order_release);
+    skippedEmptyMates_.store(0, std::memory_order_relaxed);
+    skippedEmptyKeys_.store(0, std::memory_order_relaxed);
 	lifecycle_pause_.store(false, std::memory_order_release);
 	lifecycle_wait_cv_.notify_all();
 }
+void Dereplicate::clear_shards() {
+    // Caller holds LifecyclePause. Freeing the dereplication tables is a large
+    // part of the end of a run; shards are independent, so free them
+    // concurrently on the otherwise idle workers.
+    deferredEvidenceBytes_.store(0, std::memory_order_relaxed);
+    auto clearOne = [this](size_t i) {
+        auto& shard = *shards_[i];
+        std::lock_guard<std::mutex> guard(shard.mutex);
+        shard.tracker.clear();
+        shard.rejected.clear();
+        shard.rejectedTallies.clear();
+        shard.deferredCounts.clear();
+        shard.deferredEvidence.clear();
+        if (shard.coarse) { shard.coarse->clear(); }
+        shard.admission = {};
+    };
+    ThreadPool* pool = nullptr;
+    if (shards_.size() > 1 && ThreadPool::configured_thread_count() > 1) {
+        ThreadPool& candidate = ThreadPool::instance();
+        if (candidate.worker_index_of_current_thread() < 0) { pool = &candidate; }
+    }
+    if (!pool) {
+        for (size_t i = 0; i < shards_.size(); ++i) { clearOne(i); }
+        return;
+    }
+    std::vector<std::future<void>> done;
+    done.reserve(shards_.size());
+    std::exception_ptr failure;
+    for (size_t i = 0; i < shards_.size(); ++i) {
+        try { done.push_back(pool->submit([&clearOne, i]() { clearOne(i); })); }
+        catch (...) { failure = std::current_exception(); break; }
+    }
+    for (auto& task : done) {
+        try { task.get(); }
+        catch (...) { if (!failure) { failure = std::current_exception(); } }
+    }
+    if (failure) { std::rethrow_exception(failure); }
+}
+
 bool DNAuPointerCompare(shared_ptr<DNAunique> l, shared_ptr<DNAunique> r) { 
 	return l->totalSum() > r->totalSum(); 
 }
 
-std::vector<Dereplicate::DerepOutputGroup> Dereplicate::outputGroups(std::vector<uint64_t>& recoveredCounts) {
+std::vector<Dereplicate::DerepOutputGroup> Dereplicate::outputGroups(std::vector<uint64_t>& recoveredCounts, ThreadPool* pool) {
     // Caller holds LifecyclePause and has flushed every producer batch.
-    vector<DerepOutputGroup> groups;
-    groups.reserve(tracker_size_total());
-    if (coarse_) {
-        for (const auto& group : coarse_->groups()) {
-            groups.push_back({group->representatives.totalSum(), group->key(), &group->representatives, {}});
+    // Every shard fills its own slice: coarse groups of all shards first, then
+    // the exact trackers, each in shard order (the order of a serial pass).
+    const size_t shardCount = shards_.size();
+    std::vector<size_t> coarseStart(shardCount + 1, 0), trackerStart(shardCount + 1, 0);
+    size_t total = 0;
+    for (size_t s = 0; s < shardCount; ++s) {
+        coarseStart[s] = total;
+        if (coarse_) {
+            const auto& coarse = *shards_[s]->coarse;
+            total += coarse.outputsExact() ? coarse.exactGroups().size() : coarse.groups().size();
         }
-        return groups;
     }
-    for (const auto& shard : shards_) {
-        for (const auto& entry : shard->tracker) {
+    coarseStart[shardCount] = total;
+    for (size_t s = 0; s < shardCount; ++s) { trackerStart[s] = total; total += shards_[s]->tracker.size(); }
+    trackerStart[shardCount] = total;
+    vector<DerepOutputGroup> groups(total);
+    auto collect = [&](size_t s) {
+        const auto& shard = *shards_[s];
+        size_t out = coarseStart[s];
+        if (coarse_) {
+            if (shard.coarse->outputsExact()) {
+                for (const auto& [key, assignment] : shard.coarse->exactGroups()) {
+                    groups[out++] = {assignment.representatives->totalSum(), key, assignment.representatives.get(), {}};
+                }
+            } else {
+                for (const auto& group : shard.coarse->groups()) {
+                    groups[out++] = {group->representatives.totalSum(), group->key(), &group->representatives, {}};
+                }
+            }
+        }
+        out = trackerStart[s];
+        for (const auto& entry : shard.tracker) {
             assert(entry.second);
-            groups.push_back({entry.second->totalSum(), entry.first, entry.second.get(), {}});
+            groups[out++] = {entry.second->totalSum(), entry.first, entry.second.get(), {}};
         }
-    }
-    if (!prefixMode_) { return groups; }
-    auto keyLess = [](const auto& a, const auto& b) { return a.key < b.key; };
+    };
+    if (pool && shardCount > 1) { runOnPool(*pool, shardCount, collect); }
+    else { for (size_t s = 0; s < shardCount; ++s) { collect(s); } }
     auto addCount = [](uint64_t& target, uint64_t count) {
         if (count > std::numeric_limits<uint64_t>::max() - target) {
-            throw std::overflow_error("Dereplication prefix count overflow");
+            throw std::overflow_error("Dereplication recovered count overflow");
         }
         target += count;
     };
-    sort(groups.begin(), groups.end(), keyLess);
+    // Deferred non-passing reads join the group they are attached to: counts
+    // now, quality/variant evidence (members) and sample tallies at write time.
+    auto recoverMembers = [&addCount](DerepOutputGroup& group, DNAuniqSet* deferred, std::vector<uint64_t>& recovered) {
+        addCount(group.count, deferred->totalSum());
+        group.members.push_back(deferred);
+        for (auto subgroup = deferred->begin(); subgroup != deferred->end(); ++subgroup) {
+            for (const auto& occurrence : subgroup->second->getDerepMap()) {
+                if (occurrence.first >= 0 && static_cast<size_t>(occurrence.first) < recovered.size()) {
+                    addCount(recovered[occurrence.first], occurrence.second);
+                }
+            }
+        }
+    };
+    auto recoverCounts = [&addCount](DerepOutputGroup& group, int sample, uint64_t copies, std::vector<uint64_t>& recovered) {
+        addCount(group.count, copies);
+        group.recovered.emplace_back(sample, copies);
+        if (sample >= 0 && static_cast<size_t>(sample) < recovered.size()) { addCount(recovered[sample], copies); }
+    };
+    if (!prefixMode_) {
+        if (!defersNonPassing()) { return groups; }
+        // Exact keys: a deferred read belongs to the passing group of its own
+        // key, which lives in the same shard (same key hash). Keys without a
+        // passing group are dropped here. Shards touch disjoint group ranges.
+        std::vector<std::vector<uint64_t>> recoveredPerShard(shardCount, std::vector<uint64_t>(recoveredCounts.size(), 0));
+        auto attach = [&](size_t s) {
+            const auto& deferredCounts = shards_[s]->deferredCounts;
+            const auto& deferredEvidence = shards_[s]->deferredEvidence;
+            if (deferredCounts.size() == 0 && deferredEvidence.empty()) { return; }
+            auto recoverGroup = [&](DerepOutputGroup& group) {
+                const uint64_t key = deferredKeyHash(group.key);
+                if (auto reads = deferredEvidence.find(key); reads != deferredEvidence.end()) {
+                    for (const auto& read : reads->second) {
+                        addCount(group.count, 1);
+                        group.evidence.push_back(&read);
+                        if (read.sample >= 0 && static_cast<size_t>(read.sample) < recoveredPerShard[s].size()) {
+                            addCount(recoveredPerShard[s][read.sample], 1);
+                        }
+                    }
+                }
+                if (auto one = deferredCounts.single.find(key); one != deferredCounts.single.end()) {
+                    recoverCounts(group, one->second.sample, one->second.copies, recoveredPerShard[s]);
+                }
+                if (auto several = deferredCounts.multi.find(key); several != deferredCounts.multi.end()) {
+                    for (const auto& [sample, copies] : several->second) { recoverCounts(group, sample, copies, recoveredPerShard[s]); }
+                }
+            };
+            for (size_t g = coarseStart[s]; g < coarseStart[s + 1]; ++g) { recoverGroup(groups[g]); }
+            for (size_t g = trackerStart[s]; g < trackerStart[s + 1]; ++g) { recoverGroup(groups[g]); }
+        };
+        if (pool && shardCount > 1) { runOnPool(*pool, shardCount, attach); }
+        else { for (size_t s = 0; s < shardCount; ++s) { attach(s); } }
+        for (const auto& part : recoveredPerShard) {
+            for (size_t j = 0; j < recoveredCounts.size(); ++j) { addCount(recoveredCounts[j], part[j]); }
+        }
+        return groups;
+    }
+    auto keyLess = [](const auto& a, const auto& b) { return a.key < b.key; };
+    sortOnPool(groups, keyLess, pool); // keys are unique: a total order
     vector<DerepOutputGroup> anchors;
     anchors.reserve(groups.size());
     // A prefix is adjacent to its first extension. Traverse backwards so its
@@ -712,26 +1494,31 @@ std::vector<Dereplicate::DerepOutputGroup> Dereplicate::outputGroups(std::vector
             anchors.push_back(std::move(groups[i]));
         }
     }
-    sort(anchors.begin(), anchors.end(), keyLess);
+    // Anchors were collected walking the key-sorted groups backwards, so they
+    // are in descending key order; with unique keys, reversing equals sorting.
+    std::reverse(anchors.begin(), anchors.end());
+    assert(std::is_sorted(anchors.begin(), anchors.end(), keyLess));
+    // A deferred key attaches to the anchor it is a prefix of (the first in
+    // lexicographic order), or to the anchor that is its prefix; else it is dropped.
+    auto findAnchor = [&anchors](std::string_view key) {
+        auto match = lower_bound(anchors.begin(), anchors.end(), key,
+            [](const auto& group, std::string_view value) { return group.key < value; });
+        if (match == anchors.end() || !match->key.starts_with(key)) {
+            if (match == anchors.begin()) { return anchors.end(); }
+            --match;
+            if (!key.starts_with(match->key)) { return anchors.end(); }
+        }
+        return match;
+    };
     for (const auto& shard : shards_) {
         for (const auto& entry : shard->rejected) {
-            const std::string_view key = entry.first;
-            auto match = lower_bound(anchors.begin(), anchors.end(), key,
-                [](const auto& group, std::string_view value) { return group.key < value; });
-            if (match == anchors.end() || !match->key.starts_with(key)) {
-                if (match == anchors.begin()) { continue; }
-                --match;
-                if (!key.starts_with(match->key)) { continue; }
-            }
-            addCount(match->count, entry.second->totalSum());
-            match->members.push_back(entry.second.get());
-            for (auto subgroup = entry.second->begin(); subgroup != entry.second->end(); ++subgroup) {
-                for (const auto& occurrence : subgroup->second->getDerepMap()) {
-                    if (occurrence.first >= 0 && static_cast<size_t>(occurrence.first) < recoveredCounts.size()) {
-                        addCount(recoveredCounts[occurrence.first], occurrence.second);
-                    }
-                }
-            }
+            auto match = findAnchor(entry.first);
+            if (match != anchors.end()) { recoverMembers(*match, entry.second.get(), recoveredCounts); }
+        }
+        for (const auto& entry : shard->rejectedTallies) {
+            auto match = findAnchor(entry.first);
+            if (match == anchors.end()) { continue; }
+            for (const auto& [sample, copies] : entry.second.counts) { recoverCounts(*match, sample, copies, recoveredCounts); }
         }
     }
     return anchors;
@@ -744,14 +1531,12 @@ void Dereplicate::finishMap() {
 	//hence now it the point to add this to map
 	//passedSize = 0; 
 	tmpCnt = 0;
-	for (auto& shard : shards_) {
-		std::lock_guard<std::mutex> guard(shard->mutex);
-		shard->tracker.clear();
-		shard->rejected.clear();
-	}
-	if (coarse_) { coarse_->clear(); }
+	clear_shards();
+    if (coarseWorkPool_) { coarseWorkPool_->resetStats(); }
 	srch_seq_total_len_.store(0, std::memory_order_release);
 	srch_seq_count_.store(0, std::memory_order_release);
+    skippedEmptyMates_.store(0, std::memory_order_relaxed);
+    skippedEmptyKeys_.store(0, std::memory_order_relaxed);
 	const string tmpMap = mapF + ".tmp";
 	const string bakMap = mapF + ".bak";
 	std::ifstream inputFile(mapF.c_str(), ios::in);
@@ -849,21 +1634,12 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 		}
 	};
 
-    std::ofstream diffOutput, subclusterOutput, subclusterOutputMate, subclusterFastq, subclusterFastqMate;
-    const bool pairedVariants = coarse_ && coarse_->storesQualities() && b_pairedInput;
-    const string subclusterFastqPath = baseOF2 + (pairedVariants ? ".subclusters.1.fq" : ".subclusters.fq");
-    const string subclusterFastqMatePath = baseOF2 + ".subclusters.2.fq";
+    std::ofstream diffOutput, subclusterOutput, subclusterOutputMate;
+    const bool variantHq = coarse_ && coarse_->storesQualities();
+    const bool pairedVariants = variantHq && b_pairedInput;
     const string subclusterPath = baseOF2 + (pairedVariants ? ".subclusters.1.fna" : ".subclusters.fna");
     const string subclusterMatePath = baseOF2 + ".subclusters.2.fna";
     const string diffPath = baseOF2 + ".diff";
-    if (coarse_ && coarse_->storesQualities()) {
-        subclusterFastq.open(subclusterFastqPath, ios::out | ios::trunc);
-        ensureOpen(subclusterFastq, subclusterFastqPath, "exact subcluster FASTQ");
-        if (pairedVariants) {
-            subclusterFastqMate.open(subclusterFastqMatePath, ios::out | ios::trunc);
-            ensureOpen(subclusterFastqMate, subclusterFastqMatePath, "exact subcluster mate FASTQ");
-        }
-    }
     if (coarse_ && coarse_->storesDiffs()) {
         diffOutput.open(diffPath, ios::out | ios::binary | ios::trunc);
         ensureOpen(diffOutput, diffPath, "nucleotide differences");
@@ -906,7 +1682,23 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 
 	//sample specific derep filter
 	bool dereplicate_sample_specific(false);
-	vector<int> dereplicate_sample_specific_indices = mf->getDrerepSampleSpecifity();
+	vector<int> dereplicate_sample_specific_indices;
+	{
+		// derepMinNum follows mapping rows, but sample counts use dereplicator ids
+		// (file processing order): translate by sample name.
+		const vector<int> byMapRow = mf->getDrerepSampleSpecifity();
+		if (!byMapRow.empty()) {
+			std::unordered_map<string, int> rowOfSample;
+			for (size_t i = 0; i < mf->SampleID.size() && i < byMapRow.size(); ++i) {
+				rowOfSample.emplace(mf->SampleID[i], byMapRow[i]);
+			}
+			dereplicate_sample_specific_indices.assign(barcode_number_to_sample_id_.size(), -1);
+			for (size_t j = 0; j < barcode_number_to_sample_id_.size(); ++j) {
+				auto row = rowOfSample.find(barcode_number_to_sample_id_[j]);
+				if (row != rowOfSample.end()) { dereplicate_sample_specific_indices[j] = row->second; }
+			}
+		}
+	}
 	if (!dereplicate_sample_specific_indices.empty()) { dereplicate_sample_specific = true; }
 
 	//combiner relevant vars
@@ -938,6 +1730,13 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	
 	//convert to vector, that can than be written out
 	// Sort small references; materialize only one independent output group at a time.
+    // Collecting and sorting the output groups may use the pool (never from one of
+    // its own workers).
+    ThreadPool* sortPool = nullptr;
+    if (ThreadPool::configured_thread_count() > 1) {
+        ThreadPool& pool = ThreadPool::instance();
+        if (pool.worker_index_of_current_thread() < 0) { sortPool = &pool; }
+    }
     vector<uint64_t> recoveredCounts(barcode_number_to_sample_id_.size(), 0);
     CoarseDereplication::Refinement refinement;
     std::vector<DerepOutputGroup> dereplicated_dnas;
@@ -947,10 +1746,11 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
             auto& dna = refinement.representatives[i];
             if (dna) { dereplicated_dnas.push_back({dna->totalSum(), coarse_->groups()[i]->key(), nullptr, {}, dna}); }
         }
-    } else { dereplicated_dnas = outputGroups(recoveredCounts); }
-    sort(dereplicated_dnas.begin(), dereplicated_dnas.end(), [](const auto& left, const auto& right) {
+    } else { dereplicated_dnas = outputGroups(recoveredCounts, sortPool); }
+    // Keys are unique, so this order is total and independent of how the sort is split.
+    sortOnPool(dereplicated_dnas, [](const auto& left, const auto& right) {
         return left.count != right.count ? left.count > right.count : left.key < right.key;
-    });
+    }, sortPool);
 	size_t passedSize = 0; size_t notPassedSize = 0; size_t passed_hits(0);
 	size_t passedMerge(0);
 	//bool thrHit = false;
@@ -973,36 +1773,86 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	}
 	int total_count(0);
 	int passed_count(0);
-	ofstream* derepNowOut;
-	//print unique DNAs
-	for (size_t i = 0; i < dereplicated_dnas.size(); i++) {
+	// Groups are independent: format them in chunks, in parallel when workers
+	// are available, and write the chunks in order so every output file is
+	// byte-identical to formatting them one after another.
+	struct ChunkSinks {
+		std::ostream *diff, *subcluster, *subclusterMate, *hq1, *hq2, *main, *rest, *merged, *map;
+	};
+	struct ChunkCounts {
+		int total = 0;
+		size_t passedHits = 0, passedMerge = 0, passedSize = 0, notPassedSize = 0;
+		vector<uint64_t> countsPerSample;
+	};
+	SegmentPool segments;
+	struct ChunkOutput {
+		explicit ChunkOutput(SegmentPool& pool) : diff(pool), subcluster(pool), subclusterMate(pool), hq1(pool), hq2(pool),
+			main(pool), rest(pool), merged(pool), map(pool) {}
+		SegmentStream diff, subcluster, subclusterMate, hq1, hq2, main, rest, merged, map;
+		ChunkCounts counts;
+		ChunkSinks sinks() {
+			return {&diff.stream, &subcluster.stream, &subclusterMate.stream, &hq1.stream, &hq2.stream,
+				&main.stream, &rest.stream, &merged.stream, &map.stream};
+		}
+	};
+	std::mutex mergeCheckMutex; // the main filter's merged-read checks keep statistics
+	// A large group's exact-variant FASTQ, left for the caller to write in parallel ranges.
+	struct DeferredVariants {
+		std::shared_ptr<const diffDNA> variants;
+		std::string id;
+	};
+	auto formatChunk = [&](size_t begin, size_t end, const ChunkSinks& out, ChunkCounts& counts, DeferredVariants* defer = nullptr) {
+		counts.countsPerSample.assign(counts_per_sample.size(), 0);
+		vector<uint64_t> mapCombinedCounts(map_combined_counts.size(), 0);
+		vector<int> mapTouchedGroups;
+		mapTouchedGroups.reserve(map_touched_groups.capacity());
+	for (size_t i = begin; i < end; i++) {
         const auto& group = dereplicated_dnas[i];
         shared_ptr<DNAunique> dna = group.refined ? group.refined : group.representative->best(true, !b_derep_as_fasta_);
         if (!dna) { continue; }
         for (const auto* member : group.members) { member->addEvidenceTo(dna, !b_derep_as_fasta_); }
-        total_count ++;
+        for (const auto& [sample, copies] : group.recovered) { dna->addSampleCount(sample, copies); }
+        // Deferred reads of variant-retaining modes become exact variants of this
+        // parent, exactly as a failed repeat of an established key is recorded.
+        for (const auto* read : group.evidence) {
+            if (coarse_->storesQualities() && read->dna2) { dna->recordDiffPairQuality(*read->dna, *read->dna2, read->sample); }
+            else if (coarse_->storesQualities()) { dna->recordDiffQuality(*read->dna, read->sample); }
+            else {
+                const auto& source = searchWithMerg && read->merged ? read->merged : read->dna;
+                dna->recordDiffDNA(source->getSeqPseudoView(), read->sample);
+            }
+        }
+        counts.total ++;
+		// R1's header before the size annotation; stored R2 headers are rebuilt from it.
+		const string r1Header = dna->storedHeader();
 		dna->Count2Head(b_usearch_fmt);
         if (auto differences = dna->getDiffDNA(); differences && coarse_) {
             if (coarse_->storesDiffs()) {
-                differences->write(diffOutput, dna->getId());
+                differences->write(*out.diff, dna->getId());
                 if (writeSubclusters_) {
-                    if (pairedVariants) { differences->writeFasta(subclusterOutput, subclusterOutputMate, dna->getId()); }
-                    else { differences->writeFasta(subclusterOutput, dna->getId()); }
+                    if (pairedVariants) { differences->writeFasta(*out.subcluster, *out.subclusterMate, dna->getId()); }
+                    else { differences->writeFasta(*out.subcluster, dna->getId()); }
                 }
             }
-            if (coarse_->storesQualities()) {
-                if (pairedVariants) { differences->writeFastq(subclusterFastq, subclusterFastqMate, dna->getId(), fastqVer); }
-                else { differences->writeFastq(subclusterFastq, dna->getId(), fastqVer); }
+            if (variantHq && defer) {
+                defer->variants = differences;
+                defer->id = dna->getId();
+            } else if (variantHq) {
+                // Use the normal cumulative HQ streams for every retained exact
+                // variant. Parent IDs/counts still resolve through the usual map.
+                if (pairedVariants) { differences->writeFastq(*out.hq1, *out.hq2, dna->getId(), fastqVer); }
+                else { differences->writeFastq(*out.hq1, dna->getId(), fastqVer); }
             }
         }
-		shared_ptr<DNAunique> dna_merged = nullptr;
+		shared_ptr<DerepRead> dna_merged = nullptr;
+		std::ostream* derepNowOut;
 		if ((dereplicate_sample_specific && 
 			dna->pass_deprep_smplSpc(dereplicate_sample_specific_indices)) ||
             pass_deprep_conditions(dna) ) {
 			//we do have a real derep that needs to be clustered..
 			
-			passed_hits++;
-			passedSize += dna->totalSum();
+			counts.passedHits++;
+			counts.passedSize += dna->totalSum();
 
 
 			//only do merge here, because these are known good dereps already
@@ -1010,32 +1860,38 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
                 dna_merged = dna->getMerge();
                 if (!dna_merged) {
                     auto consensus = merger->merge(dna, dna->getPair());
-                    if (consensus) { dna_merged = make_shared<DNAunique>(consensus, -1); }
-                    if (dna_merged && !mf->checkMergedDNA(dna_merged)) { dna_merged.reset(); }
+                    if (consensus) { dna_merged = make_shared<DerepRead>(consensus); }
+                    if (dna_merged) {
+                        std::lock_guard<std::mutex> lock(mergeCheckMutex);
+                        if (!mf->checkMergedDNA(dna_merged)) { dna_merged.reset(); }
+                    }
                 }
-                if (dna_merged && !mf->checkMergedLength(dna_merged)) { dna_merged.reset(); }
-                if (dna_merged) { dna_merged->setHeader(dna->getId()); }
+                if (dna_merged) {
+                    std::lock_guard<std::mutex> lock(mergeCheckMutex);
+                    if (!mf->checkMergedLength(dna_merged)) { dna_merged.reset(); }
+                }
+                if (dna_merged) { dna_merged->setHeader(dna->getId()); dna->adoptMergeStats(*dna_merged); }
 			}
-			derepNowOut = &of;
+			derepNowOut = out.main;
 			if (dna->getMergeLength() > 0) {
-				passedMerge++;
+				counts.passedMerge++;
 			}
 		} else {
-			notPassedSize += dna->totalSum();
+			counts.notPassedSize += dna->totalSum();
 			//dna->writeSeq(ofRest, b_singleLine);
-			derepNowOut = &ofRest;
+			derepNowOut = out.rest;
 		}
 
 		if (b_derep_as_fasta_)
 			if (dna_merged) {//either or mechanic
-				dna_merged->writeSeq_derep(of_merged, b_singleLine);
+				dna_merged->writeSeq_derep(*out.merged, b_singleLine);
 			} else {
 				dna->writeSeq_derep((*derepNowOut), b_singleLine);
 			}
 		else {
 			if (dna_merged) {
 				dna_merged->prepareDerepQualities(fastqVer);
-				dna_merged->writeDerepFastQ(of_merged);
+				dna_merged->writeDerepFastQ(*out.merged);
 			} else {
 				dna->prepareDerepQualities(fastqVer);
 				dna->writeDerepFastQ((*derepNowOut));
@@ -1045,30 +1901,224 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 
 
 		//map is written no matter what
-		dna->writeMap(omaps, dna->getId(), counts_per_sample, smplId2comb, map_combined_counts, map_touched_groups);
+		dna->writeMap(*out.map, dna->getId(), counts.countsPerSample, smplId2comb, mapCombinedCounts, mapTouchedGroups);
 
-		// HQ mates are full-length intermediates for seed extension. Preserve
-        // their overlap even when clustering uses truncated reads; physical
-        // barcode/primer cuts remain in the backing sequence.
-		dna->resetTruncation();
-		dna->prepareWrite(fastqVer);
-		dna->writeFastQ(of2);
-		dna->releaseRawQualitiesIfPromoted();
+        if (!variantHq) {
+            // HQ mates are full-length intermediates for seed extension. Preserve
+            // their overlap even when clustering uses truncated reads; physical
+            // barcode/primer cuts remain in the backing sequence.
+            dna->resetTruncation();
+            dna->prepareWrite(fastqVer);
+            dna->writeFastQ(*out.hq1);
+            dna->releaseRawQualitiesIfPromoted();
 
-		if (b_pairedInput) {
-			shared_ptr<DNAunique> oD = dna->getPair();
-			if (oD != nullptr) {
-				oD->resetTruncation();
-				oD->prepareWrite(fastqVer);
-				oD->writeFastQ(of2p2);
-				oD->releaseRawQualitiesIfPromoted();
-			} else {
-				shared_ptr<DNA> tmp = make_shared< DNA>("", dna->getId());
-				tmp->writeFastQEmpty(of2p2);
+            if (b_pairedInput) {
+                shared_ptr<DerepRead> oD = dna->getPair();
+                if (oD != nullptr) {
+                    oD->restoreMateHeader(r1Header);
+                    oD->resetTruncation();
+                    oD->prepareWrite(fastqVer);
+                    oD->writeFastQ(*out.hq2);
+                    oD->releaseRawQualitiesIfPromoted();
+                } else {
+                    shared_ptr<DNA> tmp = make_shared< DNA>("", dna->getId());
+                    tmp->writeFastQEmpty(*out.hq2);
 
+                }
+            }
+        }
+		
+	}
+	};
+	auto addCounts = [&](const ChunkCounts& counts) {
+		total_count += counts.total;
+		passed_hits += counts.passedHits;
+		passedMerge += counts.passedMerge;
+		passedSize += counts.passedSize;
+		notPassedSize += counts.notPassedSize;
+		for (size_t j = 0; j < counts_per_sample.size(); ++j) { counts_per_sample[j] += counts.countsPerSample[j]; }
+	};
+	auto writeChunk = [&](ChunkOutput& out) {
+		auto put = [](std::ostream& target, SegmentStream& source) { source.buffer.writeTo(target); };
+		if (diffOutput.is_open()) { put(diffOutput, out.diff); }
+		if (subclusterOutput.is_open()) { put(subclusterOutput, out.subcluster); }
+		if (subclusterOutputMate.is_open()) { put(subclusterOutputMate, out.subclusterMate); }
+		put(of2, out.hq1);
+		if (b_pairedInput) { put(of2p2, out.hq2); }
+		put(of, out.main);
+		put(ofRest, out.rest);
+		if (of_merged.is_open()) { put(of_merged, out.merged); }
+		put(omaps, out.map);
+		addCounts(out.counts);
+	};
+	// Record writers consult the runtime options; refresh their lazily built
+	// cache here so that concurrent formatting only reads it.
+	if (OptContainer* options = getGlobalOptContainer()) { (void)options->runtime(); }
+	ThreadPool* formatPool = nullptr;
+	// Variant export writes (and, to sort them, decodes) every retained exact
+	// variant of a group; see the chunk plan below for how that stays bounded.
+	const bool exportsVariants = coarse_ && (coarse_->storesDiffs() || coarse_->storesQualities());
+	if (dereplicated_dnas.size() > 1 && ThreadPool::configured_thread_count() > 1) {
+		ThreadPool& pool = ThreadPool::instance();
+		// Never wait for the pool from inside one of its own workers.
+		if (pool.worker_index_of_current_thread() < 0) { formatPool = &pool; }
+	}
+	if (!formatPool) {
+		// One worker: write straight into the files, without buffering.
+		ChunkSinks direct{&diffOutput, &subclusterOutput, &subclusterOutputMate, &of2, &of2p2, &of, &ofRest, &of_merged, &omaps};
+		ChunkCounts counts;
+		formatChunk(0, dereplicated_dnas.size(), direct, counts);
+		addCounts(counts);
+	} else {
+		// Chunks are formatted on the pool and written in order; a small window
+		// of chunks keeps buffered output bounded.
+		const size_t window = formatPool->size() + 2;
+		struct Chunk { size_t begin, end; bool large; };
+		std::vector<Chunk> chunks;
+		constexpr size_t kMaxGroupsPerChunk = 512;
+		if (exportsVariants) {
+			// A group's variant output, and the variants decoded to sort it,
+			// grow with its retained variants, which never exceed its reads.
+			// Chunks hold at most kChunkReads reads, so neither the buffered
+			// chunks nor any worker's formatting memory grow with the dataset.
+			// Larger groups are written by this thread one at a time, as in
+			// the serial path; their sorted variants are formatted in
+			// kChunkReads ranges on the pool.
+			constexpr uint64_t kChunkReads = 1024;
+			size_t begin = 0;
+			uint64_t reads = 0;
+			for (size_t i = 0; i < dereplicated_dnas.size(); ++i) {
+				const uint64_t count = dereplicated_dnas[i].count;
+				if (begin < i && (count > kChunkReads || reads + count > kChunkReads || i - begin >= kMaxGroupsPerChunk)) {
+					chunks.push_back({begin, i, false});
+					begin = i;
+					reads = 0;
+				}
+				if (count > kChunkReads) {
+					chunks.push_back({i, i + 1, true});
+					begin = i + 1;
+					continue;
+				}
+				reads += count;
+			}
+			if (begin < dereplicated_dnas.size()) { chunks.push_back({begin, dereplicated_dnas.size(), false}); }
+		} else {
+			// Chunks of similar abundance: output size follows the number of
+			// retained reads, and groups are sorted by abundance, so fixed group
+			// counts would put most of the output into the first chunk.
+			uint64_t totalAbundance = 0;
+			for (const auto& group : dereplicated_dnas) { totalAbundance += group.count; }
+			const uint64_t chunkAbundance = std::max<uint64_t>(1, totalAbundance / (32 * formatPool->size()));
+			size_t begin = 0;
+			uint64_t accumulated = 0;
+			for (size_t i = 0; i < dereplicated_dnas.size(); ++i) {
+				accumulated += dereplicated_dnas[i].count;
+				if (accumulated >= chunkAbundance || i + 1 - begin >= kMaxGroupsPerChunk) {
+					chunks.push_back({begin, i + 1, false});
+					begin = i + 1;
+					accumulated = 0;
+				}
+			}
+			if (begin < dereplicated_dnas.size()) { chunks.push_back({begin, dereplicated_dnas.size(), false}); }
+		}
+		// Waits for every task in `pending` (they reference this frame), then rethrows `failure`.
+		auto settle = [](auto& pending, std::exception_ptr failure) {
+			for (auto& entry : pending) {
+				try { if (entry.second.valid()) { entry.second.get(); } }
+				catch (...) {}
+			}
+			if (failure) { std::rethrow_exception(failure); }
+		};
+		// Decoding and sorting a large group's variants run as pool tasks too.
+		const diffDNA::ParallelFor parallelFor = [&](size_t count, const std::function<void(size_t)>& task) {
+			std::vector<std::pair<std::nullptr_t, std::future<void>>> done;
+			done.reserve(count);
+			std::exception_ptr failure;
+			try {
+				for (size_t i = 0; i < count; ++i) { done.emplace_back(nullptr, formatPool->submit([&task, i]() { task(i); })); }
+				for (auto& entry : done) { entry.second.get(); }
+			}
+			catch (...) { failure = std::current_exception(); }
+			settle(done, failure);
+		};
+		// The one large group being written: its sorted variants are shared by
+		// the range tasks and released before the next large group is decoded.
+		auto writeVariantRanges = [&](const diffDNA& variants, const std::string& id) {
+			const auto fragments = variants.sortedFragments(&parallelFor);
+			constexpr size_t kRange = 1024;
+			struct RangeOutput {
+				explicit RangeOutput(SegmentPool& pool) : hq1(pool), hq2(pool) {}
+				SegmentStream hq1, hq2;
+			};
+			std::deque<std::pair<std::unique_ptr<RangeOutput>, std::future<void>>> pending;
+			size_t next = 0;
+			auto submitRange = [&]() {
+				auto out = std::make_unique<RangeOutput>(segments);
+				RangeOutput* target = out.get();
+				const size_t begin = next, end = std::min(fragments.size(), next + kRange);
+				auto done = formatPool->submit([&variants, &fragments, &id, target, begin, end, pairedVariants, fastqVer]() {
+					if (pairedVariants) { variants.writeFastq(target->hq1.stream, target->hq2.stream, id, fragments, begin, end, fastqVer); }
+					else { variants.writeFastq(target->hq1.stream, id, fragments, begin, end, fastqVer); }
+				});
+				pending.emplace_back(std::move(out), std::move(done));
+				next = end;
+			};
+			std::exception_ptr failure;
+			try {
+				while (next < fragments.size() && pending.size() < window) { submitRange(); }
+				while (!pending.empty()) {
+					pending.front().second.get();
+					pending.front().first->hq1.buffer.writeTo(of2);
+					if (pairedVariants) { pending.front().first->hq2.buffer.writeTo(of2p2); }
+					pending.pop_front();
+					if (next < fragments.size()) { submitRange(); }
+				}
+			}
+			catch (...) { failure = std::current_exception(); }
+			settle(pending, failure);
+		};
+		auto writeLargeGroup = [&](size_t index) {
+			// Every earlier chunk is written: write straight into the files.
+			ChunkSinks direct{&diffOutput, &subclusterOutput, &subclusterOutputMate, &of2, &of2p2, &of, &ofRest, &of_merged, &omaps};
+			ChunkCounts counts;
+			DeferredVariants deferred;
+			formatChunk(index, index + 1, direct, counts, &deferred);
+			addCounts(counts);
+			if (deferred.variants) { writeVariantRanges(*deferred.variants, deferred.id); }
+		};
+		// Large chunks hold a window place but are written by this thread.
+		std::deque<std::pair<std::unique_ptr<ChunkOutput>, std::future<void>>> inflight;
+		size_t nextChunk = 0;
+		auto submitNext = [&]() {
+			const Chunk chunk = chunks[nextChunk++];
+			if (chunk.large) { inflight.emplace_back(nullptr, std::future<void>{}); return; }
+			auto out = std::make_unique<ChunkOutput>(segments);
+			ChunkOutput* target = out.get();
+			auto done = formatPool->submit([&formatChunk, target, chunk]() {
+				formatChunk(chunk.begin, chunk.end, target->sinks(), target->counts);
+			});
+			inflight.emplace_back(std::move(out), std::move(done));
+		};
+		std::exception_ptr failure;
+		try {
+			size_t written = 0;
+			while (nextChunk < chunks.size() && inflight.size() < window) { submitNext(); }
+			while (!inflight.empty()) {
+				if (inflight.front().first) {
+					inflight.front().second.get();
+					writeChunk(*inflight.front().first);
+				} else {
+					writeLargeGroup(chunks[written].begin);
+				}
+				inflight.pop_front();
+				++written;
+				if (nextChunk < chunks.size()) { submitNext(); }
 			}
 		}
-		
+		catch (...) {
+			failure = std::current_exception();
+		}
+		settle(inflight, failure);
 	}
 	if (of.fail() || omaps.fail() || ofRest.fail() || of2.fail() || (b_pairedInput && of2p2.fail()) || (can_merge_derep && of_merged.fail())) {
 		throw std::runtime_error("I/O failure while writing dereplicated outputs.");
@@ -1078,8 +2128,6 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 //	}
 	if (diffOutput.is_open()) { finalizeOutputFile(diffOutput, diffPath); }
     if (subclusterOutput.is_open()) { finalizeOutputFile(subclusterOutput, subclusterPath); }
-    if (subclusterFastq.is_open()) { finalizeOutputFile(subclusterFastq, subclusterFastqPath); }
-    if (subclusterFastqMate.is_open()) { finalizeOutputFile(subclusterFastqMate, subclusterFastqMatePath); }
     if (subclusterOutputMate.is_open()) { finalizeOutputFile(subclusterOutputMate, subclusterMatePath); }
 	finalizeOutputFile(of, outfile2);
     finalizeOutputFile(omaps, mapF);
@@ -1109,15 +2157,70 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 	report += "Dereplication: " + N_passed + " unique sequences (avg size ";
 	report += intwithcommas((int)avgSize) + "; " + formatCount64(static_cast<uint64_t>(passedSize)) + " counts, ";
 	report += formatCount64(static_cast<uint64_t>(passedMerge)) + " merged)\n";
-    if (prefixMode_) {
+    report += "Dereplication abundance: " + formatCount64(passedSize + notPassedSize) +
+        " total in map; " + formatCount64(passedSize) + " passing; " + formatCount64(notPassedSize) + " in rest\n";
+    if (coarse_ && coarse_->storesQualities()) {
+        report += "Retention exclusions: " + formatCount64(skippedEmptyMates_.load(std::memory_order_relaxed)) +
+            " pairs with empty R2 skipped before admission\n";
+    }
+    Shard::AdmissionStats admission;
+    for (const auto& shard : shards_) {
+        const auto& local = shard->admission;
+        admission.high += local.high; admission.mid += local.mid; admission.failed += local.failed;
+        admission.unmatched += local.unmatched; admission.deferred += local.deferred; admission.mergedKeys += local.mergedKeys;
+        admission.published += local.published; admission.deferredDropped += local.deferredDropped;
+    }
+    report += "Dereplication search policy: " + string(searchWithMerg ? "merged when available" : "R1 only") +
+        "; " + (coarse_ && !coarse_->outputsExact() ? "coarse clusters" : prefixMode_ ? "exact prefix consolidation" : "equal exact keys") +
+        "; search cap " + to_string(searchLength) + "\n";
+    report += "Dereplication key sources: " + formatCount64(admission.mergedKeys) + " merged; " +
+        formatCount64(srchSeqCount - admission.mergedKeys) + " R1; " +
+        formatCount64(skippedEmptyKeys_.load(std::memory_order_relaxed)) + " empty keys skipped\n";
+    report += "Dereplication admission before prefix recovery: " + formatCount64(admission.high) + " high-quality R1; " +
+        formatCount64(admission.mid) + " mid-quality R1; " + formatCount64(admission.failed) + " failed R1; " +
+        formatCount64(admission.unmatched) + " unmatched; " + formatCount64(admission.deferred) + " deferred; " +
+        formatCount64(admission.published) + " published to the mid-quality output instead of counted\n";
+    if (prefixMode_ || defersNonPassing()) {
         uint64_t recovered = 0;
         for (uint64_t count : recoveredCounts) { recovered += count; }
-        report += "Prefix matching: " + formatCount64(recovered) + " non-passing reads recovered into passing groups\n";
+        report += string(prefixMode_ ? "Prefix matching: " : "Exact-key matching: ") + formatCount64(recovered) +
+            " non-passing reads recovered into passing groups (deferred reads without a passing group are dropped)\n";
+        if (admission.deferredDropped > 0) {
+            report += string("Deferred table full (") + (retainsVariants() ?
+                formatCount64(kDeferredEvidenceBytes >> 20) + " MiB of retained reads" : formatCount64(kDeferredKeyCap) + " keys") + "): " +
+                formatCount64(admission.deferredDropped) + " non-passing reads with new keys not kept (counted as unmatched)\n";
+        }
     }
     if (coarse_) {
-        const auto& stats = coarse_->stats();
+        CoarseDereplication::Stats stats;
+        size_t activePartitions = 0, searchGroups = 0;
+        uint64_t largestPartition = 0;
+        for (const auto& shard : shards_) {
+            searchGroups += shard->coarse->groups().size();
+            const auto& local = shard->coarse->stats();
+            stats.queries += local.queries; stats.comparisons += local.comparisons;
+            stats.fallbackQueries += local.fallbackQueries; stats.indexedSeeds += local.indexedSeeds;
+            stats.exactHits += local.exactHits; stats.rejectedExactMisses += local.rejectedExactMisses;
+            activePartitions += local.queries != 0;
+            largestPartition = std::max(largestPartition, local.queries);
+        }
+        report += "Coarse search groups: " + formatCount64(searchGroups) + "; output " +
+            (coarse_->storageOnly() ? "exact search-key dereplicates\n" : coarse_->outputsExact() ? "exact R1 dereplicates\n" : "coarse clusters\n");
+        if (shards_.size() > 1) {
+            report += "Coarse partitions: " + to_string(shards_.size()) + "; active " + to_string(activePartitions) +
+                "; largest " + formatCount64(largestPartition) + " of " + formatCount64(stats.queries) + " queries\n";
+        }
         report += "Coarse matching: " + formatCount64(stats.comparisons) + " bounded comparisons; " +
             formatCount64(stats.fallbackQueries) + " queries requiring seed fallback\n";
+        report += "Coarse exact reuse: " + formatCount64(stats.exactHits) + " of " + formatCount64(stats.queries) +
+            " queries; " + formatCount64(stats.queries - stats.exactHits - stats.rejectedExactMisses) + " candidate searches\n";
+        report += "Coarse admission shortcut: " + formatCount64(stats.rejectedExactMisses) + " non-passing exact-key misses rejected without candidate search\n";
+        if (coarseWorkPool_) {
+            const auto work = coarseWorkPool_->stats();
+            report += "Coarse work pool: " + formatCount64(work.batches) + " batches; " + formatCount64(work.tasks) +
+                " partition tasks; " + formatCount64(work.helpedTasks) + " helped by another worker; peak active " +
+                to_string(work.peakActive) + " partitions\n";
+        }
         if (coarse_->reassigns()) {
             report += "Final reassignment: " + formatCount64(refinement.movedReads) + " reads in " +
                 formatCount64(refinement.movedVariants) + " exact subclusters moved; " +
@@ -1126,7 +2229,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
         if (coarse_->storesDiffs()) { report += "Nucleotide differences: " + diffPath + "\n"; }
         if (writeSubclusters_) { report += "Exact subcluster FASTA: " + subclusterPath + (pairedVariants ? ", " + subclusterMatePath : "") + "\n"; }
         if (coarse_->storesQualities()) {
-            report += "Exact subcluster FASTQ (selected qualities): " + subclusterFastqPath + (pairedVariants ? ", " + subclusterFastqMatePath : "") + "\n";
+            report += "Dereplicated HQ FASTQ (exact variants, selected qualities): " + outHQf + (pairedVariants ? ", " + outHQf_p2 : "") + "\n";
         }
     }
 	report += "Search sequence length: avg " + avgSrchSeqLenStream.str() + " (" + formatCount64(srchSeqTotalLen) + " total over " + formatCount64(srchSeqCount) + " reads)\n";
@@ -1179,21 +2282,27 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
 
 
 bool Dereplicate::pass_deprep_conditions(shared_ptr<DNAunique> d) {
-	if (minCopiesFastFailThreshold > 0 && d->totalSum() < minCopiesFastFailThreshold) {
+	if (minCopiesFastFailThreshold > 0 && d->totalSum() < static_cast<uint64_t>(minCopiesFastFailThreshold)) {
 		return false;
 	}
-	vector<uint64_t> x = d->getDerepMapSort(minCopiesSiz);
-	uint64_t cumSum(0);
-	for (size_t i = 0; i < x.size(); i++) {
-		cumSum += x[i];
-		//if (minCopies[i] == -1) { continue; }
-		size_t yy(minCopiesSiz);
-		if (yy > i) { yy = i+1; }//if checking for 1 smpl copy, don't need to check for 2 samlpe allowed copy number..
-		for (size_t j = 0; j < yy; j++) {
-			if (minCopies[j] == -1) { continue; }
-
-			//if (i > minCopiesSiz) { break; }
-			if (cumSum >= minCopies[j]) { return true; }
+	size_t topSamples = 0;
+	for (const DerepCopyRule& rule : minCopyRules) {
+		topSamples = std::max(topSamples, static_cast<size_t>(rule.samples));
+	}
+	// Per-sample counts; the largest topSamples come first, in descending order.
+	const vector<uint64_t> x = d->getDerepMapSort(topSamples);
+	uint64_t sampleSum = 0;
+	for (uint64_t count : x) { sampleSum += count; }
+	if (x.empty()) { sampleSum = d->totalSum(); }
+	for (const DerepCopyRule& rule : minCopyRules) {
+		if (rule.copies <= 0) { return true; }
+		if (rule.samples == 0) {// total across all samples
+			if (sampleSum >= static_cast<uint64_t>(rule.copies)) { return true; }
+		}
+		// X:Y -> the Y-th most abundant sample still has at least X copies
+		else if (x.size() >= static_cast<size_t>(rule.samples) &&
+			x[rule.samples - 1] >= static_cast<uint64_t>(rule.copies)) {
+			return true;
 		}
 	}
 	return false;
@@ -1272,6 +2381,17 @@ UClinks::UClinks( OptContainer* cmdArgs):
 	b_merge_pairs_optiSeed_(false),merger(nullptr)
 
 {
+    const string subclusters = cmdArgs->get("-seedSubclusters", "0");
+    if (subclusters != "0" && subclusters != "1") {
+        throw invalid_argument("-seedSubclusters must be 0 or 1");
+    }
+    seedSubclusters = subclusters == "1";
+    if (seedSubclusters && cmdArgs->get("-derep_map").empty()) {
+        throw invalid_argument("-seedSubclusters requires the parent -derep_map");
+    }
+    if (seedSubclusters && !cmdArgs->get("-onlyPair").empty()) {
+        throw invalid_argument("-seedSubclusters requires complete fragments; disable -onlyPair");
+    }
 	//read in UC file and assign clusters
 	SEP = (*cmdArgs)["-sample_sep"];
 	string str = (*cmdArgs)["-optimalRead2Cluster"];
@@ -1377,144 +2497,195 @@ void UClinks::readDerepInfo(const string dereM) {
 	cout << "Found " << SmplIDs.size() << " samples in derep.map\n";
 }
 
-//read in dereplicated info from derep.map and derep.hq.fq (in IS) -> they are in the same order
+// Shared map reader: HQ input consumes one row at a time; reconstructed input
+// loads the parent counts once and joins them to mappings independently of order.
+bool UClinks::nextDerepLine(string& line) {
+    if (MAPread) { return false; }
+    while (safeGetline(mapdere, line)) {
+        if (!line.empty() && line[0] != '#') { return true; }
+    }
+    mapdere.close();
+    MAPread = true;
+    return false;
+}
+
+// Abundance annotation of a dereplicate header: ";size=N;" (default) or a
+// trailing "_N" (-dere_size_fmt 1, which seed extension used to reject). 0 if none.
+static uint64_t dereplicateHeaderAbundance(const string& header) {
+    const size_t size = header.find(";size=");
+    if (size != string::npos) { return stoull(header.substr(size + 6)); }
+    const size_t underscore = header.find_last_of('_');
+    if (underscore != string::npos && underscore + 1 < header.size()) {
+        const string digits = header.substr(underscore + 1);
+        if (is_digits(digits)) { return stoull(digits); }
+    }
+    return 0;
+}
+
+uint64_t UClinks::parseDerepLine(const string& line, shared_ptr<DNAunique> d, bool strictCounts) {
+    const size_t tab = line.find('\t');
+    const string header = line.substr(0, tab);
+    if (tab == string::npos) { throw runtime_error("Missing sample counts in derep.map: " + line); }
+    const uint64_t declared = dereplicateHeaderAbundance(header);
+    uint64_t count = 0;
+    string entry;
+    stringstream samples(line.substr(tab + 1));
+    while (getline(samples, entry, '\t')) {
+        if (entry.empty()) { continue; }
+        const size_t colon = entry.find(':');
+        if (colon == string::npos) { throw runtime_error("Invalid sample count in derep.map: " + line); }
+        const int sample = stoi(entry.substr(0, colon));
+        const uint64_t copies = stoull(entry.substr(colon + 1));
+        if (copies > numeric_limits<uint64_t>::max() - count) {
+            throw overflow_error("derep.map abundance overflow: " + header);
+        }
+        d->incrementSampleCounterBy(sample, copies);
+        count += copies;
+    }
+    if (count != declared) {
+        const string error = "Mapping file unique abundance reconstruction: failed to find correct count (" +
+            to_string(count) + " vs " + to_string(declared) + "):\n" + line;
+        if (strictCounts) { throw runtime_error(error); }
+        cerr << "ERROR: " << error << endl;
+    }
+    totalDerepCnt += count;
+    return count;
+}
+
 uint64_t UClinks::oneDerepLine(shared_ptr<DNAunique> d) {
-	
-	if (MAPread){
-		return 0;
-	}
-	string line("");
-	uint64_t cnt(0);
-	while (!safeGetline(mapdere, line).eof()) {
-		//if (line.length() < 3) { continue; }
-		if (line[0] == '#') {continue;}
-		string segments;
-		//stringstream ss;
-		//string head("");
-		//ss << line;
-		int tbcnt = -1;
-		uint64_t curCnt(0), curCnt2(0);
-		size_t strpos(line.find_first_of('\t')), lastpos(0);
-		while (strpos != string::npos){
-		//while (getline(ss, segments, '\t')) {
-			segments = line.substr(lastpos, strpos - lastpos);
-			lastpos = strpos+1;
-			strpos = line.find_first_of('\t', lastpos);
-			tbcnt++;
-			if (tbcnt == 0) {
-				if (!d->sameHead(segments)) {
-					cerr << segments << " is not " << d->getId() << endl;
-					//this is actually a fatal error and currently not covered
-					//derep.map and fq [which one??] need to have reads in the same order..
-					exit(738);
-				}
-				size_t idx = segments.find(";size=");
-				if (idx != string::npos) {
-					curCnt = stoull(segments.substr(idx + 6, segments.find(";", idx + 5) - (idx + 6)));
-					//curCnt
-				}
-				continue;
-			}
-			size_t spl = segments.find(":"); uint64_t occur = stoull(segments.substr(spl + 1));
-            d->incrementSampleCounterBy(stoi(segments.substr(0, spl)), occur);
-			curCnt2 += occur;
-			//string tmp = segments.substr(0, spl);
-		}
-		//last round
-		segments = line.substr(lastpos);
-		size_t spl = segments.find(":"); uint64_t occur = stoull(segments.substr(spl + 1));
-        d->incrementSampleCounterBy(stoi(segments.substr(0, spl)), occur);
-		curCnt2 += occur;
-
-		if (curCnt2 != curCnt) {
-			cerr << "ERROR: Mapping file unique abundance reconstruction: failed to find correct count (" << curCnt2 << " vs " << curCnt<<"):\n" << line << endl;
-			//exit(67); //DEBUG
-		}
-		totalDerepCnt += curCnt2;
-		cnt = curCnt2;
-		break;
-	}
-
-	if (mapdere.eof()) {// end of file
-		mapdere.close();
-		MAPread = true;
-	}
-	return cnt;
-	//
+    string line;
+    if (!nextDerepLine(line)) { return 0; }
+    const string header = line.substr(0, line.find('\t'));
+    if (!d->sameHead(header)) {
+        cerr << header << " is not " << d->getId() << endl;
+        exit(738);
+    }
+    return parseDerepLine(line, d, false);
 }
 
-//finishes reading the map, loading the sequences as DNAunique into mem (no DNA, mind)
-void UClinks::finishMAPfile(){
-	if (MAPread){
-		return;
-	}
-	string line("");
-	//bool hardAdd = false;
-
-	uint64_t finishMapCnt = 0;
-
-	//go through ucl file line by line
-	while (!safeGetline(mapdere, line).eof()) {	
-		if (line[0] == '#') { continue; }
-		string segments;
-		int tbcnt = -1;
-		uint64_t curCnt(0), curCnt2(0);
-		size_t strpos(line.find_first_of('\t')), lastpos(strpos + 1);
-		segments = line.substr(0, strpos);
-		//1st setup empty DNA for each remaining line
-		shared_ptr<DNAunique> d = make_shared<DNAunique>("", segments);
-		d->seal();
-		size_t idx = segments.find(";size=");
-		if (idx != string::npos) {
-			curCnt = stoull(segments.substr(idx + 6, segments.find(";", idx + 5) - (idx + 6)));
-		}
-		strpos = line.find_first_of('\t', lastpos);
-
-		while (strpos != string::npos){
-			segments = line.substr(lastpos, strpos - lastpos);
-			lastpos = strpos + 1;
-			strpos = line.find_first_of('\t', lastpos);
-			tbcnt++;
-			size_t spl = segments.find(":"); uint64_t occur = stoull(segments.substr(spl + 1));
-            d->incrementSampleCounterBy(stoi(segments.substr(0, spl)), occur);
-			curCnt2 += occur;
-			//string tmp = segments.substr(0, spl);
-		}
-		//last round
-		segments = line.substr(lastpos);
-		size_t spl = segments.find(":"); uint64_t occur = stoull(segments.substr(spl + 1));
-        d->incrementSampleCounterBy(stoi(segments.substr(0, spl)), occur);
-		curCnt2 += occur;
-
-		if (curCnt2 != curCnt) {
-			cerr << "ERROR: Mapping file unique abundance reconstruction: failed to find correct count (" << curCnt2 << " vs " << curCnt << "):\n" << line << endl;
-			exit(67);//DEBUG
-		}
-		finishMapCnt += curCnt;
-		totalDerepCnt += curCnt2;
-
-        //add d to unusedDNA map keyed by read id (no ordering index needed)
-		string curID = d->getId();
-		curID = curID.substr(0, curID.find_first_of(' '));
-		unusedDNA[curID] = d;
-			
-	}
-
-	if (mapdere.eof()) {// end of file
-		mapdere.close();
-		MAPread = true;
-	}
-
-	cerr << "Found " << totalDerepCnt<< " counts in derep.map, "<< finishMapCnt<<" counts secondary\n";
-
+string UClinks::seedParentKey(string id) {
+    id = id.substr(0, id.find_first_of(" \t\r\n"));
+    removeSizeStr(id);
+    if (!SEP.empty()) { removeSampleID(id, SEP); }
+    return id;
 }
 
+// Count-only parents remain in unusedDNA until a primary or additional mapping
+// consumes them, retaining the existing .rest/reference count-recovery behavior.
+void UClinks::finishMAPfile() {
+    if (MAPread) {
+        if (seedSubclusters && subclusterMappingsLoaded) {
+            for (const auto& [id, parent] : subclusterParents) {
+                if (parent.lastVariant && parent.observed != parent.expected) {
+                    throw runtime_error("Incomplete subclusters for parent " + id + ": observed " +
+                        to_string(parent.observed) + " fragments, expected " + to_string(parent.expected));
+                }
+            }
+        }
+        return;
+    }
+    string line;
+    uint64_t finishMapCnt = 0;
+    while (nextDerepLine(line)) {
+        const string header = line.substr(0, line.find('\t'));
+        auto d = make_shared<DNAunique>("", header);
+        d->seal();
+        const uint64_t count = parseDerepLine(line, d, true);
+        finishMapCnt += count;
+        const string key = seedSubclusters ? seedParentKey(header) : header.substr(0, header.find(' '));
+        if (seedSubclusters) {
+            if (!subclusterParents.emplace(key, SubclusterParent{count}).second) {
+                throw runtime_error("Duplicate parent in derep.map: " + key);
+            }
+        }
+        unusedDNA[key] = d;
+    }
+    cerr << "Found " << totalDerepCnt << " counts in derep.map, " << finishMapCnt << " counts secondary\n";
+}
 
+shared_ptr<DNAunique> UClinks::prepareSeedCandidate(shared_ptr<DNA> first,
+        shared_ptr<DNA> second, Filters* fil) {
+    // HQ and reconstructed reads already have their physical preprocessing cuts.
+    auto candidate = make_shared<DNAunique>(first, -1);
+    if (second) {
+        candidate->attachPair(make_shared<DerepRead>(second));
+        if (merger) {
+            ++seedMergeAttempts_;
+            if (merger->findSeedForMerge(candidate, second)) { ++seedMergeSuccesses_; }
+        }
+        if (merger && candidate->merge_seed_pos_ >= 0) {
+            auto merged = merger->merge(candidate, second);
+            if (merged && fil->checkMergedDNA(merged, true)) {
+                candidate->attachMerge(make_shared<DerepRead>(merged));
+            }
+        }
+    }
+    return candidate;
+}
 
+void UClinks::findSubclusterSeeds(shared_ptr<InputStreamer> input, bool readFQ, Filters* fil) {
+    if (!readFQ || !input->qualityPresent() || input->hasMIDseqs()) {
+        throw invalid_argument("-seedSubclusters requires reconstructed single or paired FASTQ with qualities");
+    }
+    if (!b_derepAvailable) { throw runtime_error("-seedSubclusters requires initialized parent counts and fallback seeds"); }
+    if (!subclusterMappingsLoaded) {
+        finishMAPfile();
+        string query, target;
+        float identity = 0.f;
+        vector<int> clusters;
+        while (getMAPPERline(query, target, identity, clusters, false)) {
+            if (clusters.empty()) { continue; }
+            auto parent = subclusterParents.find(seedParentKey(query));
+            int counted = 0;
+            if (parent != subclusterParents.end() && uclInOldDNA_simple(query, clusters, counted)) {
+                parent->second.clusters = clusters;
+                parent->second.identity = identity;
+            }
+        }
+        subclusterMappingsLoaded = true;
+    }
+    // Only assignments/count metadata are retained per parent. Each full exact
+    // variant competes in export order, with its linked mate and quality vectors.
+    while (true) {
+        const auto reads = input->getDNApairs();
+        if (!reads[0]) { break; }
+        const string id = reads[0]->getShortId();
+        if (reads[1] && id != reads[1]->getShortId()) {
+            throw runtime_error("Subcluster mate IDs and abundances must match: " + id + " versus " + reads[1]->getShortId());
+        }
+        const size_t size = id.find(";size=");
+        const string label = id.substr(0, size);
+        const size_t suffix = label.rfind(".sub");
+        const string number = suffix == string::npos ? "" : label.substr(suffix + 4);
+        const string copies = size == string::npos ? "" : id.substr(size + 6, id.find(';', size + 6) - (size + 6));
+        if (suffix == string::npos || suffix == 0 || number.empty() || copies.empty() ||
+                !is_digits(number) || !is_digits(copies)) {
+            throw runtime_error("Invalid reconstructed subcluster ID (expected parent.subN;size=N;): " + id);
+        }
+        const uint64_t variant = stoull(number), count = stoull(copies);
+        auto entry = subclusterParents.find(seedParentKey(label.substr(0, suffix)));
+        if (entry == subclusterParents.end()) { throw runtime_error("No derep.map parent for subcluster " + id); }
+        auto& parent = entry->second;
+        if (!count || variant != parent.lastVariant + 1 || count > parent.expected - parent.observed) {
+            throw runtime_error("Invalid subcluster order or abundance for " + id);
+        }
+        parent.lastVariant = variant;
+        parent.observed += count;
+        if (parent.clusters.empty()) { continue; }
+        auto candidate = prepareSeedCandidate(reads[0], reads[1], fil);
+        candidate->setTempFloat(parent.identity);
+        besterDNA(parent.clusters, candidate, fil, false, count);
+    }
+    cerr << "Associated " << totalDerepCnt << ", " << OTUmatSum() << " counts to primary clusters\n";
+}
 
 //functions selects optimal read to represent OTU
 void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ, 
 	Filters* fil){
+    if (seedSubclusters) {
+        findSubclusterSeeds(IS, readFQ, fil);
+        return;
+    }
 	if (UCread){return;}
 
 	if (IS->hasMIDseqs()){
@@ -1551,25 +2722,7 @@ void UClinks::findSeq2UCinstruction(shared_ptr<InputStreamer> IS, bool readFQ,
 			if (tmpDNA == NULL) { cont_local = false; break; }//signal that at end of file
 			match2 = IS->getDNA(1);
 
-            // These are dereplication HQ reads: barcode/primer removal and
-            // orientation have already been applied. Do not cut their 5' ends again.
-
-
-			match = make_shared<DNAunique> (tmpDNA, -1);
-			if (match2 != NULL) {
-				match->attachPair(make_shared<DNAunique>(match2, -1));
-                // Report overlap detection separately from final merged filtering.
-                if (merger) {
-                    ++seedMergeAttempts_;
-                    if (merger->findSeedForMerge(match, match2)) { ++seedMergeSuccesses_; }
-                }
-                if (merger && match->merge_seed_pos_ >= 0) {
-					shared_ptr<DNA> dM = merger->merge(match, match2);
-					if (dM && fil->checkMergedDNA(dM, true)) {
-						match->attachMerge(make_shared<DNAunique>(dM, -1));
-					}
-				}
-			}
+			match = prepareSeedCandidate(tmpDNA, match2, fil);
 
 			//assummes in original implementation, that we can get derep.map lines with the same 
 			//ordering as fq derep (which works normally, just not for dada2 mode)
@@ -1644,13 +2797,16 @@ void UClinks::addUCdo(string addUC,bool SmplHd) {
 	if (addUC.find(".paf") != string::npos) {
 		ucispaf = true; UpUcFnd = true;
 	}
+	ucf.clear();
 	ucf.open(addUC.c_str(), ios::in);
 	if (!ucf) {
-		UCread = true;
+		// Nothing to add; parsing a failed stream could not end.
 		cerr << "Could not find additional uc file: " << addUC << endl;
-	} else {
-		std::cerr << "Reading " << addUC << endl;
+		ucf.clear();
+		UCread = true;
+		return;
 	}
+	std::cerr << "Reading " << addUC << endl;
 	UCread = false;
 	if (SmplHd){
 		while (getMAPPERline(segs, segs2, perID, curCLID, SmplHd)) { 
@@ -1681,18 +2837,14 @@ void UClinks::addUCdo(string addUC,bool SmplHd) {
 bool UClinks::uclInOldDNA_simple(const string& segs,const vector<int>& curCLID, int& countsAdd) {
 	//check if DNA is in group of unmatched DNA's ?
 	if (segs == ""){ return false; }//empty ucl line
-	auto unusedIT = unusedDNA.find(segs);
+	auto unusedIT = unusedDNA.find(seedSubclusters ? seedParentKey(segs) : segs);
 	if (unusedIT != unusedDNA.end()){// found something
 		//int mID = (*unusedIT).second;
 		//if (mID >= (int)oldDNA.size()) { cerr << "SEC MID too high\n"; exit(55); }
 		if (unusedIT->second == nullptr){ return false; }
 		//give sequence a chance to be selected
-        matrixUnit matchSiz = (matrixUnit)curCLID.size();
-		for (int k = 0; k < (int)matchSiz; k++) {
-			add2OTUmat(unusedIT->second, curCLID[k], matchSiz);
-		}
-		// increment countsAdd by number of OTU targets matched (matchSiz)
-		countsAdd += (int)matchSiz;
+        addSeedCounts(curCLID, unusedIT->second);
+        countsAdd += (int)curCLID.size();
 		//was matched once to an OTU seed. Even if several later matches, doesn't mater - delete
 
 		unusedDNA.erase(unusedIT);
@@ -1707,7 +2859,7 @@ bool UClinks::uclInOldDNA(const string& segs,const vector<int>& curCLID, float p
 	Filters* fil) {
 	//check if DNA is in group of unmatched DNA's ?
 	if (segs == ""){ return false; }//empty ucl line
-	auto unusedIT = unusedDNA.find(segs);
+	auto unusedIT = unusedDNA.find(seedSubclusters ? seedParentKey(segs) : segs);
 	if (unusedIT != unusedDNA.end()){// found something
 		//int mID = (*unusedIT).second;
 		if (unusedIT->second == nullptr) { return false; }
@@ -1734,22 +2886,45 @@ bool UClinks::getTMPmapperLine(string& line) {
 		mapLines.pop_front();
 	}
 	else {
-		if (!getline(ucf, line, '\n')) {
+		if (!readMapperFileLine(line)) {
 			return false;
 		}
 	}
 	return true;
 }
 
+// One line of the mapper file without a trailing '\r' (CRLF files made the
+// cd-hit representative test `line.back() == '*'` fail forever).
+bool UClinks::readMapperFileLine(string& line) {
+	if (!getline(ucf, line, '\n')) { return false; }
+	if (!line.empty() && line.back() == '\r') { line.pop_back(); }
+	return true;
+}
+
+// Normalizes an OTU/target name the same way for lookups and for the
+// perfect-chimera set: no description, size, sequence or centroid tags, no
+// sample prefix.
+string UClinks::clusterKey(string name) {
+	name = name.substr(0, name.find_first_of(' '));
+	removeSizeStr(name);
+	removeSeqStr(name);
+	removeCentrStr(name);
+	removeSampleID(name, SEP);
+	return name;
+}
+
 bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID, 
 	vector<int>& curCLID,  bool addFromHDstring) {
+	curCLID.clear();
 	//converts derep reads mapping to OTUs to counts
 	//seg: read ID, segs2: OTU repr read, perID: match to repr read
 
 
 	//close all file streams
 	if (UCread) { resetMarks(); UpUcFnd = false; return false; }
-	if (ucf.eof()){
+	// Buffered cd-hit members are still pending when the file hit EOF on the
+	// representative line; finish them before closing.
+	if (ucf.eof() && mapLines.empty()){
 		resetMarks();
 		UCread=true;		ucf.close();		return false;
 	}
@@ -1788,41 +2963,52 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 		vector<string>tarsV; //saves hits to OTUs
 
 		if (cdhit) {
+			// Member name between "nt, >" and "..."; a malformed line used to
+			// yield garbage names (or out_of_range) from unchecked positions.
+			auto memberName = [](const string& clstr, size_t& end) {
+				const size_t pos = clstr.find("nt, >");
+				end = pos == string::npos ? string::npos : clstr.find("...", pos + 5);
+				if (end == string::npos) { throw runtime_error("Malformed CD-HIT .clstr line: " + clstr); }
+				return clstr.substr(pos + 5, end - pos - 5);
+			};
 			if (line[0] == '>') {
 				//get next line with actual mapping/clustering
-				getline(ucf, line, '\n');
+				if (!readMapperFileLine(line) || line.empty()) {
+					throw runtime_error("CD-HIT .clstr cluster header without members at end of file");
+				}
 				repFound = false;
 				segs2 = "";
 			}
 
 			//meachnism has to be slightly different for cdhit, have to save segs2 between lines
 			if (!repFound  ){//&& line.back() == '*') {//report representative gene
-				bool isRep = line.back() == '*';
+				bool isRep = !line.empty() && line.back() == '*';
 				while (!isRep) {
-					if (!isRep) {
-						mapLines.push_back(line);
+					mapLines.push_back(line);
+					// getline at EOF left `line` unchanged: the loop never ended.
+					if (!readMapperFileLine(line)) {
+						throw runtime_error("CD-HIT .clstr cluster without representative (*) at end of file");
 					}
-					getline(ucf, line, '\n');
-					isRep = line.back() == '*';
-					if (line[0] == '>') {//should never get here
+					isRep = !line.empty() && line.back() == '*';
+					if (!line.empty() && line[0] == '>') {//should never get here
 						cerr << "CD-HIT .clstr contained seq cluster with no rep (prev lines):\n" << line << endl;
 						exit(163);
 					}
 				}
-				size_t pos = line.find("nt, >");size_t pos2 = line.find("...", pos + 4);
-				segs = line.substr(pos + 5, pos2 - pos - 5);
+				size_t end = 0;
+				segs = memberName(line, end);
 				repFound = true;
 				segs2 = segs;
 				perID = 100.f;
 				
 			} else {
-				size_t pos = line.find("nt, >");size_t pos2 = line.find("...", pos + 4);
-				segs = line.substr(pos + 5, pos2 - pos - 5);
+				size_t end = 0;
+				segs = memberName(line, end);
 				//find ID
-				pos = line.find("at +/", pos2 + 3);
+				const size_t pos = line.find("at +/", end + 3);
+				if (pos == string::npos || line.size() < pos + 6) { throw runtime_error("Malformed CD-HIT .clstr identity: " + line); }
 				string ID = line.substr(pos + 5, line.length() - pos - 6);
 				perID = stof(ID);
-				//cerr << line << " " << ID << endl;
 			}
 		} else {
 
@@ -1834,9 +3020,11 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 				string query = segs;
 				getline(ss, segs, '\t');
 				float qLen = (float)atof(segs.c_str());
-				for (uint i = 0; i < 3; i++) {//jump to pos X
-					getline(ss, segs, '\t');
-				}
+				getline(ss, segs, '\t');
+				const float qStart = (float)atof(segs.c_str());
+				getline(ss, segs, '\t');
+				const float qEnd = (float)atof(segs.c_str());
+				getline(ss, segs, '\t');//strand
 				getline(ss, segs2, '\t');//tarname
 				getline(ss, segs, '\t');
 				float tLen = (float) atof(segs.c_str());
@@ -1849,9 +3037,13 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 				float mapLen = (float) atof(segs.c_str());
 				perID = matches / mapLen *100.f;
 
-				qCov = mapLen / qLen;
-				
-				if (perID < perIDmatch || qCov < qCovThr) {
+				// Query coverage is the aligned query span, not the alignment block
+				// length (which includes target-relative gaps and can exceed the query).
+				qCov = qLen > 0.f ? (qEnd - qStart) / qLen : 0.f;
+				// Secondary (tp:A:S) and inversion (tp:A:I) records repeat a query;
+				// counting them would count one read several times.
+				const bool secondary = line.find("\ttp:A:S") != string::npos || line.find("\ttp:A:I") != string::npos;
+				if (secondary || perID < perIDmatch || qCov < qCovThr) {
 					//reject this hit
 					return true;
 				}
@@ -1924,20 +3116,25 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 // dqt=20;dqm=2;div=9.0;segs=2;parents=M04428:252:000000000-BM3M5:1:2110:24763:14436(1-78/0)+M04428:252:000000000-BM3M5:1:1116:5359:16203(78-186/0);
 
 					getline(ss, tmp, '\t');
-					size_t p1(tmp.find("parents=") + 4);//4
+					// "parents=" is 8 characters; +4 pointed into the keyword and never matched an OTU.
+					const size_t parents = tmp.find("parents=");
+					if (parents == string::npos) { continue; }
+					size_t p1(parents + 8);
 					size_t p2(tmp.find(");", p1) + 2);
 					segs2 = tmp.substr(p1, p2 - p1 - 1);
+					perID = 100.f;
 				}
 				else if (tmp == "perfect_chimera") {
-					removeSizeStr(segs);
-					perfectChims.insert(segs);
+					// Same normalization as the target lookup below, so the
+					// "unknown OTU" suppression actually matches.
+					perfectChims.insert(clusterKey(segs));
 					continue;
 				}// segs = ""; continue;}
 				if (tmp.substr(0, 3) == otuTerm) {
 					segs2 = segs;
 					perID = 100.f;
 				}
-				else {//match or perfect_chimera case
+				else if (!chimera) {//match case (a chimera line has no top= column; parsing it overwrote the parents)
 					getline(ss, tmp, '\t');//2
 					//dqt=1;top=GZV0ATA01ANJXZ;size=14;(99.6%);
 					size_t p1(tmp.find("top=") + 4);//4
@@ -1982,18 +3179,13 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 		} else {
 			tarsV.push_back(segs2);
 		}
-		matrixUnit splChim = (matrixUnit)tarsV.size();
-		curCLID.resize(tarsV.size());
+		// -1 marks unknown targets; zero-filling silently assigned them to OTU 0.
+		curCLID.assign(tarsV.size(), -1);
 
 		for ( uint kk = 0; kk < tarsV.size(); kk++ ) {
 			//goes over all chimeric hits
 			string oriClKey (tarsV[kk]);
-			segs2 = oriClKey;
-			//remove ;size= argument
-			removeSizeStr(segs2);
-			removeSeqStr(segs2);
-			removeCentrStr(segs2);
-			removeSampleID(segs2, SEP);
+			segs2 = clusterKey(oriClKey);
 			itCL = seq2CI.find(segs2);
 
 			if ( itCL == seq2CI.end() ) {//new OTU?
@@ -2014,16 +3206,24 @@ bool UClinks::getMAPPERline(string& segs, string& segs2,float& perID,
 			} else {//cluster exists
 				curCLID[kk] = ((*itCL).second);
 			}
-#ifdef matrix_sum
-			if ( addFromHDstring && smplID != "") {
-				//cerr << segs << "\t" << segs2 << endl;
-				add2OTUmat(smplID, (*itCL).second, splChim);
-			} 
-#endif
 		}
+		curCLID.erase(std::remove(curCLID.begin(), curCLID.end(), -1), curCLID.end());
+#ifdef matrix_sum
+		// A chimera's count is split over its known targets, as addSeedCounts
+		// does for dereplicated reads (it was divided by all targets here, so an
+		// unknown parent silently lost that share).
+		if (addFromHDstring && smplID != "") {
+			const matrixUnit splChim = (matrixUnit)curCLID.size();
+			for (int cluster : curCLID) { add2OTUmat(smplID, cluster, splChim); }
+		}
+#endif
 		return true;
 	}
-	return true;
+	// The file ended or failed: finish like EOF. Returning true here let a
+	// stream that failed without EOF spin the callers' while loops forever.
+	resetMarks();
+	UCread = true;		ucf.close();
+	return false;
 }
 void UClinks::writeOTUmatrix(string outf) {
 	cerr << "Writing OTU matrix with "<< SmplIDs.size() << " samples and " << seq2CI.size() << " OTUs to " << outf << endl;
@@ -2054,13 +3254,15 @@ void UClinks::writeOTUmatrix(string outf) {
 			if ( isnan(val) ) {
 				MA << "\t0";
 			} else {
-				MA << "\t"<<round(val);
+				// Print as an integer: a double streams with 6 significant digits
+				// (1234567 became 1.23457e+06 above one million reads).
+				MA << "\t" << static_cast<unsigned long long>(std::llround(std::max(0.0, (double)val)));
 			}
 		}
 	}
 	MA << endl;
 	MA.close();
-	cerr << "Recruited " << (int)totalCnts << " reads in OTU matrix\n";
+	cerr << "Recruited " << static_cast<unsigned long long>(std::llround(std::max(0.0, (double)totalCnts))) << " reads in OTU matrix\n";
 }
 void UClinks::setOTUnms(){
 	int cnt = 0;
@@ -2202,42 +3404,38 @@ void UClinks::addDefSeeds(shared_ptr<InputStreamer> FA, Filters* fil) {
 	}
 }
 
-void UClinks::besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1, 
-	 Filters* fil) {
-	bool checkBC = true;
-	int TagIdx(-2);
-	shared_ptr<DNA> tdn2 = tdn1->getPair();
-	if (tdn2 != NULL) {//fix for pairs assuming midSeqs
-		checkBC = false; //TagIdx = 0;
-	}
-	matrixUnit matchSiz = (matrixUnit)curCLIDpre.size();
-	if ( matchSiz>1 ) {
-		for ( int k = 0; k < matchSiz; k++ ) {
-			add2OTUmat(tdn1, curCLIDpre[k], matchSiz);
-		}
-		return;
-	}
-	int curCLID = (int) curCLIDpre[0];
-	add2OTUmat(tdn1, curCLID,1);
+void UClinks::addSeedCounts(const vector<int>& clusters, shared_ptr<DNAunique> d) {
+    for (int cluster : clusters) { add2OTUmat(d, cluster, (matrixUnit)clusters.size()); }
+}
+
+void UClinks::besterDNA(const vector<int>& curCLIDpre, shared_ptr<DNAunique> tdn1,
+        Filters* fil, bool addCounts, uint64_t candidateAbundance) {
+    if (curCLIDpre.empty()) { return; }
+    if (addCounts) { addSeedCounts(curCLIDpre, tdn1); }
+    // Multi-target (chimeric) assignments contribute counts, never seed candidates.
+    if (curCLIDpre.size() != 1) { return; }
+    const int curCLID = curCLIDpre[0];
+    int TagIdx = -2;
 	if (SeedsAreWritten){
 		//delete dnaTemp1; if (dnaTemp2 != NULL){ delete dnaTemp2; }
 		return;
 	}
 	//general routine, matching tdn found
 	if (bestDNA[curCLID] == NULL) { //just fill with current DNA
-		if (fil->doReversePrimers() && !fil->checkYellowAndGreen(tdn1, CurSetPair, TagIdx, true, Filters::FilteringContext::Seeding)) {
+		if (!seedSubclusters && fil->doReversePrimers() && !fil->checkYellowAndGreen(tdn1, CurSetPair, TagIdx, true, Filters::FilteringContext::Seeding)) {
 			return;//delete dnaTemp1;
 		}
 		shared_ptr< betterSeedStruct> tmpDNAst = make_shared<betterSeedStruct>(tdn1);
+		tmpDNAst->abundance = candidateAbundance;
 		bestDNA[curCLID] = tmpDNAst;
 		//fil->checkYellowAndGreen(tdn2, 1, TagIdx, true);
 		//bestDNA2[curCLID] = tdn2;			
 	}  	else { //already a candidate sequence? check who is better..
-		bestDNA[curCLID]->whoIsBetter2(tdn1);
+		bestDNA[curCLID]->whoIsBetter2(tdn1, candidateAbundance);
 	}
 }
 
-bool betterSeedStruct::whoIsBetter2(shared_ptr<DNAunique> d1){
+bool betterSeedStruct::whoIsBetter2(shared_ptr<DNAunique> d1, uint64_t candidateAbundance){
 	bool d1Merge = d1->getMerge() != nullptr;
 	bool refMerge = tdn1->getMerge() != nullptr;
 	if (d1Merge) {
@@ -2248,7 +3446,10 @@ bool betterSeedStruct::whoIsBetter2(shared_ptr<DNAunique> d1){
 	
 
 	//fil->betterSeed(tdn1,  bestDNA[curCLID]->tdn1, bestDNA[curCLID]->bestPID, CurSetPair, checkBC) //bestLEN[curCLID], 
-	bool formalWIB = whoIsBetter(d1, tdn1, bestPID, true);
+	bool formalWIB = whoIsBetter(d1, d1->getPair(), d1->getMerge(),
+        tdn1, tdn1->getPair(), tdn1->getMerge(), bestPID, true, d1.get(),
+        candidateAbundance ? candidateAbundance : d1->totalSum(),
+        abundance ? abundance : tdn1->totalSum());
 
 	bool replace(formalWIB);
 	//had some other code here previously.. but formalWIB is now the main, generalized decision maker
@@ -2257,6 +3458,7 @@ bool betterSeedStruct::whoIsBetter2(shared_ptr<DNAunique> d1){
 		if (d1->getTempFloat()){
 			bestPID = d1->getTempFloat();
 		}
+		abundance = candidateAbundance;
 		len = d1->length(); 
 		tdn1 = d1; 
 		if (d1Merge) {
@@ -2336,7 +3538,7 @@ void UClinks::writeNewSeeds(OutputStreamer* MD, Filters* fil,
 		//fil->check(bestDNA[i],true);
 		string newH = oriKey[i];
 		d = bestDNA[i]->tdn1;
-		shared_ptr<DNAunique> d2 = d->getPair();
+		shared_ptr<DerepRead> d2 = d->getPair();
 		if (printLnk){
 			string oriH = d->getShortId(); removeSizeStr(oriH);
 			links << newH << "\t" << oriH << endl;
@@ -2398,14 +3600,15 @@ void UClinks::printStats(ostream& os){
 	}
 
 	for (uint i = 0; i < to; i++){
-		shared_ptr<DNAunique> d = bestDNA[i]->tdn1;
-		if (d == nullptr) { continue; }
-		shared_ptr<DNAunique> d2(nullptr);
-		if (d->getMerge() != nullptr) {
-			d = d->getMerge();
+		const shared_ptr<DNAunique>& candidate = bestDNA[i]->tdn1;
+		if (candidate == nullptr) { continue; }
+		shared_ptr<DerepRead> d = candidate;
+		shared_ptr<DerepRead> d2(nullptr);
+		if (candidate->getMerge() != nullptr) {
+			d = candidate->getMerge();
 			merges++;
 		} else {
-			d2 = d->getPair();
+			d2 = candidate->getPair();
 		}
 		float curQ = d->getAvgQual();
 		if (d2 != NULL) {
@@ -2424,7 +3627,7 @@ void UClinks::printStats(ostream& os){
 		if (curQ < 1) {//no new Seed found, default seed
 			continue;
 		}
-		float sc = d->getTempFloat();
+		float sc = bestDNA[i]->tdn1->getTempFloat(); // set on the candidate, not its merged product
 
 		if (curQ < minQ){ minQ = curQ; }
 		if (curQ > maxQ){ maxQ = curQ; }

@@ -7,6 +7,8 @@
 
 It accepts FASTA and FASTQ files, including gzip-compressed files, and supports single-end and paired-end data. The default build also reads SAM, BAM and CRAM; see [alignment input](docs/hts.md).
 
+**3.60 beta:** audit bug fixes (see the changelog in `DNAconsts.h`), lower dereplication memory, mate tags (`/1` `/2` or Illumina `1:N`/`2:N`) that match the output file after orientation swaps, and a single `make test` entry point for all tests.
+
 **3.52 beta:** retain selected qualities for exact single-read and `(R1, R2)` variants, count fragments once, and export synchronized paired subclusters. Optional reassignment preserves mate linkage and sample counts; paired nucleotide sidecars use `SDMDIFF3`. See the [dereplication flags](docs/options.md#streaming-coarse-dereplication) and [paired-mode guide](docs/paired-diff-quality.md).
 
 ## Build from source
@@ -24,6 +26,10 @@ Every configuration writes `sdm`; switching configurations replaces that executa
 
 The default build needs HTSlib headers, `libhts.a`, and static archives for its enabled dependencies as well as the compiler runtime and system libraries. `pkg-config --static --libs htslib` supplies the dependency flags. On Debian/Ubuntu, start with `build-essential zlib1g-dev libhts-dev pkg-config`; additional development packages depend on how HTSlib was built (for example libbz2, liblzma, libdeflate or libcurl). Some distributions do not supply every required static archive; build those dependencies from source or use `STATIC=0` in that case. Missing dependencies produce a build error with setup instructions.
 
+libdeflate is optional. When its header and library are found (Debian/Ubuntu: `libdeflate-dev`; a static build needs `libdeflate.a`), BGZF `.gz` output and BGZF input use it instead of zlib: compression is about 1.8× faster and the files are about 11% smaller, with identical content. Otherwise zlib is used; `WITH_LIBDEFLATE` controls this.
+
+To build the default static `sdm` with micromamba (no root access needed), run `./build_static.sh -j8`. The first run creates the micromamba env `sdm-static` from conda-forge (`gcc_linux-64 gxx_linux-64 sysroot_linux-64 make cmake pkg-config curl zlib bzip2 liblzma-devel liblzma-static`). It then builds libdeflate 1.26 and HTSlib 1.24 from source into that env, because conda-forge's `libdeflate` has no `libdeflate.a` and bioconda's `htslib` needs libcurl and OpenSSL, which conda does not provide as static archives. This HTSlib has no remote-URL (libcurl, S3, GCS) or plugin support. Later runs only rebuild sdm, with objects in `.build/conda-*`. Arguments are passed to make, e.g. `./build_static.sh -j8 test`. Set `SDM_ENV`, `SDM_MICROMAMBA`, `HTSLIB_VERSION` or `LIBDEFLATE_VERSION` to change the defaults; `micromamba env remove -y -n sdm-static` starts over. A shared build (`make STATIC=0`) in a conda env needs only the compilers plus `htslib libdeflate zlib pkg-config`.
+
 ```sh
 make -j2
 ./sdm -v
@@ -32,9 +38,12 @@ make -j2
 For a custom HTSlib installation, set `PKG_CONFIG_PATH` to its `lib/pkgconfig` directory, or pass `HTS_CFLAGS` and `HTS_LIBS`. When specifying `HTS_LIBS` for a static build, include HTSlib's transitive dependencies too. Use `LDFLAGS` for additional library search/runtime paths. The existing `isa_FLAGS` and `isa_FLAGS2` overrides remain available. Each configuration has separate objects and automatic header dependencies under `.build/`. Run `make clean` when changing compiler flags or the HTSlib installation within a configuration.
 
 ```sh
-make test                  # helper, regression and HTS input/pipeline tests
-make test WITH_HTS=0        # helper and FASTA/FASTQ regression tests
+make test                  # all unit, regression and pipeline suites (HTS suites included)
+make test WITH_HTS=0        # the same without SAM/BAM/CRAM suites
+make test-quick             # skip the slow parity/seed-extension suites
 ```
+
+`make test` builds the C++ test programs and runs every suite through `tests/run_tests.py`. It continues after a failure, prints `PASS`/`FAIL` per suite with the last lines of any failing output, and exits non-zero if anything failed. Full logs are written to `.build/<configuration>/test-logs/<suite>.log`. Run selected suites with `make test TEST_ARGS="test_regressions_cli TestAuditFixes"`, or list them with `python3 tests/run_tests.py --list`. Individual suites can also be run directly: `.build/portable-1/TestAuditFixes [test-name]` or `python3 tests/test_regressions_cli.py ./sdm [case-name ...]`.
 
 ### Make options
 
@@ -52,6 +61,8 @@ make test WITH_HTS=0        # helper and FASTA/FASTQ regression tests
 | `HTS_LIBS` | From pkg-config; fallback `-lhts` | HTSlib link flags; static linking needs all transitive dependencies. |
 | `LDFLAGS`, `LDLIBS` | Empty | Additional linker flags and libraries. |
 | `isa_FLAGS`, `isa_FLAGS2` | Empty | Existing CPU/compiler and linker overrides. |
+| `WITH_LIBDEFLATE` | `auto` | Use libdeflate for BGZF when a test program links against it (`auto`); `1` requires it, `0` keeps zlib. |
+| `LIBDEFLATE_LIBS` | `-ldeflate` | libdeflate link flags. |
 
 For a custom installation with complete pkg-config metadata:
 
@@ -217,30 +228,38 @@ TruncateSequenceLength	200
 derepPrefix	auto
 ```
 
-In automatic and forced-prefix modes, `TruncateSequenceLength` caps **both R1 and merged search keys**. Differences beyond the cap cannot create duplicate truncated inputs for UPARSE. Full merged output and full HQ mates remain available for later use.
+In automatic and forced-prefix modes, `TruncateSequenceLength` caps **both R1 and merged search keys**. Differences beyond the cap cannot create duplicate truncated inputs for UPARSE. In ordinary dereplication, full merged output and full HQ mates remain available for later use.
 
 `-derepSrchLen <n>` (or `derepSrchLen` in the options file) accepts a positive integer or `-1`; the command-line value takes precedence. An explicit positive length keeps capped, length-matched comparison in automatic mode. Forced prefix mode overrides this search length but still respects the truncation cap. Use `-derepPrefix 0 -derepSrchLen -1` for legacy full-length exact matching.
 
 Prefix matching allows no substitutions, gaps, or offsets. Longer sequences that disagree stay separate; a short read compatible with several longer sequences is assigned once, deterministically. See [dereplication options](docs/options.md#dereplication) for matching and count-recovery details, and [runtime and memory measurements](docs/derep-prefix-evaluation.md) for the tradeoffs.
 
-For noisy reads, **streaming coarse dereplication** can reduce the number of retained sequences. Set `-derepIdentity` below `100` to enable it:
+For noisy reads, **streaming coarse dereplication** shares sequence references across nearby reads while preserving exact R1 dereplicates in standard outputs. Set `-derepIdentity` below `100` to enable it:
 
 ```sh
 sdm -i_fastq ont.fastq -o_dereplicate clusters.fna -options sdm_options.txt \
     -derepIdentity 97.5 -threads 1
 ```
 
-This example uses a 97.5% substitution identity threshold; choose the threshold for the compression and variant resolution you need. Each cluster keeps one high-quality representative, chosen by the existing dereplication rules, and the counts of all reads assigned to it. Matching uses an immutable initial sequence, so replacing the output representative does not move the cluster boundary. Comparisons start at position zero, cover the shorter clustering key, and respect explicit search and truncation caps. There is no indel alignment or reverse-complement search.
+This example uses a 97.5% substitution identity threshold; choose the threshold for the compression and variant resolution you need. Each exact effective R1 key keeps its high-quality representative and counts, chosen by the existing dereplication rules. Coarse groups supply shared immutable search/compression references. Matching uses an immutable initial sequence, so replacing the output representative does not move the cluster boundary. Comparisons start at position zero, cover the shorter clustering key, and respect explicit search and truncation caps. There is no indel alignment or reverse-complement search.
+
+With identity below 100 and multiple workers, coarse dereplication uses **64 independent partitions**. For default compact storage, an eligible positioned 20-mer from the effective search key determines routing (whole-key hashing is the fallback); identical keys reuse one dereplicate even when R2 differs, and the existing better-seed selection can replace both representative mates. Exact-key reuse avoids repeating coarse candidate searches. A shared work pool schedules ready partitions across the existing workers. Partitions run concurrently without a final merge. Internal coarse boundaries may differ from global grouping, but default exact R1 counts and minimum-copy decisions do not. Exact retained variants and their selected qualities remain available. Use `-derepGlobal 1` when one global clustering is required; one worker, identity 100, and `-derepReassign 1` also retain the global path. The startup log reports which mode is active.
 
 Search uses non-overlapping 20-mers and excludes seeds containing homopolymers of four or more bases, or ambiguous bases. `-derepSeedHomopolymer <2..20>` changes the run cutoff. Homopolymer positions still count in the final identity calculation. Reads without enough usable seeds use direct comparison.
 
 Every dereplicate stores its sparse sample counts in a base `diffDNA` object, including ordinary 100% exact/prefix dereplication. With nucleotide storage disabled, its reference and variant entries remain unallocated. The same counts supply abundance headers, sample maps, and minimum-copy filtering.
 
-Add `-derepStoreDiffs 1` to retain nucleotide-only observations in a compact **`clusters.diff`** sidecar. This enables the nucleotide portion of `diffDNA`, which records each distinct nucleotide-change pattern and processed length once, with its exact copy count, relative to the fixed initial sequence. It discards individual read names and qualities. High-quality representative replacement leaves the reference and all stored differences intact. With differences, quality retention, and final reassignment disabled, memory grows with retained clusters and sample counts rather than with every assigned read. With differences enabled, memory also grows with the distinct encoded nucleotide variants. Exact repeats of any variant only increment its count.
+With only `derepIdentity=97` enabled, ordinary outputs are the contract: retain the configured merged/R1 search policy, exact keys, prefix recovery, admission, copy cutoffs and sample counts. Main FASTQ uses ordinary per-base quality accumulation; standard HQ files contain one full representative pair with its observed qualities per ordinary parent. Representative qualities do not require `derepStoreQuals=1`, and the normal seed command needs no `seedSubclusters`. Explicit full-variant retention is a separate policy. See the [storage-only parity and memory assessment](docs/storage-only-dereplication.md).
 
-To export every exact subcluster within the coarse groups, also add `-derepSubclusterFasta 1`. SDM then writes `clusters.subclusters.fna`, with headers such as `>read_17.sub2;size=42;`. Each record reconstructs one distinct full processed sequence and uses that sequence's own count; the normal output still contains one representative per coarse cluster. The export is off by default and requires `-derepStoreDiffs 1`.
+By default, coarse groups are internal candidate indexes and immutable compression references. The main FASTA/FASTQ, merged/rest files, `.map` and representative HQ pairs preserve ordinary exact search-key dereplicates, search/truncation caps, prefix recovery and copy cutoffs. Storage-only mode preserves the configured merged/R1 search policy and ordinary merge-offset subgroup selection. With explicit full-variant quality retention, the search source is currently R1 and R2 differences do not split that parent; the existing paired better-seed selection can replace both mates. Select `-derepCoarseClusters 1` only when the output should describe coarse clusters instead. `-derepReassign 1` also explicitly selects coarse-cluster output and performs final reassignment. `-derepGlobal 1` controls search scope, not output granularity.
 
-Add **`-derepStoreQuals 1`** to retain each exact variant's selected quality vector and export `clusters.subclusters.fq`. The existing representative-selection rules choose one complete observed quality vector for each exact sequence; these are not averaged qualities. Nucleotides remain encoded as differences from the immutable initial reference. Names are generated as `@read_17.sub2;size=42;`, with the exact variant's own count. The normal coarse representative output remains available.
+Default 97% storage packs exact representatives instead of keeping a full DNA object for each key. Each coarse group shares immutable nucleotide references. Full unmerged fragment variants and their occurrence counts are delta encoded; each ordinary merge-offset subgroup keeps one selected pair's observed quality vectors and, for main FASTQ, lossless quality sums/coverage. Quality arrays choose raw, run-length or base-offset bit packing without changing scores. Better seeds replace the selected pair through the ordinary rules. Export reconstructs one exact parent at a time, keeping the same ordinary seed-candidate granularity. Memory still depends on distinct keys, variant diversity, qualities and index overhead; see the [peak-RSS benchmark](docs/storage-only-dereplication.md#peak-memory-measured-separately).
+
+Add `-derepStoreDiffs 1` to retain nucleotide-only observations in a compact **`clusters.diff`** sidecar. This enables the nucleotide portion of `diffDNA`, which records each distinct nucleotide-change pattern and processed length once, with its exact copy count, relative to the fixed initial sequence. It discards individual read names and qualities. High-quality representative replacement leaves the reference and all stored differences intact. Memory grows with distinct exact R1 representatives, coarse references, and sample counts rather than every repeated observation. This retains more representative pairs than earlier coarse-parent-only builds. With differences enabled, memory also grows with the distinct encoded nucleotide variants. Exact repeats of any variant only increment its count.
+
+To export every exact subcluster within the coarse groups, also add `-derepSubclusterFasta 1`. SDM then writes `clusters.subclusters.fna`, with headers such as `>read_17.sub2;size=42;`. Each record reconstructs one distinct full processed sequence and uses that sequence's own count; the normal output contains one representative per exact effective R1 key by default. The export is off by default and requires `-derepStoreDiffs 1`.
+
+Add **`-derepStoreQuals 1`** to retain each exact variant's selected quality vector and export `clusters.1.hq.fq`. The existing representative-selection rules choose one complete observed quality vector for each exact sequence; these are not averaged qualities. Nucleotides remain encoded as differences from the immutable initial reference. Names are generated as `@read_17.sub2;size=42;`, with the exact variant's own count. The main exact R1 representative output and `.map` remain available. Retained variants use the normal HQ FASTQ filenames, with no duplicate subcluster FASTQ files; seed extension reads them with `-seedSubclusters 1`.
 
 ```sh
 sdm -i_fastq ont.fastq -o_dereplicate clusters.fna -options sdm_options.txt \
@@ -249,7 +268,7 @@ sdm -i_fastq ont.fastq -o_dereplicate clusters.fna -options sdm_options.txt \
 
 Quality retention defaults to `0` and requires complete qualities for unmerged single-end reads or complete read pairs. It automatically retains nucleotide variants in memory; `-derepStoreDiffs 1` separately enables binary delta output. Binary `.diff` output remains nucleotide-only, using `SDMDIFF2` for single reads and `SDMDIFF3` for linked pairs. Selected qualities and counts also follow variants through optional final reassignment. See [single-end implementation and ONT simulation benchmarks](docs/diff-quality-retention.md).
 
-For paired input, the same flag retains **exact `(R1, R2)` variants**. Pairs sharing R1 but differing in R2 remain separate exact subclusters. SDM selects both quality vectors from one observed fragment and counts each fragment once. It writes synchronized `clusters.subclusters.1.fq` and `clusters.subclusters.2.fq` files with matching IDs and `;size=N;` values.
+For paired input, the same flag retains **exact `(R1, R2)` variants**. Pairs sharing R1 but differing in R2 remain separate exact subclusters. SDM selects both quality vectors from one observed fragment and counts each fragment once. It writes synchronized `clusters.1.hq.fq` and `clusters.2.hq.fq` files with matching IDs and `;size=N;` values.
 
 ```sh
 sdm -i_fastq reads.1.fq,reads.2.fq -paired 2 \
@@ -257,13 +276,13 @@ sdm -i_fastq reads.1.fq,reads.2.fq -paired 2 \
     -derepIdentity 97 -derepStoreQuals 1 -threads 1
 ```
 
-R1 supplies candidate seeds; both mates must independently meet the configured same-start identity threshold against their corresponding initial references. Search caps apply to each mate independently. Final reassignment compares both mates and moves complete variants and sample counts together. Native merging options must be disabled for this mode. Optional paired `.diff` files use the linked `SDMDIFF3` format; paired exact-subcluster FASTA produces `.subclusters.1.fna` and `.subclusters.2.fna`. See [paired behavior and validation](docs/paired-diff-quality.md).
+An identical effective R1 key reuses its parent even if R2 differs. For a new R1 key, R1 supplies candidate seeds; both mates must independently meet the configured same-start identity threshold against their corresponding initial references. Search caps apply to each mate independently. Final reassignment compares both mates and moves complete variants and sample counts together. Native merging options must be disabled for this mode. Default parent admission uses R1 eligibility, while variant quality-witness selection separately prefers both mates passing. HQ variants preserve full available mates and observed qualities, including logically trimmed tails, after physical technical cuts. Physically empty mates remain excluded; enabling retention does not preserve ordinary merged search/output. See the [four-mode behavioral audit and required changes](docs/derep-behavior-parity.md). The [Apong count investigation](docs/apong-derep-count-debug.md) reconciles the newer logs and reproduces merged/R1 differences with a 200 bp search cap. Optional paired `.diff` files use the linked `SDMDIFF3` format; paired exact-subcluster FASTA produces `.subclusters.1.fna` and `.subclusters.2.fna`. See [paired behavior and validation](docs/paired-diff-quality.md) and the [LotuS3 IO integration instructions](docs/lotus3-dereplication-io.md).
 
-For an optional final reassignment, add `-derepReassign 1` (default `0`). SDM compares each exact variant against the final high-quality representatives and moves all its copies and sample counts to a strictly closer representative that meets `derepIdentity`. Equal identities keep the original cluster. This is one pass with fixed representatives; it does not select new representatives or iterate. It works at any configured identity, including 97%, 98%, and 99%.
+For explicitly requested coarse-cluster output with final reassignment, add `-derepReassign 1` (default `0`). SDM compares each exact variant against the final high-quality representatives and moves all its copies and sample counts to a strictly closer representative that meets `derepIdentity`. Equal identities keep the original cluster. This is one pass with fixed representatives; it does not select new representatives or iterate. It works at any configured identity, including 97%, 98%, and 99%.
 
 Reassignment automatically retains nucleotide variants and per-variant sample counts in memory, even with `-derepStoreDiffs 0`, so it uses more memory than ordinary coarse clustering. Each variant stores one sparse sample-count vector; its abundance and the cluster sample map are derived from those entries. Writing `.diff` or exact-subcluster FASTA remains separately controlled by the existing options. Output counts, sample maps, minimum-copy filtering, and enabled variant exports all use the final assignments. See the [Q30 200 bp benchmark](docs/coarse-dereplication-q30.md) for speed and memory measurements.
 
-All of these options can be set as tab-separated entries in `sdm_options.txt`; command-line values take precedence. Default `derepIdentity=100`, `derepStoreDiffs=0`, `derepStoreQuals=0`, and `derepReassign=0` retain the existing automatic exact/prefix modes. Enabling differences, quality retention, or reassignment at `100` selects streaming exact-prefix clustering with fixed initial anchors. See [coarse dereplication and the delta format](docs/coarse-dereplication.md) for semantics, limits, and validation.
+All of these options can be set as tab-separated entries in `sdm_options.txt`; command-line values take precedence. Default `derepIdentity=100`, `derepStoreDiffs=0`, `derepStoreQuals=0`, and `derepReassign=0` retain the existing automatic exact/prefix modes. Enabling differences or quality retention at `100` selects streaming storage with exact R1 output keys; reassignment selects coarse-cluster output. See [coarse dereplication and the delta format](docs/coarse-dereplication.md) for semantics, limits, and validation.
 
 For more control over copy counts across samples, see `sdm -help_flags`.
 
@@ -337,6 +356,7 @@ The default build links HTSlib, copyright Genome Research Limited. Its code outs
 
 - [HTSlib MIT/Expat and modified BSD licenses](licenses/HTSlib-LICENSE).
 - [htscodecs license and public-domain notices](licenses/htscodecs-LICENSE.md).
+- [libdeflate MIT/Expat license](licenses/libdeflate-LICENSE), when libdeflate is linked.
 - [Versions and notice provenance](licenses/README.md).
 
 These copies come from HTSlib 1.24 and its included htscodecs 1.6.7. The Makefile uses the installed HTSlib selected by your build flags; include matching notices if you distribute a different release, plus required notices/materials for the actual linked compression, networking and runtime libraries.

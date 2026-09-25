@@ -137,7 +137,7 @@ The production integration should:
 
 ## Reproducing the experiments
 
-Sources: [candidate benchmark](../tests/Test99Candidates.cpp) and [sensitivity probe](../tests/Test99Seeds.cpp). They are not included in the default production test target. Build only these executables in a private directory from the repository root:
+Sources: [candidate benchmark](../.claude/archive/benchmarks/Test99Candidates.cpp) and [sensitivity probe](../.claude/archive/benchmarks/Test99Seeds.cpp). They are not included in the default production test target. Build only these executables in a private directory from the repository root:
 
 ```sh
 make -j4 WITH_HTS=0 STATIC=0 BUILD_DIR=/tmp/sdm-99-build \

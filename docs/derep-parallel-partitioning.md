@@ -50,7 +50,7 @@ The existing default 100% prefix backend already collects exact keys using local
 
 ## Approximate partition prototype
 
-The isolated [TestCoarsePartition.cpp](../tests/TestCoarsePartition.cpp) reuses the real `CoarseDereplication` index and representative/counting methods. It compares a shared index locked in batches of 256 with independently owned bucket indexes. Bucket tasks are assigned to workers; a bucket has one owner at a time and needs no internal mutex in this prototype. The approximate cases retain no `diffDNA`.
+The isolated [TestCoarsePartition.cpp](../.claude/archive/benchmarks/TestCoarsePartition.cpp) reuses the real `CoarseDereplication` index and representative/counting methods. It compares a shared index locked in batches of 256 with independently owned bucket indexes. Bucket tasks are assigned to workers; a bucket has one owner at a time and needs no internal mutex in this prototype. The approximate cases retain no `diffDNA`.
 
 After local clustering, the prototype sorts local initial anchors by their first input position and clusters those anchors globally. It then checks every original member against its resulting global anchor. This deliberately measures the proposed inexpensive representative-only merge and exposes when it is insufficient. It does not implement the repair pass that would be needed in production.
 
@@ -121,14 +121,14 @@ Recommended sequence of work:
 
 ## Reproduction and measurement limits
 
-The benchmark uses the same [CoarseSimulation.h](../tests/CoarseSimulation.h) as the earlier production benchmark; its Q30 and Q20 cluster counts and error rates were checked after extracting the shared helper. Machine: Intel Core Ultra 7 258V, eight logical CPUs, Linux under WSL/Microsoft virtualization, GCC 13.3, `-O3 -std=c++20`, `WITH_HTS=0 STATIC=0`. CPU placement, frequency, and background load were not controlled.
+The benchmark uses the same [CoarseSimulation.h](../.claude/archive/benchmarks/CoarseSimulation.h) as the earlier production benchmark; its Q30 and Q20 cluster counts and error rates were checked after extracting the shared helper. Machine: Intel Core Ultra 7 258V, eight logical CPUs, Linux under WSL/Microsoft virtualization, GCC 13.3, `-O3 -std=c++20`, `WITH_HTS=0 STATIC=0`. CPU placement, frequency, and background load were not controlled.
 
 Reads are preloaded solely to apply identical inputs to the partitions and to inspect every membership after merging. Prototype peak RSS therefore includes the full input and validation structures and must not be compared with the earlier streaming memory measurements. Routing is performed serially in this experiment, including the optional 4,096-read frequency sample; a production frontend could parallelize signature calculation after freezing the routing rule. Approximate timings exclude final FASTA/map/delta output and the exhaustive validation, while the production exact rows include output. Compare within these categories, not across them as equivalent end-to-end pipelines.
 
 ```sh
 make WITH_HTS=0 STATIC=0 BUILD_DIR=.build/coarse-dev-20260912 -j4 \
     .build/coarse-dev-20260912/TestCoarsePartition
-python3 tests/benchmark_coarse_partition.py \
+python3 .claude/archive/benchmarks/benchmark_coarse_partition.py \
     --binary .build/coarse-dev-20260912/TestCoarsePartition
 ```
 

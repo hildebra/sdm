@@ -40,7 +40,7 @@ From the repository root:
 ```sh
 make WITH_HTS=0 STATIC=0 BUILD_DIR=.build/coarse-dev-20260912 -j4 \
     .build/coarse-dev-20260912/TestCoarseBenchmark
-python3 tests/benchmark_coarse_q30.py \
+python3 .claude/archive/benchmarks/benchmark_coarse_q30.py \
     --binary .build/coarse-dev-20260912/TestCoarseBenchmark \
     --reads 1000000 --repeats 3
 ```

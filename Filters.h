@@ -3,6 +3,10 @@
 //#include "InputStream.h"
 #include "containers.h"
 #include "Statistics.h"
+#include <array>
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include <tuple>
 
 class Filters;
@@ -83,13 +87,14 @@ public:
 	vector<string> getQualFiles() { return QualF; }
 	vector<string> getFastqFiles() { return FastqF; }
 	vector<string> getMIDfqFiles() { return MIDfqF; }
-	void restartFileSet(bool b) { restartSet = b; }
-	void setBCfixed(bool b, bool fwd) {
-		if (fwd) { BCdFWDREV[fwd].b_BCdirFix = b; }
-		else { BCdFWDREV[fwd].b_BCdirFix = b; }
+	// fwd: read-1 barcodes (index 0), otherwise read-2 barcodes (index 1).
+	void setBCfixed(bool b, bool fwd) { runState_->barcodes[fwd ? 0 : 1].fixed.store(b); }
+	// Decides the barcode orientation once for the whole file set (all threads).
+	void eval_reversingBC(bool fwd);
+	// Decided for this file set, or (main filter) for any file set of the run.
+	bool barcodesReversed(bool fwd) const {
+		return runState_->barcodes[fwd ? 0 : 1].reversed.load() || reportedBarcodeReversal_[fwd ? 0 : 1];
 	}
-	bool eval_reversingBC(bool);
-	bool haveToRestartSet() { if (restartSet) { restartSet = false; return true; }return false; }
 
 	bool doOptimalClusterSeq() { return b_optiClusterSeq; }
 	bool doSubselReads() { return b_subselectionReads; }
@@ -140,7 +145,11 @@ public:
 	uint64_t maxReadsOutput() { return maxReadsPerOFile; }
 	uint getDemultiBPperSR() { return demultiBPperSR; }
 	void setWrittenReads(uint64_t x) { ReadsWritten = x; }
-	void copyOutputState(Filters& source) { ReadsWritten = source.writtenReads(); OFileIncre = source.getFileIncrementor(); }
+	void copyOutputState(Filters& source) {
+		ReadsWritten = source.writtenReads(); OFileIncre = source.getFileIncrementor();
+		// For the run log only: the main filter never scans, so its own state is untouched.
+		for (int i = 0; i < 2; ++i) { reportedBarcodeReversal_[i] = reportedBarcodeReversal_[i] || source.barcodesReversed(i == 0); }
+	}
 	int getFileIncrementor() { return OFileIncre; }
 	uint64_t getReadsWritten() { return ReadsWritten.load(); }
 	void incrementFileIncrementor() { OFileIncre++; ReadsWritten = 0; }//
@@ -303,8 +312,11 @@ protected:
 		if (minimum > 0) {
 			if (leng - hindrance < minimum) {
 				d->QualCtrl.minL = true;
-				if (leng - hindrance >= alt_min_l) {
-					d->setYellowQual(true);
+				// Without a *minSeqLength the second tier keeps the primary minimum:
+				// the default alt_min_l of 0 rescued every short read.
+				if (alt_min_l_set && leng - hindrance >= alt_min_l) {
+					// setYellowQual clears failed_; never resurrect an already failed read.
+					if (!d->isFailed()) { d->setYellowQual(true); }
 					return false;
 				}
 				//statAddition.minL++;
@@ -325,7 +337,7 @@ protected:
 	bool cutPrimer(shared_ptr<DNA> d, int primerID, bool&, int, bool = false, bool recordVariants = true);
 	bool cutPrimerRev(shared_ptr<DNA> d, int primerID, bool&, bool = false, bool recordVariants = true);
 	void recordPrimerVariant(const shared_ptr<DNA>& d, const string& primer, int start, bool reverseComplement,
-		PrimerVariantTracker::PrimerDirection direction);
+		PrimerVariantTracker::PrimerDirection direction, bool detected = true);
 
 
 
@@ -386,11 +398,12 @@ protected:
 	//filter related
 	int min_l, min_l_merged, alt_min_l; // Merged output keeps the configured minimum before the ordinary-read cap.
 	float min_l_p, alt_min_l_p;
+	bool alt_min_l_set = false; // a *minSeqLength line was given
 	int maxReadLength;//stats
 	bool norm2fiveNTs; //change IUPAC code to 5 bases (ACTGN)
 	uint max_l;
 	float min_q, alt_min_q;
-	bool BcutPrimer, alt_BcutPrimer, bPrimerR;//cut Primers from seq?
+	bool BcutPrimer, bPrimerR;//cut Primers from seq?
 	bool bRequireRevPrim, alt_bRequireRevPrim; // reject seq if reverse primer not found
 	bool BextensivePrimerChecks;
 	bool bRequireFwdPrim, alt_bRequireFwdPrim;
@@ -425,19 +438,27 @@ protected:
 	//int revConstellationN;//number of read pairs, where pair1/2 are changed (mo)
 
 
-	//flow control bools
-	struct BCdecide
-	{
-		int BChit, BCrevhit;
-		bool b_BCdirFix, reversedBCs;
-		BCdecide() : BChit(0), BCrevhit(0), b_BCdirFix(false), reversedBCs(false) {}
-		void reset() { BChit = 0; BCrevhit = 0; b_BCdirFix = false; reversedBCs = false; }
-		void fix() { BChit = 0; BCrevhit = 0; b_BCdirFix = true; reversedBCs = false; }
+	// Decided once per input file set: the per-file filter owns this state and its
+	// per-thread sub-filters share it. Each copy used to count barcode hits and
+	// decide orientation on its own, so threads could settle on different
+	// orientations, and each derived a fractional minSeqLength from its own
+	// running maximum read length.
+	struct SharedRunState {
+		struct Orientation {
+			std::atomic<uint64_t> hits{0}, reverseHits{0};
+			std::atomic<bool> fixed{false}, reversed{false};
+		};
+		std::array<Orientation, 2> barcodes; // [0] read-1 barcodes, [1] read-2 barcodes
+		std::mutex decision;
+		std::atomic<int> maxReadLength{0};
 	};
-	vector<BCdecide> BCdFWDREV;
+	std::shared_ptr<SharedRunState> runState_;
+	// This copy's barcode tables already follow a shared reversal decision.
+	std::array<bool, 2> barcodesReversedLocally_{false, false};
+	std::array<bool, 2> reportedBarcodeReversal_{false, false};
+	void syncBarcodeOrientation(bool isPair1);
 	uint64_t firstXreadsW;//just prints the first X reads for experiment (read pairs being counted as 2)
 	uint64_t firstXreadsR;//just reads the first X reads for experiment (read pairs being counted as 2)
-	bool restartSet;//start from beginning, i.e. wrong BC direction
 	bool b_optiClusterSeq;//SEED extension
 	bool b_subselectionReads;//filter out a specific set of reads
 	bool b_doQualFilter;//qulity file provided? Then no qual_ filter

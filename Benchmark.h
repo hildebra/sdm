@@ -21,9 +21,10 @@ using namespace std;
 
 class Benchmark {
     string name;
-    long event_count = 0;
-    long time_sum = 0;
-    long dummy_time;
+    // long long: microsecond totals overflow a 32-bit long (Windows) after ~36 minutes.
+    long long event_count = 0;
+    long long time_sum = 0;
+    long long dummy_time;
     time_point<high_resolution_clock> start_time;
     time_point<high_resolution_clock> last_time;
 
@@ -38,14 +39,14 @@ public:
         auto stop_time_dummy = high_resolution_clock::now();
         auto duration_dummy = duration_cast<microseconds>(stop_time_dummy - start_time_dummy);
 
-        dummy_time = (long)duration_dummy.count();
+        dummy_time = (long long)duration_dummy.count();
     }
 
     uint now_total_secs() {
         auto now_time = high_resolution_clock::now();
         auto duration = duration_cast<microseconds>(now_time - start_time);
-        long time_loc = (long)duration.count();
-        uint secs = time_loc / 1000000;
+        long long time_loc = (long long)duration.count();
+        uint secs = (uint)(time_loc / 1000000);
         return secs;
     }
 
@@ -71,18 +72,19 @@ public:
     void stop() {
         auto stop_time = high_resolution_clock::now();
         auto duration = duration_cast<microseconds>(stop_time-start_time);
-        time_sum += (long)duration.count();
+        time_sum += (long long)duration.count();
     }
 
     void printResults(ostream &os = std::cout) {
 
-        uint hours = time_sum/3600000000;
-        time_sum -= hours * 3600000000;
-        uint mins = time_sum/60000000;
-        time_sum -= mins * 60000000;
-        uint secs = time_sum/1000000;
-        time_sum -= secs * 1000000;
-        uint msecs = time_sum/1000;
+        long long remaining = time_sum; // printing must not consume the total
+        uint hours = (uint)(remaining/3600000000LL);
+        remaining -= hours * 3600000000LL;
+        uint mins = (uint)(remaining/60000000LL);
+        remaining -= mins * 60000000LL;
+        uint secs = (uint)(remaining/1000000LL);
+        remaining -= secs * 1000000LL;
+        uint msecs = (uint)(remaining/1000);
 
         os << name << ": ";
         if (hours) os << hours << "h ";
@@ -111,8 +113,10 @@ namespace Instr {
         COUNT_POINTS
     };
 
-    static std::array<std::atomic<long long>, COUNT_POINTS> time_us = {};
-    static std::array<std::atomic<long long>, COUNT_POINTS> counts = {};
+    // inline: one instance for all translation units (a static per unit left
+    // printResults reading its own empty copy).
+    inline std::array<std::atomic<long long>, COUNT_POINTS> time_us = {};
+    inline std::array<std::atomic<long long>, COUNT_POINTS> counts = {};
 
     inline long long now_us() {
         using namespace std::chrono;

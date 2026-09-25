@@ -28,6 +28,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "IO.h"
 #include "Filters.h"
 #include "Benchmark.h"
+#include <cstdlib>
 #include "ReadMerger.h"
 
 // Implementation of SimpleMemoryTracker::sample()
@@ -55,7 +56,7 @@ void Instr::SimpleMemoryTracker::sample() {
 }
 
 
-int main(int argc, char* argv[])
+static int runSdm(int argc, char* argv[])
 {
     Benchmark* sdm_benchmark = new Benchmark("Time taken: ");
     sdm_benchmark->start();
@@ -141,6 +142,24 @@ int main(int argc, char* argv[])
 
 
 	return 0;
+}
+
+int main(int argc, char* argv[])
+{
+	try {
+		return runSdm(argc, argv);
+	}
+	catch (const std::exception& error) {
+		std::cout.flush();
+		std::cerr << "Error: " << error.what() << std::endl;
+	}
+	catch (...) {
+		std::cout.flush();
+		std::cerr << "Error: unknown exception" << std::endl;
+	}
+	// Worker and writer threads may still be running; skip static destructors
+	// (as the previous std::terminate did) but exit cleanly with a failure code.
+	std::_Exit(EXIT_FAILURE);
 }
 
 

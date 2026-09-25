@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <memory>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <stdexcept>
 #include "Benchmark.h"
@@ -41,14 +42,24 @@ private:
         using return_type = decltype(f(args...));
         auto task = std::make_shared<std::packaged_task<return_type()>>(std::bind(std::forward<F>(f), std::forward<Args>(args)...));
         std::future<return_type> res = task->get_future();
+        bool wake = false;
+        bool runInline = false;
         {
             std::unique_lock<std::mutex> lock(queue_mutex_);
             if (stop_.load()) throw std::runtime_error("submit on stopped ThreadPool");
             // wait while queue is full
             while (max_queue_size_ > 0 && (tasks_.size() + gzip_tasks_.size()) >= max_queue_size_) {
+                // A worker of this pool waiting for space could deadlock (every
+                // worker blocked in submit, none popping): run the task itself.
+                if (current_identity_().pool == this) { runInline = true; break; }
                 // block until a worker pops a task (and notifies)
                 condition_not_full_.wait(lock);
                 if (stop_.load()) throw std::runtime_error("submit on stopped ThreadPool");
+            }
+            if (runInline) {
+                lock.unlock();
+                (*task)();
+                return res;
             }
             // capture submission timestamp for queue wait instrumentation (time of enqueue)
             long long submit_ts = Instr::now_us();
@@ -68,16 +79,33 @@ private:
             }
             // record sampled queue length (after push)
             Instr::record_pool_queue_len((long long)(tasks_.size() + gzip_tasks_.size()));
+            queued_.store(tasks_.size() + gzip_tasks_.size(), std::memory_order_release);
+            // A spinning worker takes the task without being woken; wake a sleeper only
+            // when more tasks are queued than workers are spinning.
+            wake = sleepers_ > 0 && queued_.load(std::memory_order_relaxed) > spinners_.load(std::memory_order_relaxed);
         }
-        condition_.notify_one();
+        if (wake) { condition_.notify_one(); }
         return res;
     }
 
 public:
     void shutdown();
     ~ThreadPool();
+    // Index (0..size()-1) of the calling thread within this pool, or -1 for
+    // threads that are not workers of this pool. Lets per-worker state be
+    // indexed independently of how many work items are in flight.
+    int worker_index_of_current_thread() const {
+        const WorkerIdentity& identity = current_identity_();
+        return identity.pool == this ? identity.index : -1;
+    }
+    size_t size() const { return worker_count_; }
 
 private:
+    struct WorkerIdentity { const ThreadPool* pool = nullptr; int index = -1; };
+    static WorkerIdentity& current_identity_() {
+        thread_local WorkerIdentity identity;
+        return identity;
+    }
     ThreadPool(size_t threads = 0);
     static std::atomic<size_t>& configured_threads_();
     static std::atomic<size_t>& configured_gzip_threads_();
@@ -92,6 +120,12 @@ private:
     std::condition_variable condition_;
     std::condition_variable condition_not_full_;
     std::atomic<bool> stop_;
+    // Idle workers spin briefly (spinners_) before they sleep (sleepers_, guarded by
+    // queue_mutex_); queued_ mirrors the queue length for spinners without the lock.
+    std::atomic<size_t> queued_{0};
+    std::atomic<int> spinners_{0};
+    int sleepers_ = 0;
+    void spin_for_work_();
     bool gzip_mode_enabled_ = false;
     size_t gzip_reserved_target_ = 0;
     size_t gzip_inflight_ = 0;
@@ -151,14 +185,9 @@ inline void ThreadPool::configure(size_t threads) {
     }
     configured_threads_().store(threads);
     if (!gzip_instance_created_().load() && configured_gzip_threads_().load() == 0) {
-        size_t gzipThreads = threads / 4;
-        if (threads > 1 && gzipThreads < 2) {
-            gzipThreads = 2;
-        }
-        else if (gzipThreads == 0) {
-            gzipThreads = 1;
-        }
-        configured_gzip_threads_().store(gzipThreads);
+        // BGZF (de)compression only runs while workers wait for it, so give it
+        // the same capacity as the workers instead of a quarter of them.
+        configured_gzip_threads_().store(threads);
     }
 }
 
@@ -186,15 +215,7 @@ inline size_t ThreadPool::configured_gzip_thread_count() {
     if (configured > 0) {
         return configured;
     }
-    size_t compute = configured_thread_count();
-    size_t derived = compute / 4;
-    if (compute > 1 && derived < 2) {
-        derived = 2;
-    }
-    else if (derived == 0) {
-        derived = 1;
-    }
-    return derived;
+    return configured_thread_count();
 }
 
 inline ThreadPool::ThreadPool(size_t threads) : stop_(false) {
@@ -206,13 +227,23 @@ inline ThreadPool::ThreadPool(size_t threads) : stop_(false) {
     // set a bounded queue size to provide backpressure; a small multiple of threads
     max_queue_size_ = threads * 4;
     for (size_t i = 0; i < threads; ++i) {
-        workers_.emplace_back([this]() {
+        workers_.emplace_back([this, i]() {
+            current_identity_() = WorkerIdentity{this, static_cast<int>(i)};
             for (;;) {
                 std::function<void()> task;
                 bool tookGzip = false;
+                this->spin_for_work_();
                 {
                     std::unique_lock<std::mutex> lock(this->queue_mutex_);
-                    this->condition_.wait(lock, [this]() { return this->stop_.load() || this->has_work_(); });
+                    // Leaving the spin under the lock: a submitter that saw this worker
+                    // spinning (and so did not wake anyone) is guaranteed that it
+                    // re-checks the queue here before sleeping.
+                    this->spinners_.fetch_sub(1, std::memory_order_relaxed);
+                    while (!this->stop_.load() && !this->has_work_()) {
+                        ++this->sleepers_;
+                        this->condition_.wait(lock);
+                        --this->sleepers_;
+                    }
                     if (this->stop_.load() && !this->has_work_()) return;
 
                     if (should_take_gzip_()) {
@@ -234,6 +265,7 @@ inline ThreadPool::ThreadPool(size_t threads) : stop_(false) {
                     else {
                         continue;
                     }
+                    this->queued_.store(this->tasks_.size() + this->gzip_tasks_.size(), std::memory_order_relaxed);
                     // notify one blocked submitter that there is space
                     this->condition_not_full_.notify_one();
                 }
@@ -247,6 +279,23 @@ inline ThreadPool::ThreadPool(size_t threads) : stop_(false) {
                 }
             }
         });
+    }
+}
+
+// Spins for up to ~50 us before the caller sleeps. On a short gap between tasks this
+// saves the submitter a futex wake-up and the task a scheduler wake-up. Counted in
+// spinners_ until the caller has re-checked the queue under the lock.
+inline void ThreadPool::spin_for_work_() {
+    spinners_.fetch_add(1, std::memory_order_relaxed);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(50);
+    for (unsigned i = 1;; ++i) {
+        if (queued_.load(std::memory_order_acquire) > 0 || stop_.load(std::memory_order_relaxed)) { return; }
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+        __builtin_ia32_pause();
+#elif (defined(__GNUC__) || defined(__clang__)) && defined(__aarch64__)
+        __asm__ __volatile__("yield");
+#endif
+        if ((i & 31) == 0 && std::chrono::steady_clock::now() >= deadline) { return; }
     }
 }
 
@@ -291,8 +340,13 @@ inline ThreadPool::~ThreadPool() {
 }
 
 inline void ThreadPool::shutdown() {
-    bool expected = false;
-    if (!stop_.compare_exchange_strong(expected, true)) return;
+    {
+        // Set stop_ under the queue mutex: a worker that has just evaluated the wait
+        // predicate as false must not miss the notification below.
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        bool expected = false;
+        if (!stop_.compare_exchange_strong(expected, true)) return;
+    }
     condition_.notify_all();
     condition_not_full_.notify_all();
     for (auto &worker : workers_) {

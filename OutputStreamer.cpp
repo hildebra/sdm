@@ -3,15 +3,84 @@
 #include "Benchmark.h"
 
 #include "OutputFileStream.h"
+#include <algorithm>
+#include <map>
+
+//**************************** asynchronous output writer ****************************
+// One background thread writes full ofbufstream buffers. A stream queues its
+// buffers while holding its output_mtx, so each file receives bytes in append
+// order. Appenders only wait here for backpressure, never for write() or BGZF
+// compression themselves.
+class AsyncOutputWriter {
+public:
+	// nullptr once the writer has shut down (static destruction); callers then write inline.
+	static AsyncOutputWriter* instance() {
+		static AsyncOutputWriter writer;
+		return writer.accepting_.load(std::memory_order_acquire) ? &writer : nullptr;
+	}
+	// Takes ownership of buffer only when it returns true.
+	bool submit(ofbufstream* owner, OutputBuffer&& buffer, size_t size) {
+		std::unique_lock<std::mutex> lock(mutex_);
+		notFull_.wait(lock, [&] { return stop_ || jobs_.empty() || queuedBytes_ < kMaxQueuedBytes; });
+		if (stop_) { return false; }
+		queuedBytes_ += size;
+		jobs_.push_back(Job{owner, std::move(buffer), size});
+		notEmpty_.notify_one();
+		return true;
+	}
+	AsyncOutputWriter(const AsyncOutputWriter&) = delete;
+	AsyncOutputWriter& operator=(const AsyncOutputWriter&) = delete;
+	~AsyncOutputWriter() {
+		accepting_.store(false, std::memory_order_release);
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			stop_ = true;
+		}
+		notEmpty_.notify_all();
+		notFull_.notify_all();
+		if (thread_.joinable()) { thread_.join(); }
+	}
+
+private:
+	struct Job {
+		ofbufstream* owner;
+		OutputBuffer buffer;
+		size_t size;
+	};
+	static constexpr size_t kMaxQueuedBytes = size_t(16) << 20;
+	AsyncOutputWriter() : thread_([this] { run(); }) { accepting_.store(true, std::memory_order_release); }
+	void run() {
+		std::unique_lock<std::mutex> lock(mutex_);
+		for (;;) {
+			notEmpty_.wait(lock, [&] { return stop_ || !jobs_.empty(); });
+			if (jobs_.empty()) { return; }  // stopping and fully drained
+			Job job = std::move(jobs_.front());
+			jobs_.pop_front();
+			lock.unlock();
+			job.owner->writeQueued(job.buffer, job.size);
+			// The owner may be destroyed as soon as its last buffer is released.
+			job.owner->releaseQueued(std::move(job.buffer));
+			lock.lock();
+			queuedBytes_ -= job.size;
+			notFull_.notify_all();
+		}
+	}
+	std::mutex mutex_;
+	std::condition_variable notEmpty_, notFull_;
+	std::deque<Job> jobs_;
+	size_t queuedBytes_ = 0;
+	bool stop_ = false;
+	std::atomic<bool> accepting_{false};
+	std::thread thread_;
+};
 
 //**************************** ofbufstream ****************************
 ofbufstream::ofbufstream(const string IF, int mif, bool isMC, size_t bufferS)
-	: file(IF), keeper(bufferS), keeperW(bufferS), modeIO(mif), used(0), usedW(0),
-	coutW(false), isGZ(false), doMC(isMC), use_thread_pool(isMC), primary(nullptr), bufS(bufferS) {
+	: file(IF), keeper(bufferS), modeIO(mif), used(0),
+	coutW(false), isGZ(false), doMC(isMC), primary(nullptr), bufS(bufferS) {
     if (bufS == 0) bufS = 5* 1024 * 1024;
 	if (keeper.size() != bufS) {
 		keeper.resize(bufS);
-		keeperW.resize(bufS);
 	}
 	if (file == "" || file == "-") {
 		coutW = true;
@@ -34,75 +103,119 @@ void ofbufstream::finishWrites() {
 bool ofbufstream::operator! (void) {
 	if (coutW) return false;
 	if (!primary) return true;
+	waitForQueuedWrites();
 	return !(*primary);
 }
 
 void ofbufstream::operator<< (const string& X) {
-	if (X.empty()) return;
+	append(X.data(), X.size());
+}
+
+void ofbufstream::append(const char* data, size_t size) {
+	if (size == 0) return;
 	if (coutW) {
-		cout << X;
+		Instr::TimedLockGuard guard(output_mtx); // worker threads may write concurrently
+		cout.write(data, static_cast<std::streamsize>(size));
 		return;
 	}
 	if (bufS == 0) {
        Instr::TimedLockGuard guard(output_mtx);
-		if (primary) (*primary) << X;
+		if (primary) primary->write(data, static_cast<std::streamsize>(size));
 		return;
 	}
-	if (!asyncWriterEnabled) {
-		Instr::TimedLockGuard guard(output_mtx);
-		if (used + X.size() > keeper.size()) {
+	Instr::TimedLockGuard guard(output_mtx);
+	if (!asyncWriterEnabled || !primary) {
+		if (used + size > keeper.size()) {
 			if (primary && used > 0) {
 				primary->write(keeper.data(), (streamsize)used);
 			}
 			used = 0;
 		}
 
-		if (X.size() > keeper.size()) {
-			if (primary) primary->write(X.data(), (streamsize)X.size());
+		if (size > keeper.size()) {
+			if (primary) primary->write(data, (streamsize)size);
 			return;
 		}
 
-		memcpy(keeper.data() + used, X.data(), X.size());
-		used += X.size();
+		memcpy(keeper.data() + used, data, size);
+		used += size;
 		return;
 	}
+	// Fill the buffer completely and queue it; the byte stream is unchanged.
+	while (size > 0) {
+		if (used == keeper.size()) { handOffLocked(); }
+		const size_t take = std::min(size, keeper.size() - used);
+		memcpy(keeper.data() + used, data, take);
+		used += take;
+		data += take;
+		size -= take;
+	}
+}
 
-	std::vector<char> flushBuf;
-	std::vector<char> directBuf;
+void ofbufstream::handOffLocked() {
+	if (used == 0) { return; }
+	OutputBuffer next;
 	{
-		Instr::TimedLockGuard guard(output_mtx);
-		if (used + X.size() > keeper.size() && used > 0) {
-			flushBuf.assign(keeper.begin(), keeper.begin() + used);
-			used = 0;
+		std::lock_guard<std::mutex> lock(asyncMtx_);
+		if (!spare_.empty()) {
+			next = std::move(spare_.back());
+			spare_.pop_back();
 		}
+		++inflight_;
+	}
+	if (next.size() != keeper.size()) { next.resize(keeper.size()); }
+	std::swap(keeper, next); // next now holds the filled buffer
+	const size_t size = used;
+	used = 0;
+	AsyncOutputWriter* writer = AsyncOutputWriter::instance();
+	if (!writer || !writer->submit(this, std::move(next), size)) {
+		writeQueued(next, size);
+		releaseQueued(std::move(next));
+	}
+}
 
-		if (X.size() > keeper.size()) {
-			directBuf.assign(X.begin(), X.end());
-		}
-		else {
-			memcpy(keeper.data() + used, X.data(), X.size());
-			used += X.size();
+void ofbufstream::writeQueued(OutputBuffer& buffer, size_t size) {
+	try {
+		if (primary && size > 0) {
+			primary->write(buffer.data(), static_cast<std::streamsize>(size));
 		}
 	}
-
-	if (!flushBuf.empty()) {
-		enqueueBuffer(std::move(flushBuf));
+	catch (...) {
+		std::lock_guard<std::mutex> lock(asyncMtx_);
+		if (!asyncError_) { asyncError_ = std::current_exception(); }
 	}
-	if (!directBuf.empty()) {
-		enqueueBuffer(std::move(directBuf));
+}
+
+void ofbufstream::releaseQueued(OutputBuffer&& buffer) {
+	std::lock_guard<std::mutex> lock(asyncMtx_);
+	if (spare_.size() < 2) { spare_.push_back(std::move(buffer)); }
+	if (--inflight_ == 0) { asyncDone_.notify_all(); }
+}
+
+void ofbufstream::waitForQueuedWrites() {
+	std::unique_lock<std::mutex> lock(asyncMtx_);
+	asyncDone_.wait(lock, [this] { return inflight_ == 0; });
+	if (asyncError_) {
+		std::exception_ptr error = asyncError_;
+		asyncError_ = nullptr;
+		lock.unlock();
+		std::rethrow_exception(error);
 	}
 }
 
 void ofbufstream::emptyStream() {
 	if (coutW) return;
-  if (!asyncWriterEnabled) {
+	{
 		Instr::TimedLockGuard guard(output_mtx);
-		if (!primary || used == 0) return;
-		primary->write(keeper.data(), (streamsize)used);
-		used = 0;
-		return;
+		if (!asyncWriterEnabled || !primary) {
+			if (!primary || used == 0) return;
+			primary->write(keeper.data(), (streamsize)used);
+			used = 0;
+			return;
+		}
+		handOffLocked();
 	}
-	writeStream(true);
+	waitForQueuedWrites();
 }
 
 void ofbufstream::activate() {
@@ -131,6 +244,7 @@ void ofbufstream::activate() {
 void ofbufstream::deactivate() {
 	if (coutW) return;
 	finishWrites();
+	if (retained_) return;
 	if (!primary) return;
 	try {
 		finalizeOutputFile(primary, file);
@@ -142,134 +256,93 @@ void ofbufstream::deactivate() {
 	}
 }
 
-void ofbufstream::writeStream(bool doKickoff) {
-    (void)doKickoff;
-  if (!asyncWriterEnabled) {
-		Instr::TimedLockGuard guard(output_mtx);
-		if (!primary || used == 0) {
-			return;
-		}
-		primary->write(keeper.data(), (streamsize)used);
-		used = 0;
-		return;
-	}
-
-	std::vector<char> bufCopy;
-	{
-		Instr::TimedLockGuard guard(output_mtx);
-		if (!primary || used == 0) {
-			return;
-		}
-		bufCopy.assign(keeper.begin(), keeper.begin() + used);
-		used = 0;
-	}
-	enqueueBuffer(std::move(bufCopy));
-}
-
-void ofbufstream::enqueueBuffer(std::vector<char>&& buf) {
-	if (!asyncWriterEnabled || buf.empty()) {
-		return;
-	}
-	std::unique_lock<std::mutex> lk(append_mtx_);
-	queue_cv.wait(lk, [this]() {
-		return stopWriter || pendingBuffers.size() < maxQueuedBuffers;
-	});
-	if (stopWriter) {
-		return;
-	}
-	pendingBuffers.emplace_back(std::move(buf));
-	lk.unlock();
-	queue_cv.notify_all();
-}
-
-void ofbufstream::writerLoop() {
-	for (;;) {
-		std::vector<char> buf;
-		{
-			std::unique_lock<std::mutex> lk(append_mtx_);
-			queue_cv.wait(lk, [this]() {
-				return stopWriter || !pendingBuffers.empty();
-			});
-			if (pendingBuffers.empty()) {
-				if (stopWriter) {
-					break;
-				}
-				continue;
-			}
-			buf = std::move(pendingBuffers.front());
-			pendingBuffers.pop_front();
-			queue_cv.notify_all();
-		}
-
-		if (!buf.empty()) {
-			Instr::TimedLockGuard guard(output_mtx);
-			if (primary) {
-				primary->write(buf.data(), static_cast<std::streamsize>(buf.size()));
-			}
-		}
-	}
-}
-
-void ofbufstream::startWriterThread() {
-	if (!asyncWriterEnabled || writerStarted) {
-		return;
-	}
-	{
-		std::lock_guard<std::mutex> lg(append_mtx_);
-		stopWriter = false;
-	}
-	writerThread = std::thread(&ofbufstream::writerLoop, this);
-	writerStarted = true;
-}
-
-void ofbufstream::stopWriterThread() {
-	if (!writerStarted) {
-		return;
-	}
-	{
-		std::lock_guard<std::mutex> lg(append_mtx_);
-		stopWriter = true;
-	}
-	queue_cv.notify_all();
-	if (writerThread.joinable()) {
-		writerThread.join();
-	}
-	{
-		std::lock_guard<std::mutex> lg(append_mtx_);
-		pendingBuffers.clear();
-	}
-	writerStarted = false;
-	stopWriter = false;
-}
-
 bool ofbufstream::shouldUseAsyncWriter() const {
-	return false;
+	// -threadIO 1 with more than one worker: overlap file I/O and compression
+	// with processing. Single-threaded runs keep writing inline.
+	return doMC && !coutW && bufS > 0 && ThreadPool::configured_thread_count() > 1 &&
+		AsyncOutputWriter::instance() != nullptr;
 }
 
-bool ofbufstream::internalWrite(bool closeThis) {
-    if (!primary) {
-		return false;
+//**************************** retained output streams ****************************
+namespace {
+struct RetentionState {
+	std::mutex mutex;
+	bool enabled = false;
+	std::map<std::string, std::shared_ptr<ofbufstream>> streams;
+	~RetentionState() {
+		for (auto& entry : streams) {
+			try {
+				entry.second->setRetained(false);
+				entry.second->deactivate();
+			}
+			catch (const std::exception& error) {
+				std::cerr << "Failed to finalize " << entry.first << ": " << error.what() << "\n";
+			}
+		}
 	}
-    primary->write(keeperW.data(), static_cast<std::streamsize>(usedW));
-	if (closeThis) {
-		deactivate();
-	}
-	return true;
+};
+RetentionState& retentionState() {
+	static RetentionState state;
+	return state;
+}
 }
 
-bool ofbufstream::internalWriteBuffer(std::vector<char>&& buf, bool closeThis) {
-	if (!primary) { return false; }
-	if (!buf.empty()) {
-		primary->write(buf.data(), static_cast<std::streamsize>(buf.size()));
-	}
-	if (closeThis) { deactivate(); }
-	return true;
+namespace OutputStreamRetention {
+void enable(bool on) {
+	auto& state = retentionState();
+	std::lock_guard<std::mutex> lock(state.mutex);
+	state.enabled = on;
 }
 
-void ofbufstream::write(std::string s, std::string file) {
-	ofstream of(file.c_str(), ios::app);
-	of.write(s.c_str(), s.size());
-	of.close();
+bool enabled() {
+	auto& state = retentionState();
+	std::lock_guard<std::mutex> lock(state.mutex);
+	return state.enabled;
+}
+
+std::shared_ptr<ofbufstream> open(const string& path, int mode, bool isMC, size_t bufferS) {
+	auto& state = retentionState();
+	std::unique_lock<std::mutex> lock(state.mutex);
+	if (!state.enabled || path.empty() || path == "-") {
+		lock.unlock();
+		return std::make_shared<ofbufstream>(path, mode, isMC, bufferS);
+	}
+	auto found = state.streams.find(path);
+	if (found != state.streams.end()) {
+		// Continue the open file; this replaces finalize + append-mode reopen.
+		if (mode == ios::app) { return found->second; }
+		// A truncating open restarts the file, exactly as without retention.
+		std::shared_ptr<ofbufstream> previous = std::move(found->second);
+		state.streams.erase(found);
+		previous->setRetained(false);
+		previous->deactivate();
+	}
+	auto stream = std::make_shared<ofbufstream>(path, mode, isMC, bufferS);
+	stream->setRetained(true);
+	state.streams.emplace(path, stream);
+	return stream;
+}
+
+void closeAll() {
+	auto& state = retentionState();
+	std::map<std::string, std::shared_ptr<ofbufstream>> streams;
+	{
+		std::lock_guard<std::mutex> lock(state.mutex);
+		streams.swap(state.streams);
+	}
+	std::exception_ptr failure;
+	for (auto& entry : streams) {
+		try {
+			entry.second->setRetained(false);
+			entry.second->deactivate();
+		}
+		catch (...) {
+			if (!failure) { failure = std::current_exception(); }
+		}
+	}
+	streams.clear();
+	if (failure) { std::rethrow_exception(failure); }
+}
 }
 
 dualOfBufStream::dualOfBufStream(void)
@@ -279,8 +352,14 @@ dualOfBufStream::dualOfBufStream(void)
 }
 
 dualOfBufStream::~dualOfBufStream(void) {
-	emptyStreams(true);
-	deactivate();
+	// Destructors are noexcept: a finalize error (e.g. disk full) must not terminate.
+	try {
+		emptyStreams(true);
+		deactivate();
+	}
+	catch (const std::exception& error) {
+		std::cerr << "Failed to finalize " << FileNames[0] << "," << FileNames[1] << ": " << error.what() << "\n";
+	}
 }
 
 void dualOfBufStream::write(const string& in, int stream) {
@@ -311,7 +390,7 @@ bool dualOfBufStream::open(const string IF, int mif, int pair, bool isMC, size_t
 	if (opened[pair]) {
 		return false;
 	}
-	dualOutStr[pair] = std::make_unique<ostr>(IF, mif, isMC, bufferS);
+	dualOutStr[pair] = OutputStreamRetention::open(IF, mif, isMC, bufferS);
 	opened[pair] = true;
 	FileNames[pair] = IF;
 	if (!dualOutStr[pair]) { return false; }
@@ -328,13 +407,21 @@ bool dualOfBufStream::activate() {
 
 bool dualOfBufStream::deactivate() {
 	Instr::TimedLockGuard lg(dualMtx);
+	// Finalize every mate even if one fails, then report the first failure.
+	std::exception_ptr failure;
 	for (size_t i = 0; i < dualOutStr.size(); i++) {
 		if (dualOutStr[i] != nullptr) {
-			dualOutStr[i]->finishWrites();
-			dualOutStr[i]->deactivate();
+			try {
+				dualOutStr[i]->finishWrites();
+				dualOutStr[i]->deactivate();
+			}
+			catch (...) {
+				if (!failure) { failure = std::current_exception(); }
+			}
 		}
 	}
 	active = false;
+	if (failure) { std::rethrow_exception(failure); }
 	return true;
 }
 
@@ -348,6 +435,152 @@ void dualOfBufStream::emptyStreams(bool force) {
 		(*dualOutStr[0]) << bufs[0];
 		bufs[0].clear();
 	}
+}
+
+//**************************** per-worker output batches ****************************
+// Records one worker formats for one input block. Publishing the whole block
+// at once keeps R1/R2 (and FASTA/QUAL) files in step with a single lock per
+// block instead of several locks per read.
+struct OutputStreamer::WriteBatch {
+	static constexpr size_t kFlushBytes = size_t(4) << 20;
+	struct Dual {
+		dualOfBufStream* stream;
+		std::string first, second;
+	};
+	struct Single {
+		ostr* stream;
+		std::string data;
+	};
+	struct Demulti {
+		ostr* first = nullptr;
+		ostr* second = nullptr;
+		ostr* merged = nullptr;
+		std::string firstData, secondData, mergedData;
+		bool touched = false;
+	};
+	std::vector<Dual> duals;
+	std::vector<Single> singles;
+	std::vector<Demulti> demulti;      // indexed by sample
+	std::vector<size_t> demultiTouched;
+	uint64_t records = 0;
+	size_t bytes = 0;
+
+	void stageDual(dualOfBufStream* stream, const std::string& first, const std::string& second) {
+		Dual* entry = nullptr;
+		for (auto& candidate : duals) { if (candidate.stream == stream) { entry = &candidate; break; } }
+		if (!entry) { duals.push_back(Dual{stream, {}, {}}); entry = &duals.back(); }
+		entry->first += first;
+		entry->second += second;
+		bytes += first.size() + second.size();
+	}
+	void stage(ostr* stream, const std::string& data) {
+		Single* entry = nullptr;
+		for (auto& candidate : singles) { if (candidate.stream == stream) { entry = &candidate; break; } }
+		if (!entry) { singles.push_back(Single{stream, {}}); entry = &singles.back(); }
+		entry->data += data;
+		bytes += data.size();
+	}
+	void stageDemulti(size_t sample, bool merged, ostr* firstStream, const std::string& first,
+		ostr* secondStream, const std::string& second) {
+		if (sample >= demulti.size()) { demulti.resize(sample + 1); }
+		Demulti& entry = demulti[sample];
+		if (!entry.touched) { entry.touched = true; demultiTouched.push_back(sample); }
+		if (merged) {
+			entry.merged = firstStream;
+			entry.mergedData += first;
+		} else {
+			if (firstStream) { entry.first = firstStream; entry.firstData += first; }
+			if (secondStream) { entry.second = secondStream; entry.secondData += second; }
+		}
+		bytes += first.size() + second.size();
+	}
+	bool empty() const { return bytes == 0 && records == 0 && demultiTouched.empty(); }
+	void clearMain() {
+		for (auto& entry : duals) { entry.first.clear(); entry.second.clear(); }
+		for (auto& entry : singles) { entry.data.clear(); }
+		records = 0;
+	}
+	void clearDemulti() {
+		for (size_t sample : demultiTouched) {
+			Demulti& entry = demulti[sample];
+			entry.firstData.clear(); entry.secondData.clear(); entry.mergedData.clear();
+			entry.touched = false;
+		}
+		demultiTouched.clear();
+	}
+};
+
+OutputStreamer::WriteBatch* OutputStreamer::writeBatch(int curThread) {
+	if (curThread < 0 || !batchWrites_.load(std::memory_order_acquire) ||
+		static_cast<size_t>(curThread) >= writeBatches_.size()) {
+		return nullptr;
+	}
+	return writeBatches_[curThread].get();
+}
+
+void OutputStreamer::beginWriteBatching() {
+	// Output rotation and read limits count records one at a time; they keep
+	// the per-record path so file boundaries and limits stay exact.
+	if (maxReadsPerOFile > 0 || maxRdsOut > 0) { return; }
+	std::lock_guard<std::mutex> guard(sqfqostrMTX);
+	writeBatches_.clear();
+	const size_t workers = static_cast<size_t>(std::max(Nthrds, 1));
+	for (size_t i = 0; i < workers; ++i) { writeBatches_.push_back(std::make_unique<WriteBatch>()); }
+	batchWrites_.store(true, std::memory_order_release);
+}
+
+void OutputStreamer::publishBatchLocked(WriteBatch& batch) {
+	for (auto& entry : batch.duals) {
+		if (!entry.first.empty() || !entry.second.empty()) { entry.stream->write2(entry.first, entry.second); }
+	}
+	for (auto& entry : batch.singles) {
+		if (!entry.data.empty()) { *entry.stream << entry.data; }
+	}
+	ReadsWritten += batch.records;
+	TotalReadsWritten += batch.records;
+	batch.clearMain();
+}
+
+void OutputStreamer::publishDemultiBatch(WriteBatch& batch) {
+	if (batch.demultiTouched.empty()) { return; }
+	// R1/R2 of a sample must stay synchronized; one lock per block and worker.
+	std::lock_guard<std::mutex> guard(dmltMTX);
+	for (size_t sample : batch.demultiTouched) {
+		const WriteBatch::Demulti& entry = batch.demulti[sample];
+		if (entry.first && !entry.firstData.empty()) { *entry.first << entry.firstData; }
+		if (entry.second && !entry.secondData.empty()) { *entry.second << entry.secondData; }
+		if (entry.merged && !entry.mergedData.empty()) { *entry.merged << entry.mergedData; }
+	}
+	batch.clearDemulti();
+}
+
+void OutputStreamer::flushWriteBatch(int curThread) {
+	WriteBatch* batch = writeBatch(curThread);
+	if (!batch || batch->empty()) { return; }
+	{
+		std::lock_guard<std::mutex> guard(sqfqostrMTX);
+		publishBatchLocked(*batch);
+	}
+	publishDemultiBatch(*batch);
+	batch->bytes = 0;
+}
+
+void OutputStreamer::flushAllWriteBatchesLocked() {
+	for (auto& batch : writeBatches_) {
+		if (!batch || batch->empty()) { continue; }
+		publishBatchLocked(*batch);
+		publishDemultiBatch(*batch);
+		batch->bytes = 0;
+	}
+}
+
+void OutputStreamer::endWriteBatching() {
+	if (!batchWrites_.load(std::memory_order_acquire)) { return; }
+	// Workers have finished; publish what each staged, then write per record again.
+	std::lock_guard<std::mutex> guard(sqfqostrMTX);
+	flushAllWriteBatchesLocked();
+	batchWrites_.store(false, std::memory_order_release);
+	writeBatches_.clear();
 }
 
 OutputStreamer::OutputStreamer(Filters* fil, OptContainer* cmdArgs,
@@ -461,13 +694,24 @@ OutputStreamer::~OutputStreamer() {
 	cdbg("Destr OutputStreamer");
 	//delAllDNAvectors();
 	//cdbg(".. done\n" );
+	try { endWriteBatching(); }
+	catch (const std::exception& error) { cerr << "Failed to write buffered output: " << error.what() << "\n"; }
+	if (dereplicator) {
+		// Queued entries may still publish withheld sets into these streams.
+		try { dereplicator->flushPending(); }
+		catch (const std::exception& error) { cerr << "Failed to apply queued dereplication entries: " << error.what() << "\n"; }
+		dereplicator->setUncountedPublisher(nullptr);
+	}
     // Acquire stream-creation/usage mutex first, then demulti mutex to avoid lock-order inversion
     {
 		Instr::TimedLockGuard g1(sqfqostrMTX);
 		Instr::TimedLockGuard g2(dmltMTX);
-		// Call the internal locked variants to avoid double-locking sqfqostrMTX
-		this->closeOutStreams_locked(true);
-		this->closeOutFilesDemulti_locked();
+		// Call the internal locked variants to avoid double-locking sqfqostrMTX.
+		// Callers close explicitly (and get the exception); this is the fallback.
+		try { this->closeOutStreams_locked(true); }
+		catch (const std::exception& error) { cerr << "Failed to finalize output: " << error.what() << "\n"; }
+		try { this->closeOutFilesDemulti_locked(); }
+		catch (const std::exception& error) { cerr << "Failed to finalize demultiplexed output: " << error.what() << "\n"; }
 		for (uint i = 0; i < subFilter.size(); i++) {
 			subFilter[i].reset();
 		}
@@ -649,44 +893,73 @@ bool OutputStreamer::checkFastqHeadVersion(shared_ptr<DNA> d, bool disable) {
 }
 
 void OutputStreamer::closeOutFilesDemulti() {
-	//    cout << "FILES TO t DEMULTIPLEX OUT " << demultiSinglFiles.size() << endl;
-		//cout << "domeulti: " << bDoDemultiplexIntoFiles << endl;
-
 	cdbg("OutputStreamer::closeOutFilesDemulti");
 	if (!bDoDemultiplexIntoFiles) { return; }
+	endWriteBatching();
 	// Acquire locks in the global order: sqfqostrMTX then dmltMTX
     Instr::TimedLockGuard guard1(sqfqostrMTX);
 	Instr::TimedLockGuard guard2(dmltMTX);
-	// release unique_ptrs (emptyStream called by destructor if needed)
-	for (size_t i = 0; i < demultiSinglFiles.size(); i++) {
-		for (size_t j = 0; j < demultiSinglFiles[i].size(); ++j) {
-			demultiSinglFiles[i][j].reset();
-		}
-	}
-	for (size_t i = 0; i < demultiMergeFiles.size(); i++) {
-		demultiMergeFiles[i].reset();
-	}
+	closeOutFilesDemulti_locked();
 	cdbg(" done closeOutFilesDemulti\n");
-	return;
 }
 
-// Internal variant that assumes caller already holds required locks
+// Internal variant that assumes caller already holds required locks.
+// Finalizes every per-sample file explicitly so that a write failure is
+// reported (the destructor only prints it); the first failure is rethrown after
+// all files were closed.
 void OutputStreamer::closeOutFilesDemulti_locked() {
 	if (!bDoDemultiplexIntoFiles) { return; }
-	for (size_t i = 0; i < demultiSinglFiles.size(); i++) {
-		for (size_t j = 0; j < demultiSinglFiles[i].size(); ++j) {
-			demultiSinglFiles[i][j].reset();
-		}
-	}
-	for (size_t i = 0; i < demultiMergeFiles.size(); i++) {
-		demultiMergeFiles[i].reset();
-	}
+	std::exception_ptr failure;
+	auto closeStream = [&](std::shared_ptr<ofbufstream>& stream) {
+		if (!stream) { return; }
+		try { stream->deactivate(); }
+		catch (...) { if (!failure) { failure = std::current_exception(); } }
+		stream.reset();
+	};
+	for (auto& sample : demultiSinglFiles) { for (auto& stream : sample) { closeStream(stream); } }
+	for (auto& stream : demultiMergeFiles) { closeStream(stream); }
 	cdbg(" done closeOutFilesDemulti_locked\n");
+	if (failure) { std::rethrow_exception(failure); }
+}
+
+bool OutputStreamer::reserveDemultiBases(bool merged, uint64_t bases) {
+	auto& counter = merged ? BPwrittenInSRmerg : BPwrittenInSR;
+	if (demultiBPperSR == 0) {
+		counter += bases;
+		return true;
+	}
+	// Same admission rule as the locked path, as one atomic reservation.
+	uint64_t written = counter.load();
+	do {
+		if (written >= demultiBPperSR || bases > demultiBPperSR - written) { return false; }
+	} while (!counter.compare_exchange_weak(written, written + bases));
+	return true;
 }
 
 bool OutputStreamer::writeDemultiRecords(int idx, const string& first, const string& second,
-	uint64_t bases, bool merged) {
+	uint64_t bases, bool merged, int curThread) {
 	if (idx < 0 || (first.empty() && second.empty())) { return false; }
+	if (WriteBatch* batch = writeBatch(curThread)) {
+		// Demultiplexing streams are opened before processing and stay fixed
+		// while batching, so they can be resolved without dmltMTX.
+		ostr* firstStream = nullptr;
+		ostr* secondStream = nullptr;
+		if (merged) {
+			if (static_cast<size_t>(idx) >= demultiMergeFiles.size() || !demultiMergeFiles[idx]) { return false; }
+			firstStream = demultiMergeFiles[idx].get();
+		} else {
+			if (static_cast<size_t>(idx) >= demultiSinglFiles.size()) { return false; }
+			const auto& streams = demultiSinglFiles[idx];
+			if ((!first.empty() && (streams.empty() || !streams[0])) ||
+				(!second.empty() && (streams.size() < 2 || !streams[1]))) { return false; }
+			if (!first.empty()) { firstStream = streams[0].get(); }
+			if (!second.empty()) { secondStream = streams[1].get(); }
+		}
+		if (!reserveDemultiBases(merged, bases)) { return false; }
+		batch->stageDemulti(static_cast<size_t>(idx), merged, firstStream, first, secondStream, second);
+		if (batch->bytes >= WriteBatch::kFlushBytes) { flushWriteBatch(curThread); }
+		return true;
+	}
 	std::lock_guard<std::mutex> guard(dmltMTX);
 	auto& counter = merged ? BPwrittenInSRmerg : BPwrittenInSR;
 	const uint64_t written = counter.load();
@@ -714,7 +987,7 @@ void OutputStreamer::write2Demulti(const shared_ptr<DNA>& d1, const shared_ptr<D
 	int curThread) {
 	if (!Demulti2Fls() || !d1) { return; }
 	if (isPEseq() < 2) {
-		write2Demulti(d1, 0, BCoffset);
+		write2Demulti(d1, 0, BCoffset, curThread);
 		return;
 	}
 	const int idx = d1->getBCnumber() - BCoffset;
@@ -725,8 +998,10 @@ void OutputStreamer::write2Demulti(const shared_ptr<DNA>& d1, const shared_ptr<D
 		curThread >= 0 && static_cast<size_t>(curThread) < mergers.size() && mergers[curThread]) {
 		auto merged = mergers[curThread]->merge(d1, d2);
 		if (merged && getFilters(curThread)->checkMergedDNA(merged)) {
+			d1->adoptMergeStats(*merged);
+			d2->adoptMergeStats(*merged);
 			merged->prepareWrite(fastQoutVer);
-			writeDemultiRecords(idx, merged->writeFastQ(), "", merged->length(), true);
+			writeDemultiRecords(idx, merged->writeFastQ(), "", merged->length(), true, curThread);
 			return;
 		}
 	}
@@ -743,15 +1018,15 @@ void OutputStreamer::write2Demulti(const shared_ptr<DNA>& d1, const shared_ptr<D
 		d2->writeFastQ(second, false);
 		if (!second.empty()) { bases += d2->length(); }
 	}
-	writeDemultiRecords(idx, first, second, bases, false);
+	writeDemultiRecords(idx, first, second, bases, false, curThread);
 }
 
-void OutputStreamer::write2Demulti(const shared_ptr<DNA>& d, int p, int BCoffset) {
+void OutputStreamer::write2Demulti(const shared_ptr<DNA>& d, int p, int BCoffset, int curThread) {
 	if (!Demulti2Fls() || !d || !d->isGreenQual() || p < 0 || p > 1) { return; }
 	d->prepareWrite(fastQoutVer);
 	const string record = d->writeFastQ(false);
 	writeDemultiRecords(d->getBCnumber() - BCoffset, p == 0 ? record : "",
-		p == 1 ? record : "", d->length(), false);
+		p == 1 ? record : "", d->length(), false, curThread);
 }
 
 void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil,
@@ -892,7 +1167,7 @@ bool  OutputStreamer::saveForWrite(const shared_ptr<DNA>& d, int Pair, int thr, 
 
 	//sqfqostrMTX.lock();
 	if (write) {
-		writeForWrite(d, Pair, Cstream, nullptr, -1, 100);
+		writeForWrite(d, Pair, Cstream, nullptr, -1, 100, thr);
 	}
 	return !stopAll;
 
@@ -900,15 +1175,57 @@ bool  OutputStreamer::saveForWrite(const shared_ptr<DNA>& d, int Pair, int thr, 
 }
 
 void OutputStreamer::writeForWrite(const shared_ptr<DNA>& d1, int Pair1, int Cstream1,
-	const shared_ptr<DNA>& d2, int Pair2, int Cstream2) {
-	writeForWriteImpl(d1, Pair1, Cstream1, d2, Pair2, Cstream2);
+	const shared_ptr<DNA>& d2, int Pair2, int Cstream2, int curThread) {
+	writeForWriteImpl(d1, Pair1, Cstream1, d2, Pair2, Cstream2, nullptr, curThread);
+}
+
+OutputStreamer::StreamSlots OutputStreamer::selectStreams(bool writeFastq, bool isStrictPairedWrite,
+	bool mergedOutput, int Pair1, int Cstream1, int Pair2, int Cstream2) const {
+	StreamSlots slots;
+	const bool p1Valid = Pair1 > 0;
+	const bool p2Valid = Pair2 > 0;
+	if (writeFastq && isStrictPairedWrite && Cstream1 >= 0 &&
+		static_cast<size_t>(Cstream1) < fqPairFile.size()) {
+		slots.fqPair = &fqPairFile[Cstream1];
+	}
+	if (mergedOutput) {
+		if (!of_merged_fq.empty()) { slots.fq1 = &of_merged_fq[0]; }
+	}
+	else if (writeFastq) {
+		if (Cstream1 >= 0 && static_cast<size_t>(Cstream1) < fqFile.size() && p1Valid &&
+			static_cast<size_t>(Pair1 - 1) < fqFile[Cstream1].size()) {
+			slots.fq1 = &fqFile[Cstream1][Pair1 - 1];
+		}
+		if (Cstream2 >= 0 && static_cast<size_t>(Cstream2) < fqFile.size() && p2Valid &&
+			static_cast<size_t>(Pair2 - 1) < fqFile[Cstream2].size()) {
+			slots.fq2 = &fqFile[Cstream2][Pair2 - 1];
+		}
+	}
+	else {
+		if (Cstream1 >= 0 && static_cast<size_t>(Cstream1) < sFile.size() && p1Valid &&
+			static_cast<size_t>(Pair1 - 1) < sFile[Cstream1].size()) {
+			slots.seq1 = &sFile[Cstream1][Pair1 - 1];
+			if (BWriteQual && static_cast<size_t>(Cstream1) < qFile.size() &&
+				static_cast<size_t>(Pair1 - 1) < qFile[Cstream1].size()) {
+				slots.qual1 = &qFile[Cstream1][Pair1 - 1];
+			}
+		}
+		if (Cstream2 >= 0 && static_cast<size_t>(Cstream2) < sFile.size() && p2Valid &&
+			static_cast<size_t>(Pair2 - 1) < sFile[Cstream2].size()) {
+			slots.seq2 = &sFile[Cstream2][Pair2 - 1];
+			if (BWriteQual && static_cast<size_t>(Cstream2) < qFile.size() &&
+				static_cast<size_t>(Pair2 - 1) < qFile[Cstream2].size()) {
+				slots.qual2 = &qFile[Cstream2][Pair2 - 1];
+			}
+		}
+	}
+	return slots;
 }
 
 bool OutputStreamer::writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int Cstream1,
-	const shared_ptr<DNA>& d2, int Pair2, int Cstream2, const string* mergedFastq) {
+	const shared_ptr<DNA>& d2, int Pair2, int Cstream2, const string* mergedFastq, int curThread) {
 	const bool mergedOutput = mergedFastq != nullptr;
 	if (mergedOutput && (!d1 || mergedFastq->empty())) { return false; }
-	const bool writeFastq = BWriteFastQ || mergedOutput;
 	// Suppressed output is common in dereplication: avoid formatting and locks.
 	if (Cstream1 >= 100 && Cstream2 >= 100) { return false; }
 	const bool isStrictPairedWrite = (!mergedOutput && pairedSeq > 1 && Pair1 > 0 && Pair1 < 3 && Pair2 > 0 && Pair2 < 3);
@@ -925,7 +1242,13 @@ bool OutputStreamer::writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int
 		// A pair belongs to the less stringent of its two quality tiers.
 		Cstream1 = Cstream2 = std::max(Cstream1, Cstream2);
 	}
-	std::shared_lock<std::shared_mutex> epochGuard(outputEpochMTX);
+	WriteBatch* batch = writeBatch(curThread);
+	// Batching excludes rotation, so the epoch lock is only needed per record.
+	std::shared_lock<std::shared_mutex> epochGuard(outputEpochMTX, std::defer_lock);
+	if (!batch) { epochGuard.lock(); }
+	// Output rotation re-opens the streams (and sets the format) under the
+	// exclusive epoch lock, so read the format only after taking it.
+	const bool writeFastq = BWriteFastQ || mergedOutput;
 	thread_local string fastqTmp1;
 	thread_local string fastqTmp2;
 	const bool isStrictPairedFastqWrite = writeFastq && isStrictPairedWrite;
@@ -956,6 +1279,57 @@ bool OutputStreamer::writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int
 		}
 	}
 
+	if (batch) {
+		// Stream vectors do not change while batching (no rotation or read limit),
+		// so records are staged without sqfqostrMTX or shared_ptr copies.
+		const StreamSlots slots = selectStreams(writeFastq, isStrictPairedWrite, mergedOutput,
+			Pair1, Cstream1, Pair2, Cstream2);
+		auto raw = [](const auto* slot) { return slot ? slot->get() : nullptr; };
+		dualOfBufStream* fqPair = raw(slots.fqPair);
+		ostr* fq1 = raw(slots.fq1);
+		ostr* fq2 = raw(slots.fq2);
+		ostr* seq1 = raw(slots.seq1);
+		ostr* seq2 = raw(slots.seq2);
+		ostr* qual1 = raw(slots.qual1);
+		ostr* qual2 = raw(slots.qual2);
+		if (isStrictPairedWrite && ((writeFastq && !fqPair) ||
+			(!writeFastq && (!seq1 || !seq2 ||
+				((qual1 || qual2) && (!qual1 || !qual2 ||
+					qualTmp1.empty() || qualTmp2.empty())))))) {
+			paired_sync_skipped_counter_++;
+			return false;
+		}
+		const bool willWrite = (fqPair && d1 && d2) || (fq1 && d1) ||
+			(fq2 && d2) || (seq1 && d1) || (seq2 && d2);
+		if (!willWrite) {
+			if (isStrictPairedFastqWrite) { paired_sync_skipped_counter_++; }
+			return false;
+		}
+		if (fqPair) {
+			batch->stageDual(fqPair, fastqTmp1, fastqTmp2);
+		}
+		else if (mergedOutput) {
+			batch->stage(fq1, *mergedFastq);
+		}
+		else {
+			if (fq1 && d1) { fastqTmp1.clear(); d1->writeFastQ(fastqTmp1); batch->stage(fq1, fastqTmp1); }
+			if (fq2 && d2) { fastqTmp2.clear(); d2->writeFastQ(fastqTmp2); batch->stage(fq2, fastqTmp2); }
+			if (!writeFastq) {
+				if (seq1 && d1) {
+					batch->stage(seq1, seqTmp1);
+					if (qual1) { batch->stage(qual1, qualTmp1); }
+				}
+				if (seq2 && d2) {
+					batch->stage(seq2, seqTmp2);
+					if (qual2) { batch->stage(qual2, qualTmp2); }
+				}
+			}
+		}
+		++batch->records;
+		if (batch->bytes >= WriteBatch::kFlushBytes) { flushWriteBatch(curThread); }
+		return true;
+	}
+
 	for (;;) {
 		std::shared_ptr<dualOfBufStream> localFqPair;
 		std::shared_ptr<ostr> localFq1, localFq2, localSeq1, localSeq2, localQual1, localQual2;
@@ -965,43 +1339,15 @@ bool OutputStreamer::writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int
 			if (Cstream1 >= 100 && Cstream2 >= 100) { return false; }
 			if (maxRdsOut > 0 && TotalReadsWritten >= maxRdsOut) { return false; }
 			{
-				const bool p1Valid = Pair1 > 0;
-				const bool p2Valid = Pair2 > 0;
-				if (writeFastq && isStrictPairedWrite && Cstream1 >= 0 &&
-					static_cast<size_t>(Cstream1) < fqPairFile.size()) {
-					localFqPair = fqPairFile[Cstream1];
-				}
-				if (mergedOutput) {
-					if (!of_merged_fq.empty()) { localFq1 = of_merged_fq[0]; }
-				}
-				else if (writeFastq) {
-					if (Cstream1 >= 0 && static_cast<size_t>(Cstream1) < fqFile.size() && p1Valid &&
-						static_cast<size_t>(Pair1 - 1) < fqFile[Cstream1].size()) {
-						localFq1 = fqFile[Cstream1][Pair1 - 1];
-					}
-					if (Cstream2 >= 0 && static_cast<size_t>(Cstream2) < fqFile.size() && p2Valid &&
-						static_cast<size_t>(Pair2 - 1) < fqFile[Cstream2].size()) {
-						localFq2 = fqFile[Cstream2][Pair2 - 1];
-					}
-				}
-				else {
-					if (Cstream1 >= 0 && static_cast<size_t>(Cstream1) < sFile.size() && p1Valid &&
-						static_cast<size_t>(Pair1 - 1) < sFile[Cstream1].size()) {
-						localSeq1 = sFile[Cstream1][Pair1 - 1];
-						if (BWriteQual && static_cast<size_t>(Cstream1) < qFile.size() &&
-							static_cast<size_t>(Pair1 - 1) < qFile[Cstream1].size()) {
-							localQual1 = qFile[Cstream1][Pair1 - 1];
-						}
-					}
-					if (Cstream2 >= 0 && static_cast<size_t>(Cstream2) < sFile.size() && p2Valid &&
-						static_cast<size_t>(Pair2 - 1) < sFile[Cstream2].size()) {
-						localSeq2 = sFile[Cstream2][Pair2 - 1];
-						if (BWriteQual && static_cast<size_t>(Cstream2) < qFile.size() &&
-							static_cast<size_t>(Pair2 - 1) < qFile[Cstream2].size()) {
-							localQual2 = qFile[Cstream2][Pair2 - 1];
-						}
-					}
-				}
+				const StreamSlots slots = selectStreams(writeFastq, isStrictPairedWrite, mergedOutput,
+					Pair1, Cstream1, Pair2, Cstream2);
+				if (slots.fqPair) { localFqPair = *slots.fqPair; }
+				if (slots.fq1) { localFq1 = *slots.fq1; }
+				if (slots.fq2) { localFq2 = *slots.fq2; }
+				if (slots.seq1) { localSeq1 = *slots.seq1; }
+				if (slots.seq2) { localSeq2 = *slots.seq2; }
+				if (slots.qual1) { localQual1 = *slots.qual1; }
+				if (slots.qual2) { localQual2 = *slots.qual2; }
 
 				if (isStrictPairedWrite && ((writeFastq && !localFqPair) ||
 					(!writeFastq && (!localSeq1 || !localSeq2 ||
@@ -1074,13 +1420,13 @@ bool OutputStreamer::saveForWrite_merge(shared_ptr<DNAunique> d,
 	string newHeader, int curThread, bool elseWriteD1) {
 	if (!d) { return false; }
 	shared_ptr<DNA> d2 = d->getPair();
-	shared_ptr<DNAunique> dna_merged = d->getMerge();
+	shared_ptr<DerepRead> dna_merged = d->getMerge();
 
 	if (!dna_merged && d2 != nullptr) {
 		findSeedForMerge(d, d2, curThread);
 		if (d->merge_seed_pos_ >= 0) {
 			shared_ptr<DNA> tdM = mergers[curThread]->merge(d, d2);
-			if (tdM) { dna_merged = make_shared<DNAunique>(tdM, -1); }
+			if (tdM) { dna_merged = make_shared<DerepRead>(tdM); }
 		}
 	}
 	// Prepare both cached and newly constructed seeds at their full length.
@@ -1095,12 +1441,12 @@ bool OutputStreamer::saveForWrite_merge(shared_ptr<DNAunique> d,
 	if (!BWriteFastQ) {
 		// The selected merged OTU belongs in the requested main FASTA/QUAL.
 		// Reuse normal output accounting, rotation, and serialization.
-		return writeForWriteImpl(dna_merged, 1, 0, nullptr, -1, 100);
+		return writeForWriteImpl(dna_merged, 1, 0, nullptr, -1, 100, nullptr, curThread);
 	}
 	thread_local string mergedFastqTmp;
 	mergedFastqTmp.clear();
 	dna_merged->writeFastQ(mergedFastqTmp);
-	return writeForWriteImpl(dna_merged, 1, 0, nullptr, -1, 100, &mergedFastqTmp);
+	return writeForWriteImpl(dna_merged, 1, 0, nullptr, -1, 100, &mergedFastqTmp, curThread);
 }
 
 
@@ -1200,6 +1546,12 @@ void OutputStreamer::attachDereplicator(shared_ptr<Dereplicate> de) {
 	if (de != NULL) {
 		dereplicator = de; b_doDereplicate = true;
 		dereplicator->setPaired(pairedSeq > 1);
+		// Withheld mid-quality sets the dereplicator does not count are written
+		// here, through the per-record (locked) path since any thread may apply them.
+		dereplicator->setUncountedPublisher([this](const shared_ptr<DNA>& d1, const shared_ptr<DNA>& d2,
+			const Dereplicate::DerepTierRoute& route) {
+			writeForWrite(d1, route.idx1, route.cstr1, d2, route.idx2, route.cstr2, -1);
+		});
 		//insert code here to fix BC offset in filter & add to derep info on sample names from the current filter
 		int curBCOffset = dereplicator->getHighestBCoffset();
 
@@ -1225,16 +1577,35 @@ void OutputStreamer::attachDereplicator(shared_ptr<Dereplicate> de) {
 		dereplicator->addDNA(tdn);
 	}
 }*/
-void OutputStreamer::dereplicateDNA(const shared_ptr<DNA>& tdn, const shared_ptr<DNA>& tdn2, int curThread) {
-	if (false || !b_doDereplicate) {
-		return;
+int OutputStreamer::outputTier(const shared_ptr<DNA>& d, int thr) {
+	if (!d || suppressOutWrite == 3) { return 100; }
+	Filters* curFil = this->getFilters(thr);
+	if (!curFil->doFilterAtAll()) { return 0; }
+	if (b_writeGreenQual && d->isGreenQual()) { return 0; }
+	if (b_writeYellowQual && d->isYellowQual()) { return 1; }
+	return 100;
+}
+
+bool OutputStreamer::dereplicateDNA(const shared_ptr<DNA>& tdn, const shared_ptr<DNA>& tdn2, int curThread,
+	int idx1, int idx2) {
+	if (!b_doDereplicate || !tdn) {
+		return false;
 	}
-	dereplicator->addDNA(tdn, tdn2, getFilters(curThread));
+	// Sets bound for the mid-quality tier are counted or written, never both:
+	// the dereplicator publishes them through the attached callback if it
+	// does not count them.
+	Dereplicate::DerepTierRoute route{idx1, outputTier(tdn, curThread), idx2, outputTier(tdn2, curThread)};
+	const bool midTier = route.cstr1 == 1 || route.cstr2 == 1;
+	bool queued = false;
+	dereplicator->addDNA(tdn, tdn2, getFilters(curThread), midTier ? &route : nullptr, &queued);
 	if (tdn->isDereplicated()) {
-		//drpMTX.lock();
 		cntDerep++;
-		//drpMTX.unlock();
 	}
+	return midTier && queued;
+}
+
+void OutputStreamer::flushDereplication() {
+	if (dereplicator) { dereplicator->flushPending(); }
 }
 
 void OutputStreamer::resetOutFilesAndFilter() {
@@ -1243,6 +1614,8 @@ void OutputStreamer::resetOutFilesAndFilter() {
 #endif
 	//reset count stats
 	MFil->resetStats();
+	// The worker statistics are merged into MFil later; reset them too.
+	for (auto& sub : subFilter) { if (sub) { sub->resetStats(); } }
 	//reset all stored DNA
 	delAllDNAvectors();
 	dereplicator.reset();
@@ -1251,58 +1624,41 @@ void OutputStreamer::resetOutFilesAndFilter() {
 	totalFileStrms = 0;
 }
 
-// Internal implementation: caller must already hold sqfqostrMTX
+// Internal implementation: caller must already hold sqfqostrMTX.
+// Every stream is finalized explicitly (buffers are written in any case, as the
+// destructors did before): a delayed write failure such as a full disk is then
+// reported to the caller instead of being swallowed by ~ofbufstream. All
+// streams are closed before the first failure is rethrown. Retained streams are
+// only flushed here and finalized by OutputStreamRetention::closeAll().
 void OutputStreamer::closeOutStreams_locked(bool wr) {
+	(void)wr;
 	write2File = true;
+	std::exception_ptr failure;
+	auto remember = [&]() { if (!failure) { failure = std::current_exception(); } };
+	auto closeStream = [&](std::shared_ptr<ostr>& stream) {
+		if (!stream) { return; }
+		try { stream->deactivate(); }
+		catch (...) { remember(); }
+		stream.reset();
+	};
+	auto closePair = [&](std::shared_ptr<dualOfBufStream>& stream) {
+		if (!stream) { return; }
+		try {
+			stream->emptyStreams(true);
+			stream->deactivate();
+		}
+		catch (...) { remember(); }
+		stream.reset();
+	};
 
-	for (size_t i = 0; i < sFile.size(); i++) {
-		for (size_t j = 0; j < sFile[i].size(); j++) {
-			if (sFile[i][j]) {
-				if (wr) { sFile[i][j]->emptyStream(); }
-				sFile[i][j].reset();
-			}
-		}
-	}
-	for (size_t i = 0; i < qFile.size(); i++) {
-		for (size_t j = 0; j < qFile[i].size(); j++) {
-			if (qFile[i][j]) {
-				if (wr) { qFile[i][j]->emptyStream(); }
-				qFile[i][j].reset();
-			}
-		}
-	}
-	for (size_t i = 0; i < fqFile.size(); i++) {
-		for (size_t j = 0; j < fqFile[i].size(); j++) {
-			if (fqFile[i][j]) {
-				if (wr) { fqFile[i][j]->emptyStream(); }
-				fqFile[i][j].reset();
-			}
-		}
-	}
-	for (size_t i = 0; i < of_merged_fq.size(); i++) {
-		if (of_merged_fq[i] != nullptr) {
-			if (wr) { of_merged_fq[i]->emptyStream(); }
-			of_merged_fq[i].reset();
-		}
-	}
-	for (size_t i = 0; i < fqPairFile.size(); i++) {
-		if (fqPairFile[i]) {
-			if (wr) { fqPairFile[i]->emptyStreams(true); }
-			fqPairFile[i].reset();
-		}
-	}
-	for (size_t i = 0; i < sPairFile.size(); i++) {
-		if (sPairFile[i]) {
-			if (wr) { sPairFile[i]->emptyStreams(true); }
-			sPairFile[i].reset();
-		}
-	}
-	for (size_t i = 0; i < qPairFile.size(); i++) {
-		if (qPairFile[i]) {
-			if (wr) { qPairFile[i]->emptyStreams(true); }
-			qPairFile[i].reset();
-		}
-	}
+	for (auto& tier : sFile) { for (auto& stream : tier) { closeStream(stream); } }
+	for (auto& tier : qFile) { for (auto& stream : tier) { closeStream(stream); } }
+	for (auto& tier : fqFile) { for (auto& stream : tier) { closeStream(stream); } }
+	for (auto& stream : of_merged_fq) { closeStream(stream); }
+	for (auto& stream : fqNoBCFile) { closeStream(stream); }
+	for (auto& stream : fqPairFile) { closePair(stream); }
+	for (auto& stream : sPairFile) { closePair(stream); }
+	for (auto& stream : qPairFile) { closePair(stream); }
 
 	if (MFil != nullptr) {
 		MFil->setWrittenReads(ReadsWritten.load());
@@ -1310,11 +1666,12 @@ void OutputStreamer::closeOutStreams_locked(bool wr) {
 #ifdef DEBUG
 	cerr << ".. closed\n";
 #endif
-
+	if (failure) { std::rethrow_exception(failure); }
 }
 
 // Public wrapper that acquires sqfqostrMTX then calls the locked implementation
 void OutputStreamer::closeOutStreams(bool wr) {
+	endWriteBatching();
 	std::lock_guard<std::mutex> guard(sqfqostrMTX);
 	closeOutStreams_locked(wr);
 }
@@ -1343,7 +1700,7 @@ void OutputStreamer::openNoBCoutstrean(const string inS) {
 	std::lock_guard<std::mutex> guard(sqfqostrMTX);
 	fqNoBCFile.clear();
 	for (const string& path : paths) {
-		fqNoBCFile.push_back(std::make_shared<ostr>(path, wrMode, doTIO));
+		fqNoBCFile.push_back(OutputStreamRetention::open(path, wrMode, doTIO));
 	}
 }
 
@@ -1386,7 +1743,7 @@ void OutputStreamer::openOFstreamFQ(const string opOF, std::ios_base::openmode w
 		std::lock_guard<std::mutex> guard(sqfqostrMTX);
 		if (fqFile[p1].size() < 4) fqFile[p1].resize(4);
 		fqFile[p1][p2].reset();
-		fqFile[p1][p2] = std::make_unique<ostr>(opOF, wrMode, doTIO);
+		fqFile[p1][p2] = OutputStreamRetention::open(opOF, wrMode, doTIO);
 		if (!onlyPrep) {
 			fqFile[p1][p2]->activate();
 		}
@@ -1406,7 +1763,7 @@ void OutputStreamer::openOFstreamFQ_mrg(const string opOF, std::ios_base::openmo
     {
 		std::lock_guard<std::mutex> guard(sqfqostrMTX);
 		of_merged_fq.resize(max((size_t)1, (size_t)p1 + 1));
-		of_merged_fq[p1] = std::make_unique<ostr>(opOF, wrMode, doTIO);
+		of_merged_fq[p1] = OutputStreamRetention::open(opOF, wrMode, doTIO);
 		if (!*of_merged_fq[p1]) {
 			cerr << "Could not open " << errMsg << " fastq merged output file " << opOF << endl << p1 << " " << totalFileStrms << endl;
 			exit(4);
@@ -1428,7 +1785,7 @@ void OutputStreamer::openOFstreamFNA(const string opOF, std::ios_base::openmode 
 		std::lock_guard<std::mutex> guard(sqfqostrMTX);
 		if (sFile[p1].size() < 4) sFile[p1].resize(4);
 		sFile[p1][p2].reset();
-		sFile[p1][p2] = std::make_unique<ostr>(opOF, wrMode, doTIO);
+		sFile[p1][p2] = OutputStreamRetention::open(opOF, wrMode, doTIO);
 		if (!*sFile[p1][p2]) {
 			cerr << "Could not open " << errMsg << " fasta output file " << opOF << endl << p1 << " " << p2 << " " << totalFileStrms << endl;
 			exit(4);
@@ -1453,7 +1810,7 @@ void OutputStreamer::openOFstreamQL(const string opOF, std::ios_base::openmode w
 		std::lock_guard<std::mutex> guard(sqfqostrMTX);
 		if (qFile[p1].size() < 4) qFile[p1].resize(4);
 		qFile[p1][p2].reset();
-		qFile[p1][p2] = std::make_unique<ostr>(opOF, wrMode, doTIO);
+		qFile[p1][p2] = OutputStreamRetention::open(opOF, wrMode, doTIO);
 		if (!*qFile[p1][p2]) {
 			cerr << "Could not open " << errMsg << " quality output file " << opOF << endl;
 			exit(4);
@@ -1593,6 +1950,9 @@ void OutputStreamer::openOutStreams(OptContainer* cmdArgs, int fileIt,
 			//additional file
 			if (cmdArgs->find("-o_fastq2") != cmdArgs->end() && (*cmdArgs)["-o_fastq2"].length() > 1) { //write fastq
 				tfnaout = splitByCommas((*cmdArgs)["-o_fastq2"]);
+				if (tfnaout.size() != 2) {
+					cerr << "Paired sequences given as input, requires paired additional output file (2 files separated by \",\"). Given -o_fastq2 = " << (*cmdArgs)["-o_fastq2"] << endl; exit(57);
+				}
 				openOFstreamFQpair(applyFileIT(tfnaout[0] + fileExt, fileIt).c_str(), applyFileIT(tfnaout[1] + fileExt, fileIt).c_str(), wrMode, 1, "additional paired out");
 				/*openOFstreamFQ(applyFileIT(tfnaout[0] + fileExt, fileIt).c_str(), wrMode, 1, 0, "additional paired 1st");
 				openOFstreamFQ(applyFileIT(tfnaout[1] + fileExt, fileIt).c_str(), wrMode, 1, 1, "additional paired 2nd");

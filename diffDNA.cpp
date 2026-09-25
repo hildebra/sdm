@@ -4,6 +4,8 @@
 #include "SeedSelection.h"
 #include <type_traits>
 #include <algorithm>
+#include <charconv>
+#include <cstring>
 #include <istream>
 #include <limits>
 #include <ostream>
@@ -123,7 +125,7 @@ struct diffDNA::SequenceData {
     using Samples = robin_hood::unordered_map<std::string, SampleCounts>;
     using QualityCounts = robin_hood::unordered_map<std::string, Qualified<uint64_t>>;
     using QualitySamples = robin_hood::unordered_map<std::string, Qualified<SampleCounts>>;
-    SequenceData(std::shared_ptr<const std::string> ref, bool trackSamples, bool storeQualities, std::shared_ptr<const std::string> mateRef = nullptr) : reference(std::move(ref)), mateReference(std::move(mateRef)) {
+    SequenceData(std::shared_ptr<const std::string> ref, bool trackSamples, bool storeQualities, std::shared_ptr<const std::string> mateRef = nullptr, bool partialPairs = false) : allowPartialPairs(partialPairs), reference(std::move(ref)), mateReference(std::move(mateRef)) {
         if (storeQualities) {
             if (trackSamples) { variants.emplace<QualitySamples>(); }
             else { variants.emplace<QualityCounts>(); }
@@ -177,14 +179,15 @@ struct diffDNA::SequenceData {
                 if (mate) {
                     const auto& q2 = mate->getQual();
                     selectedMate = std::make_shared<const QualityRead>(QualityRead{*incomingMate,
-                        std::vector<qual_score>(q2.begin(), q2.begin() + incomingMate->logical)});
+                        std::vector<qual_score>(q2.begin(), q2.begin() + incomingMate->backing)});
                 }
                 target.seed = std::make_shared<const QualitySeed>(QualitySeed{{incoming,
-                    std::vector<qual_score>(qualities.begin(), qualities.begin() + incoming.logical)}, std::move(selectedMate)});
+                    std::vector<qual_score>(qualities.begin(), qualities.begin() + incoming.backing)}, std::move(selectedMate)});
             }
         }
         target.history = history;
     }
+    bool allowPartialPairs = false;
     std::shared_ptr<const std::string> reference, mateReference;
     // Only nucleotide-only, untracked mode uses a separate reference counter.
     // Other modes store the reference under an empty patch key in the same map.
@@ -192,9 +195,9 @@ struct diffDNA::SequenceData {
     std::variant<Counts, Samples, QualityCounts, QualitySamples> variants;
 };
 
-diffDNA::diffDNA(std::shared_ptr<const std::string> reference, bool trackSamples, bool storeQualities, std::shared_ptr<const std::string> mateReference) {
-    if (!reference || (mateReference && (reference->empty() || mateReference->empty()))) { throw std::invalid_argument("diffDNA requires complete references"); }
-    sequences_ = std::make_shared<SequenceData>(std::move(reference), trackSamples, storeQualities, std::move(mateReference));
+diffDNA::diffDNA(std::shared_ptr<const std::string> reference, bool trackSamples, bool storeQualities, std::shared_ptr<const std::string> mateReference, bool allowPartialPairs) {
+    if (!reference || (allowPartialPairs && storeQualities) || (!allowPartialPairs && mateReference && (reference->empty() || mateReference->empty()))) { throw std::invalid_argument("diffDNA requires complete references"); }
+    sequences_ = std::make_shared<SequenceData>(std::move(reference), trackSamples, storeQualities, std::move(mateReference), allowPartialPairs);
 }
 diffDNA::diffDNA(std::string reference, bool trackSamples, bool storeQualities)
     : diffDNA(std::make_shared<const std::string>(std::move(reference)), trackSamples, storeQualities) {}
@@ -216,12 +219,12 @@ const std::string& diffDNA::reference() const {
     return *sequences_->reference;
 }
 void diffDNA::detachSequences() {
-    if (sequences_ && !sequences_.unique()) { sequences_ = std::make_shared<SequenceData>(*sequences_); }
+    if (sequences_ && sequences_.use_count() != 1) { sequences_ = std::make_shared<SequenceData>(*sequences_); }
 }
 void diffDNA::clear() {
     if (sequences_) {
         // Starting empty avoids copying a retained snapshot's entire variant map.
-        if (!sequences_.unique()) { sequences_ = std::make_shared<SequenceData>(sequences_->reference, tracksSamples(), storesQualities(), sequences_->mateReference); }
+        if (sequences_.use_count() != 1) { sequences_ = std::make_shared<SequenceData>(sequences_->reference, tracksSamples(), storesQualities(), sequences_->mateReference, sequences_->allowPartialPairs); }
         else {
             std::visit([](auto& variants) { variants.clear(); }, sequences_->variants);
             sequences_->identical = 0;
@@ -268,15 +271,17 @@ void diffDNA::addPair(std::string_view r1, std::string_view r2, const SampleCoun
     if (!storesPairs()) { throw std::logic_error("diffDNA pair storage was not enabled"); }
     record(r1, totalCounts(samples), samples, nullptr, &quality, r2);
 }
+// HQ variants retain full backing mates after physical technical cuts. Logical
+// filtering/search lengths survive separately in SeedReadStats for selection.
 void diffDNA::addPairQuality(DNA& r1, DNA& r2, uint64_t copies, int sample) {
     if (!storesPairs() || !storesQualities()) { throw std::logic_error("diffDNA paired quality retention was not enabled"); }
     const SampleCount entry(sample, copies);
-    record(r1.getSeqPseudoView(), copies, sample >= 0 ? std::span<const SampleCount>(&entry, 1) : std::span<const SampleCount>(), &r1, nullptr, r2.getSeqPseudoView(), &r2);
+    record(r1.getSequence(), copies, sample >= 0 ? std::span<const SampleCount>(&entry, 1) : std::span<const SampleCount>(), &r1, nullptr, r2.getSequence(), &r2);
 }
 void diffDNA::addQuality(DNA& dna, uint64_t copies, int sample) {
     if (!storesQualities()) { throw std::logic_error("diffDNA quality retention was not enabled"); }
     const SampleCount entry(sample, copies);
-    record(dna.getSeqPseudoView(), copies, sample >= 0 ? std::span<const SampleCount>(&entry, 1) : std::span<const SampleCount>(), &dna);
+    record(dna.getSequence(), copies, sample >= 0 ? std::span<const SampleCount>(&entry, 1) : std::span<const SampleCount>(), &dna);
 }
 void diffDNA::add(std::string_view sequence, const SampleCounts& samples, const QualityRecord& quality) {
     record(sequence, totalCounts(samples), samples, nullptr, &quality);
@@ -286,14 +291,15 @@ void diffDNA::record(std::string_view sequence, uint64_t copies, std::span<const
     if (copies > std::numeric_limits<uint64_t>::max() - reads_) { throw std::overflow_error("diffDNA read count overflow"); }
     if (!copies) { return; }
     if (tracksSamples() && samples.empty()) { throw std::invalid_argument("Sample-tracked diffDNA requires sample IDs"); }
-    if (storesPairs() && sequence.empty()) { throw std::invalid_argument("diffDNA requires both mates to be nonempty"); }
-    if (sequences_ && storesPairs() != !mateSequence.empty()) { throw std::invalid_argument("diffDNA requires consistent complete single or paired observations"); }
+    const bool partialPairs = sequences_ && sequences_->allowPartialPairs;
+    if (!partialPairs && storesPairs() && sequence.empty()) { throw std::invalid_argument("diffDNA requires both mates to be nonempty"); }
+    if (sequences_ && !partialPairs && storesPairs() != !mateSequence.empty()) { throw std::invalid_argument("diffDNA requires consistent complete single or paired observations"); }
     if (storesQualities()) {
         auto validRead = [](DNA& d, std::string_view sequence) {
-            return d.getMergeLength() < 0 && d.getSeqPseudoView() == sequence && !sequence.empty() && d.getQual().size() >= sequence.size();
+            return d.getMergeLength() < 0 && d.getSequence() == sequence && !sequence.empty() && d.getQual().size() >= sequence.size();
         };
         auto validQuality = [](const QualityRead& q, std::string_view sequence) {
-            return q.stats.logical == sequence.size() && q.qualities.size() == sequence.size() && q.stats.mergeLength < 0;
+            return q.stats.backing == sequence.size() && q.stats.logical <= q.stats.backing && q.qualities.size() == sequence.size() && q.stats.mergeLength < 0;
         };
         if (read) {
             if (!validRead(*read, sequence) || storesPairs() != bool(mate) || (mate && !validRead(*mate, mateSequence))) {
@@ -399,15 +405,106 @@ size_t diffDNA::payloadBytes() const {
     });
     return bytes;
 }
-void diffDNA::visit(const std::function<void(std::string_view, uint64_t, const SampleCounts*, const QualityRecord*)>& visitor) const {
+void diffDNA::visit(const std::function<void(std::string_view, uint64_t, const SampleCounts*, const QualityRecord*)>& visitor, bool ordered) const {
     if (storesPairs()) { throw std::logic_error("Paired variants require a paired visitor or export"); }
-    visitFragment([&](auto sequence, auto, auto copies, const auto* samples, const auto* quality) { visitor(sequence, copies, samples, quality); });
+    visitFragment([&](auto sequence, auto, auto copies, const auto* samples, const auto* quality) { visitor(sequence, copies, samples, quality); }, ordered);
 }
-void diffDNA::forEachPair(const std::function<void(std::string_view, std::string_view, uint64_t, const SampleCounts*, const QualityRecord*)>& visitor) const {
+void diffDNA::forEachPair(const std::function<void(std::string_view, std::string_view, uint64_t, const SampleCounts*, const QualityRecord*)>& visitor, bool ordered) const {
     if (!storesPairs()) { throw std::logic_error("diffDNA pair storage was not enabled"); }
-    visitFragment(visitor);
+    visitFragment(visitor, ordered);
 }
-void diffDNA::visitFragment(const std::function<void(std::string_view, std::string_view, uint64_t, const SampleCounts*, const QualityRecord*)>& visitor) const {
+diffDNA::SortedFragments diffDNA::sortedFragments(const ParallelFor* parallel) const {
+    // Tasks of at least this many variants; smaller snapshots stay on the caller.
+    constexpr size_t kTask = 2048;
+    const bool split = parallel && uniqueCount() >= 2 * kTask;
+    SortedFragments sorted;
+    // Decode straight into the snapshot: one allocation per sequence.
+    auto decodeInto = [&](Fragment& fragment, std::string_view patch) {
+        if (patch.empty()) {
+            fragment.first = reference();
+            if (storesPairs()) { fragment.second = mateReference(); }
+        } else if (storesPairs()) {
+            const auto parts = splitPairPatch(patch);
+            fragment.first = decodePatch(reference(), parts.first);
+            fragment.second = decodePatch(mateReference(), parts.second);
+        } else {
+            fragment.first = decodePatch(reference(), patch);
+        }
+    };
+    size_t tasks = 1;
+    if (!split) {
+        sorted.fragments.reserve(uniqueCount());
+        visitPatches([&](const std::string& patch, uint64_t copies, const SampleCounts* samples, const QualityRecord* quality) {
+            decodeInto(sorted.fragments.emplace_back(Fragment{{}, {}, copies, samples, quality}), patch);
+        });
+    } else {
+        // Collect the patches in storage order, then decode ranges as tasks.
+        std::vector<std::string_view> patches; // empty: the reference (the view may then dangle)
+        sorted.fragments.reserve(uniqueCount());
+        visitPatches([&](const std::string& patch, uint64_t copies, const SampleCounts* samples, const QualityRecord* quality) {
+            patches.push_back(patch);
+            sorted.fragments.push_back(Fragment{{}, {}, copies, samples, quality});
+        });
+        tasks = (patches.size() + kTask - 1) / kTask;
+        (*parallel)(tasks, [&](size_t task) {
+            for (size_t i = task * patches.size() / tasks, end = (task + 1) * patches.size() / tasks; i < end; ++i) {
+                decodeInto(sorted.fragments[i], patches[i]);
+            }
+        });
+    }
+    const size_t n = sorted.fragments.size();
+    auto range = [&](size_t task) { return std::pair<size_t, size_t>{task * n / tasks, (task + 1) * n / tasks}; };
+    auto run = [&](size_t count, const std::function<void(size_t)>& task) {
+        if (split) { (*parallel)(count, task); }
+        else { for (size_t i = 0; i < count; ++i) { task(i); } }
+    };
+    // Variants are unique, so this order is total: the result does not depend
+    // on storage order or on how the sort is split.
+    auto less = [](const Fragment* a, const Fragment* b) {
+        const int c = a->first.compare(b->first);
+        return c != 0 ? c < 0 : a->second < b->second;
+    };
+    auto& order = sorted.order;
+    order.resize(n);
+    for (size_t i = 0; i < n; ++i) { order[i] = &sorted.fragments[i]; }
+    run(tasks, [&](size_t task) {
+        const auto [begin, end] = range(task);
+        std::sort(order.begin() + begin, order.begin() + end, less);
+    });
+    if (tasks > 1) {
+        // Merge neighbouring sorted runs pairwise until one remains.
+        std::vector<size_t> runs;
+        for (size_t task = 0; task < tasks; ++task) { runs.push_back(range(task).first); }
+        runs.push_back(n);
+        std::vector<const Fragment*> merged(n);
+        while (runs.size() > 2) {
+            const size_t pairs = (runs.size() - 1) / 2;
+            run(pairs, [&](size_t k) {
+                std::merge(order.begin() + runs[2 * k], order.begin() + runs[2 * k + 1],
+                    order.begin() + runs[2 * k + 1], order.begin() + runs[2 * k + 2], merged.begin() + runs[2 * k], less);
+            });
+            std::vector<size_t> next;
+            for (size_t k = 0; k < pairs; ++k) { next.push_back(runs[2 * k]); }
+            if ((runs.size() - 1) % 2) { // odd run out: carried over unchanged
+                std::copy(order.begin() + runs[runs.size() - 2], order.end(), merged.begin() + runs[runs.size() - 2]);
+                next.push_back(runs[runs.size() - 2]);
+            }
+            next.push_back(n);
+            runs.swap(next);
+            order.swap(merged);
+        }
+    }
+    return sorted;
+}
+void diffDNA::visitFragment(const std::function<void(std::string_view, std::string_view, uint64_t, const SampleCounts*, const QualityRecord*)>& visitor, bool ordered) const {
+    if (ordered && uniqueCount() > 1) {
+        const auto sorted = sortedFragments();
+        for (size_t i = 0; i < sorted.size(); ++i) {
+            const Fragment& f = sorted[i];
+            visitor(f.first, f.second, f.copies, f.samples, f.quality);
+        }
+        return;
+    }
     visitPatches([&](const std::string& patch, uint64_t copies, const SampleCounts* samples, const QualityRecord* quality) {
         if (patch.empty()) { visitor(reference(), storesPairs() ? mateReference() : std::string_view{}, copies, samples, quality); return; }
         if (storesPairs()) {
@@ -420,8 +517,8 @@ void diffDNA::visitFragment(const std::function<void(std::string_view, std::stri
         }
     });
 }
-void diffDNA::forEach(const std::function<void(std::string_view, uint64_t)>& visitor) const {
-    visit([&](std::string_view sequence, uint64_t count, const SampleCounts*, const QualityRecord*) { visitor(sequence, count); });
+void diffDNA::forEach(const std::function<void(std::string_view, uint64_t)>& visitor, bool ordered) const {
+    visit([&](std::string_view sequence, uint64_t count, const SampleCounts*, const QualityRecord*) { visitor(sequence, count); }, ordered);
 }
 void diffDNA::forEachWithSamples(const std::function<void(std::string_view, uint64_t, const SampleCounts&)>& visitor) const {
     if (!tracksSamples()) { throw std::logic_error("diffDNA sample provenance was not retained"); }
@@ -438,38 +535,97 @@ std::string subclusterLabel(std::string_view cluster) {
     if (label.empty()) { label = "cluster"; }
     return label;
 }
-void writeQualityRecord(std::ostream& out, std::string_view sequence, const diffDNA::QualityRead& quality, const std::string& label, int offset) {
+// Writes "@<label>.sub<n>;size=<count>;" exactly as DNA::writeFastQ would
+// write that record, without building a DNA per variant.
+void writeQualityRecord(std::ostream& out, std::string_view sequence, const diffDNA::QualityRead& quality,
+    std::string_view label, size_t subcluster, uint64_t count, int offset) {
     if (quality.qualities.size() != sequence.size()) { throw std::logic_error("Incomplete diffDNA qualities"); }
-    DNA expanded(std::string(sequence), label);
-    expanded.setQual(quality.qualities); expanded.prepareWrite(offset); expanded.writeFastQ(out, false);
+    if (sequence.empty()) { return; } // DNA::writeFastQ writes no record without bases
+    char numbers[2][24];
+    const auto subEnd = std::to_chars(numbers[0], numbers[0] + 24, subcluster).ptr;
+    const auto countEnd = std::to_chars(numbers[1], numbers[1] + 24, count).ptr;
+    const std::string_view parts[] = {"@", label, ".sub", {numbers[0], size_t(subEnd - numbers[0])}, ";size=",
+        {numbers[1], size_t(countEnd - numbers[1])}, ";\n", sequence, "\n+\n"};
+    size_t size = sequence.size() + 1;
+    for (const auto part : parts) { size += part.size(); }
+    thread_local std::string record;
+    record.resize(size);
+    char* cursor = record.data();
+    for (const auto part : parts) { std::memcpy(cursor, part.data(), part.size()); cursor += part.size(); }
+    // DNA::writeFastQ's quality characters: offset added, clamped to [max(33, offset), 126].
+    const int lowest = std::max(33, offset);
+    for (const qual_score q : quality.qualities) { *cursor++ = static_cast<char>(std::clamp(static_cast<int>(q) + offset, lowest, 126)); }
+    *cursor = '\n';
+    out.write(record.data(), static_cast<std::streamsize>(size));
+}
+void writeSingleRecord(std::ostream& out, std::string_view sequence, const diffDNA::QualityRecord* quality,
+    std::string_view label, size_t subcluster, uint64_t count, int offset) {
+    if (!quality || !quality->seed) { throw std::logic_error("Missing diffDNA qualities"); }
+    writeQualityRecord(out, sequence, *quality->seed, label, subcluster, count, offset);
+}
+void writePairedRecord(std::ostream& r1, std::ostream& r2, std::string_view first, std::string_view second,
+    const diffDNA::QualityRecord* quality, std::string_view label, size_t subcluster, uint64_t count, int offset) {
+    if (!quality || !quality->seed || !quality->seed->mate) { throw std::logic_error("Missing paired diffDNA qualities"); }
+    writeQualityRecord(r1, first, *quality->seed, label, subcluster, count, offset);
+    writeQualityRecord(r2, second, *quality->seed->mate, label, subcluster, count, offset);
 }
 }
-void diffDNA::forEachWithQualities(const std::function<void(std::string_view, uint64_t, const SampleCounts*, const QualityRecord&)>& visitor) const {
+void diffDNA::forEachWithQualities(const std::function<void(std::string_view, uint64_t, const SampleCounts*, const QualityRecord&)>& visitor, bool ordered) const {
     if (!storesQualities()) { throw std::logic_error("diffDNA qualities were not retained"); }
     visit([&](auto sequence, auto count, const SampleCounts* samples, const QualityRecord* quality) {
         visitor(sequence, count, samples, *quality);
-    });
+    }, ordered);
 }
 void diffDNA::writeFastq(std::ostream& out, std::string_view cluster, int qualityOffset) const {
     if (qualityOffset < 33 || qualityOffset > 126) { throw std::invalid_argument("Invalid FASTQ quality offset"); }
+    if (!storesQualities()) { throw std::logic_error("diffDNA qualities were not retained"); }
+    if (storesPairs()) { throw std::logic_error("Paired variants require a paired visitor or export"); }
+    if (uniqueCount() > 1) {
+        const auto fragments = sortedFragments();
+        writeFastq(out, cluster, fragments, 0, fragments.size(), qualityOffset);
+        return;
+    }
+    // At most one variant: nothing to sort.
     const auto label = subclusterLabel(cluster);
-    size_t subcluster = 0;
-    forEachWithQualities([&](auto sequence, auto count, const SampleCounts*, const QualityRecord& quality) {
-        if (!quality.seed) { throw std::logic_error("Missing diffDNA qualities"); }
-        writeQualityRecord(out, sequence, *quality.seed, label + ".sub" + std::to_string(++subcluster) + ";size=" + std::to_string(count) + ";", qualityOffset);
+    visitFragment([&](auto sequence, auto, auto count, const auto*, const QualityRecord* quality) {
+        writeSingleRecord(out, sequence, quality, label, 1, count, qualityOffset);
     });
+    if (!out) { throw std::runtime_error("Could not write diffDNA subcluster FASTQ"); }
+}
+void diffDNA::writeFastq(std::ostream& out, std::string_view cluster, const SortedFragments& fragments,
+    size_t begin, size_t end, int qualityOffset) const {
+    if (qualityOffset < 33 || qualityOffset > 126) { throw std::invalid_argument("Invalid FASTQ quality offset"); }
+    const auto label = subclusterLabel(cluster);
+    for (size_t i = begin; i < end; ++i) {
+        const auto& fragment = fragments[i];
+        writeSingleRecord(out, fragment.first, fragment.quality, label, i + 1, fragment.copies, qualityOffset);
+    }
     if (!out) { throw std::runtime_error("Could not write diffDNA subcluster FASTQ"); }
 }
 void diffDNA::writeFastq(std::ostream& r1, std::ostream& r2, std::string_view cluster, int qualityOffset) const {
     if (!storesQualities()) { throw std::logic_error("diffDNA qualities were not retained"); }
     if (qualityOffset < 33 || qualityOffset > 126) { throw std::invalid_argument("Invalid FASTQ quality offset"); }
-    const auto label = subclusterLabel(cluster); size_t subcluster = 0;
-    forEachPair([&](auto first, auto second, auto count, const auto*, const QualityRecord* quality) {
-        if (!quality || !quality->seed || !quality->seed->mate) { throw std::logic_error("Missing paired diffDNA qualities"); }
-        const auto name = label + ".sub" + std::to_string(++subcluster) + ";size=" + std::to_string(count) + ";";
-        writeQualityRecord(r1, first, *quality->seed, name, qualityOffset);
-        writeQualityRecord(r2, second, *quality->seed->mate, name, qualityOffset);
+    if (!storesPairs()) { throw std::logic_error("diffDNA pair storage was not enabled"); }
+    if (uniqueCount() > 1) {
+        const auto fragments = sortedFragments();
+        writeFastq(r1, r2, cluster, fragments, 0, fragments.size(), qualityOffset);
+        return;
+    }
+    // At most one variant: nothing to sort.
+    const auto label = subclusterLabel(cluster);
+    visitFragment([&](auto first, auto second, auto count, const auto*, const QualityRecord* quality) {
+        writePairedRecord(r1, r2, first, second, quality, label, 1, count, qualityOffset);
     });
+    if (!r1 || !r2) { throw std::runtime_error("Could not write paired diffDNA FASTQ"); }
+}
+void diffDNA::writeFastq(std::ostream& r1, std::ostream& r2, std::string_view cluster, const SortedFragments& fragments,
+    size_t begin, size_t end, int qualityOffset) const {
+    if (qualityOffset < 33 || qualityOffset > 126) { throw std::invalid_argument("Invalid FASTQ quality offset"); }
+    const auto label = subclusterLabel(cluster);
+    for (size_t i = begin; i < end; ++i) {
+        const auto& fragment = fragments[i];
+        writePairedRecord(r1, r2, fragment.first, fragment.second, fragment.quality, label, i + 1, fragment.copies, qualityOffset);
+    }
     if (!r1 || !r2) { throw std::runtime_error("Could not write paired diffDNA FASTQ"); }
 }
 void diffDNA::writeFasta(std::ostream& r1, std::ostream& r2, std::string_view cluster) const {
@@ -477,7 +633,7 @@ void diffDNA::writeFasta(std::ostream& r1, std::ostream& r2, std::string_view cl
     forEachPair([&](auto first, auto second, auto count, const auto*, const auto*) {
         const auto name = label + ".sub" + std::to_string(++subcluster) + ";size=" + std::to_string(count) + ";";
         r1 << '>' << name << '\n' << first << '\n'; r2 << '>' << name << '\n' << second << '\n';
-    });
+    }, true);
     if (!r1 || !r2) { throw std::runtime_error("Could not write paired diffDNA FASTA"); }
 }
 void diffDNA::writeFasta(std::ostream& out, std::string_view cluster) const {
@@ -487,7 +643,7 @@ void diffDNA::writeFasta(std::ostream& out, std::string_view cluster) const {
     forEach([&](std::string_view sequence, uint64_t count) {
         out << '>' << label << ".sub" << ++subcluster << ";size=" << count << ";\n";
         out.write(sequence.data(), sequence.size()); out.put('\n');
-    });
+    }, true);
     if (!out) { throw std::runtime_error("Could not write diffDNA subcluster FASTA"); }
 }
 void diffDNA::write(std::ostream& out, std::string_view cluster) const {
@@ -555,4 +711,11 @@ std::shared_ptr<diffDNA> diffDNA::read(std::istream& in, std::string& cluster) {
     }
     if (result->readCount() != reads) { throw std::runtime_error("Inconsistent diffDNA observation count"); }
     return result;
+}
+
+std::string diffDNA::encodeDifference(std::string_view reference, std::string_view sequence) {
+    return encodePatch(reference, sequence);
+}
+std::string diffDNA::decodeDifference(const std::string& reference, std::string_view patch) {
+    return decodePatch(reference, patch);
 }

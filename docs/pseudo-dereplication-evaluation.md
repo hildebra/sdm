@@ -111,7 +111,7 @@ Compare streaming 97.5% and 97% groups with 20, 50, and optionally 100 retained 
 
 ## Reproduction
 
-The existing [ONT simulation](../tests/Test99OntSimulation.cpp) now has a `--compression` experiment mode. It reuses [the candidate benchmark](../tests/Test99Candidates.cpp), whose default remains 99%:
+The existing [ONT simulation](../.claude/archive/benchmarks/Test99OntSimulation.cpp) now has a `--compression` experiment mode. It reuses [the candidate benchmark](../.claude/archive/benchmarks/Test99Candidates.cpp), whose default remains 99%:
 
 ```sh
 make -j4 WITH_HTS=0 STATIC=0 BUILD_DIR=/tmp/sdm-pseudo-build \

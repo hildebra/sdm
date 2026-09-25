@@ -36,8 +36,13 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn, bool MIDuse,
 	OutputStreamer* MD, int curThread);
 //bool read_paired_STRready(vector<vector< string >> tdn, bool MIDuse,
 //	OutputStreamer* MD, int curThread, bool keepPairHd, qual_score FastqVer);
-bool multi_read_paired_STRready(multi_tmp_lines* tdn, bool MIDuse,
+// Processes one block of read records (called by multi_read_paired_STRready).
+bool process_read_block(multi_tmp_lines* tdn, bool MIDuse,
 	OutputStreamer* MD, int curThread, bool keepPairHd, qual_score FastqVer);
+// derepBlock: input-order block number for ordered dereplication (or none).
+bool multi_read_paired_STRready(multi_tmp_lines* tdn, bool MIDuse,
+	OutputStreamer* MD, int curThread, bool keepPairHd, qual_score FastqVer,
+	uint64_t derepBlock = std::numeric_limits<uint64_t>::max());
 void multi_read_paired_STRget(shared_ptr<InputStreamer> IS, OutputStreamer* MD, int curThread, 
 	int tmpBlockSize, bool MIDuse, bool keepPairHd, qual_score FastqVer);
 //shared_ptr<DNA> tdn, shared_ptr<DNA> tdn2,shared_ptr<DNA> MIDseq,
