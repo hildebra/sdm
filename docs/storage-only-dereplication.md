@@ -34,7 +34,7 @@ Physical technical cuts are already part of the supplied read objects. HQ output
 
 ## Acceptance coverage
 
-`tests/test_storage_only_parity.py` reuses the 1,000-pair, two-sample mixed-quality fixture and compares **ordinary 100% with storage-only 97%**. It supplies variable observed quality strings, R2-only variants, a dominant unmerged subgroup with a rare better merged observation, failed/mid-quality repeats, failures preceding passing anchors, short prefixes, below-cutoff parents and separate sequencing runs.
+`tests/test_storage_only_parity.pl` reuses the 1,000-pair, two-sample mixed-quality fixture and compares **ordinary 100% with storage-only 97%**. It supplies variable observed quality strings, R2-only variants, a dominant unmerged subgroup with a rare better merged observation, failed/mid-quality repeats, failures preceding passing anchors, short prefixes, below-cutoff parents and separate sequencing runs.
 
 There are **48 comparisons**: eight processing profiles, main FASTA/main FASTQ, and 1/4/12 workers. Profiles exercise capped R1 search, capped merged search, merged output with R1-only search, uncapped prefix recovery with/without merging, truncation/quality trimming with/without merging, and cumulative sequencing-run output. Both modes use the same binary, inputs, filters and minimum-copy cutoff.
 
@@ -99,7 +99,7 @@ A separate alternating before/after benchmark exercises the default ordinary pai
 
 ```sh
 make WITH_HTS=0 test
-python3 tests/test_storage_only_parity.py ./sdm --output /tmp/sdm-storage-parity
+perl tests/test_storage_only_parity.pl ./sdm --output /tmp/sdm-storage-parity
 python3 .claude/archive/benchmarks/benchmark_storage_only.py ./sdm --output /tmp/sdm-storage-memory \
     --reads 250000 --templates 50000 --threads 1 12 --repeats 3 \
     --formats fa fq --quality-profile variable

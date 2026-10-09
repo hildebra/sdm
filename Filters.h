@@ -95,6 +95,10 @@ public:
 	bool barcodesReversed(bool fwd) const {
 		return runState_->barcodes[fwd ? 0 : 1].reversed.load() || reportedBarcodeReversal_[fwd ? 0 : 1];
 	}
+	// Neither orientation dominated: every read is scanned for both.
+	bool barcodesMixed(bool fwd) const {
+		return runState_->barcodes[fwd ? 0 : 1].mixed.load() || reportedBarcodeMixed_[fwd ? 0 : 1];
+	}
 
 	bool doOptimalClusterSeq() { return b_optiClusterSeq; }
 	bool doSubselReads() { return b_subselectionReads; }
@@ -148,7 +152,10 @@ public:
 	void copyOutputState(Filters& source) {
 		ReadsWritten = source.writtenReads(); OFileIncre = source.getFileIncrementor();
 		// For the run log only: the main filter never scans, so its own state is untouched.
-		for (int i = 0; i < 2; ++i) { reportedBarcodeReversal_[i] = reportedBarcodeReversal_[i] || source.barcodesReversed(i == 0); }
+		for (int i = 0; i < 2; ++i) {
+			reportedBarcodeReversal_[i] = reportedBarcodeReversal_[i] || source.barcodesReversed(i == 0);
+			reportedBarcodeMixed_[i] = reportedBarcodeMixed_[i] || source.barcodesMixed(i == 0);
+		}
 	}
 	int getFileIncrementor() { return OFileIncre; }
 	uint64_t getReadsWritten() { return ReadsWritten.load(); }
@@ -446,7 +453,8 @@ protected:
 	struct SharedRunState {
 		struct Orientation {
 			std::atomic<uint64_t> hits{0}, reverseHits{0};
-			std::atomic<bool> fixed{false}, reversed{false};
+			// mixed: decided, but neither orientation outnumbers the other 8:1.
+			std::atomic<bool> fixed{false}, reversed{false}, mixed{false};
 		};
 		std::array<Orientation, 2> barcodes; // [0] read-1 barcodes, [1] read-2 barcodes
 		std::mutex decision;
@@ -456,7 +464,13 @@ protected:
 	// This copy's barcode tables already follow a shared reversal decision.
 	std::array<bool, 2> barcodesReversedLocally_{false, false};
 	std::array<bool, 2> reportedBarcodeReversal_{false, false};
+	std::array<bool, 2> reportedBarcodeMixed_{false, false};
 	void syncBarcodeOrientation(bool isPair1);
+	// After a forward scan: also scans the reverse-complemented barcodes and takes that hit
+	// if the forward scan missed, or if only that hit is followed by its sample's primer.
+	bool resolveBarcodeOrientation(const shared_ptr<DNA>& d, int& start, int& stop, int& idx, int& c_err,
+		int scanRegion, string& presentBC, bool isPair1, bool endCheck);
+	bool primerFollowsBarcode(const shared_ptr<DNA>& d, int idx, int stop) const;
 	uint64_t firstXreadsW;//just prints the first X reads for experiment (read pairs being counted as 2)
 	uint64_t firstXreadsR;//just reads the first X reads for experiment (read pairs being counted as 2)
 	bool b_optiClusterSeq;//SEED extension

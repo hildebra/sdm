@@ -141,7 +141,7 @@ FASTA export is disabled by default because it expands the distinct variants int
 
 ## Validation
 
-`tests/test_paired_diff_quality_pipeline.py` compares complete 100%/97% FASTA, map, and FASTQ records on 1,000 paired fragments (2,000 reads), ignoring record order. It covers 200–255 bp R1s, quality winners, divergent R2s, capped tails, below-cutoff dereplicates, retained qualities on/off, and 1/4/12 workers. Independent input tallies validate seeds and abundances.
+`tests/test_paired_diff_quality_pipeline.pl` compares complete 100%/97% FASTA, map, and FASTQ records on 1,000 paired fragments (2,000 reads), ignoring record order. It covers 200–255 bp R1s, quality winners, divergent R2s, capped tails, below-cutoff dereplicates, retained qualities on/off, and 1/4/12 workers. Independent input tallies validate seeds and abundances.
 
 `tests/TestCoarseDerep.cpp` checks the production index against an independent exhaustive first-anchor scan, including length-bin boundaries, short sequences, ambiguous bases, homopolymers, and identity thresholds from 0.1 to 100%. It also checks exact decimal boundaries, representative replacement without chaining, exact-variant counting, subcluster FASTA abundance, delta reconstruction and truncated-file rejection, concurrent sample counts, repeated snapshots, reset/finalization, option-file precedence, and search caps. Unified-count tests additionally compare per-variant and aggregate sample abundances against an independent tally, exercise rebasing merges and self-merges, validate count-only exact mode and overflow handling, and check snapshot independence and sidecar compatibility.
 

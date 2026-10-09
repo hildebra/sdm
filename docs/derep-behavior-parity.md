@@ -27,7 +27,7 @@ Explicit `derepCoarseClusters=1` or `derepReassign=1` still requests coarse-pare
 
 ## Controlled comparison
 
-`tests/test_derep_behavior_parity.py` generates **1,000 paired fragments**, split equally between two samples. Most mates are 230 bp from 300 bp inserts. The fixture includes R1-only and R2-only passing observations, both-failed repeats, failures before passing anchors, different merged tails sharing R1, long/short prefixes, singletons, and 40 R2 mates removed completely by a physical cut. Nearby R1 variants exercise actual 97% grouping.
+`tests/test_derep_behavior_parity.pl` generates **1,000 paired fragments**, split equally between two samples. Most mates are 230 bp from 300 bp inserts. The fixture includes R1-only and R2-only passing observations, both-failed repeats, failures before passing anchors, different merged tails sharing R1, long/short prefixes, singletons, and 40 R2 mates removed completely by a physical cut. Nearby R1 variants exercise actual 97% grouping.
 
 Every profile uses the same binary, inputs, filters, search settings, and minimum-copy cutoff (40) across these modes:
 
@@ -96,11 +96,11 @@ The portable `make WITH_HTS=0 test` suite passed with the full-HQ changes, inclu
 
 ```sh
 make WITH_HTS=0 test
-python3 tests/test_derep_behavior_parity.py ./sdm --output /tmp/sdm-parity-new
-python3 tests/test_derep_behavior_parity.py ./sdm --complete-mates --require-parity
-python3 tests/test_derep_behavior_parity.py ./sdm --main-format fq --complete-mates --require-parity
+perl tests/test_derep_behavior_parity.pl ./sdm --output /tmp/sdm-parity-new
+perl tests/test_derep_behavior_parity.pl ./sdm --complete-mates --require-parity
+perl tests/test_derep_behavior_parity.pl ./sdm --main-format fq --complete-mates --require-parity
 # Inspect an older binary without requiring the corrected admission behavior:
-python3 tests/test_derep_behavior_parity.py /path/to/old/sdm --observe
+perl tests/test_derep_behavior_parity.pl /path/to/old/sdm --observe
 ```
 
 For the Apong reconciliation, run the four configurations above with the same executable and inputs, preserving the original merge values for the first run. Use fresh output directories, the same options/search limits, `derepPerSR=0`, and the same minimum-copy rule (`8:1,4:2,3:3` in the supplied command). Record the actual commands and executable/configuration hashes. Do not reuse an output stem that might have stale `.merg` files.
@@ -108,7 +108,7 @@ For the Apong reconciliation, run the four configurations above with the same ex
 For each completed output set:
 
 ```sh
-python3 tests/audit_derep_counts.py /path/to/run/derep.fas > /path/to/run/count-audit.json
+perl tests/audit_derep_counts.pl /path/to/run/derep.fas > /path/to/run/count-audit.json
 ```
 
 The audit reads `derep.map`, `derep.fas`, optional `derep.merg.fas`, and `derep.fas.rest`; it reports per-sample totals in each partition and rejects missing/duplicate parents or abundance mismatches. It accepts ordinary SDM FASTA or four-line FASTQ output. The standalone audit covers parent abundance, not the completeness of retained HQ variants; the regression runner separately verifies paired variant sums and qualities. Apply it to each complete per-run output set rather than a cumulative `derepPerSR=1` map with only one run's main file.

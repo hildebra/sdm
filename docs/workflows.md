@@ -117,7 +117,7 @@ The reader validates synchronized mate IDs, abundances, record completeness, gen
 Run the preprocessing-to-seed regressions with:
 
 ```sh
-python3 tests/test_seed_subclusters.py ./sdm
+perl tests/test_seed_subclusters.pl ./sdm
 ```
 
 

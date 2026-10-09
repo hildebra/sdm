@@ -199,7 +199,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //      for all threads, best-offset barcode matching, TrimStartNTs also with a map, UPARSE
 //      chimera parsing, integer OTU matrix, PAF coverage/secondaries, -dere_size_fmt 1 in seed
 //      extension, cd-hit/.uc parsing fixes; thread pools no longer deadlock on worker submits.
-static const char* sdm_version = "3.61";
+//3.62: 9.10.26: no functional change. Speed audit 2 (docs/speed-audit-2.md): profiles of filtering and
+//      dereplication, exact speedups prototyped (1.25-1.7x at 1 thread), SIMD/POPCNT assessment.
+//3.63: 9.10.26: derep never writes a read that failed filtering as representative: an R1 rejected for
+//      an N (counted via its merged key) could win as the most abundant merge-offset subgroup.
+//3.64: 9.10.26: barcode orientation without an 8:1 majority (mixed libraries) keeps testing forward and
+//      reverse-complemented barcodes (was fixed forward after 5,000 reads, losing later reversed ones);
+//      a read matching both takes the one followed by its sample's primer. TechnicalAdapter is removed
+//      again (was never applied). Test suites now in Perl (tests/*.pl, run_tests.pl) instead of Python.
+static const char* sdm_version = "3.64";
 static const char* sdm_status = "beta";
 
 

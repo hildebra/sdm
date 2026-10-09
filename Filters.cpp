@@ -1626,8 +1626,9 @@ bool Filters::checkYellowAndGreen(const shared_ptr<DNA>& d, int pairPre,
 		}
 	}
 
-	//remove technical adapter
-	if (pairPre == -1 && removeAdapter) {
+	//remove technical adapter (5' of read 1; callers pass pair 0 for it, so the former
+	// pairPre == -1 test never removed anything). A merged consensus starts after it.
+	if (pair == 0 && !isMerged && removeAdapter) {
 		remove_adapter(d);
 	}
 
@@ -2141,18 +2142,16 @@ int Filters::findTag(const shared_ptr<DNA>& d, string& presentBC, int& c_err,
 	scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1, false, endCheck);
 
 	auto& orientation = runState_->barcodes[isPair1 ? 0 : 1];
-	if (!orientation.fixed.load()) {
-		if (start == -1) {//check reverse transcription
-			scanBC(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1, true, endCheck);
-			if (start != -1) {
-				orientation.reverseHits.fetch_add(1, std::memory_order_relaxed);
-			}
-		}
-		else {
-			orientation.hits.fetch_add(1, std::memory_order_relaxed);
+	const bool decided = orientation.fixed.load();
+	// Until the orientation is decided, and for good if neither orientation dominates
+	// (mixed), each read is checked for reverse-complemented barcodes too.
+	if (!decided || orientation.mixed.load()) {
+		const bool reversed = resolveBarcodeOrientation(d, start, stop, idx, c_err, scanRegion, presentBC, isPair1, endCheck);
+		if (!decided && start != -1) {
+			(reversed ? orientation.reverseHits : orientation.hits).fetch_add(1, std::memory_order_relaxed);
 		}
 		//check if BC direction can be fixed (hits of all threads of this file set)
-		if (orientation.reverseHits.load(std::memory_order_relaxed) + orientation.hits.load(std::memory_order_relaxed) > DNA_MAX_IN_MEM) {
+		if (!decided && orientation.reverseHits.load(std::memory_order_relaxed) + orientation.hits.load(std::memory_order_relaxed) > DNA_MAX_IN_MEM) {
 			eval_reversingBC(isPair1);
 		}
 	}
@@ -2517,7 +2516,8 @@ void Filters::countBCdetected(int BC, int Pair, bool MidQ) {
 // orientation matched (the former "restart" of the file set had no caller, and
 // the read that triggered the decision was dropped); afterwards only the chosen
 // orientation is searched. Every copy swaps its own tables in
-// syncBarcodeOrientation.
+// syncBarcodeOrientation. Without an 8:1 majority (mixed) both orientations stay
+// searched; fixing forward there lost every later reverse-barcode read.
 void Filters::eval_reversingBC(bool fwd) {
 	if (!fwd && !bDoBarcode2) {
 		return;
@@ -2525,11 +2525,46 @@ void Filters::eval_reversingBC(bool fwd) {
 	auto& orientation = runState_->barcodes[fwd ? 0 : 1];
 	std::lock_guard<std::mutex> lock(runState_->decision);
 	if (orientation.fixed.load()) { return; }
-	if (orientation.reverseHits.load() > orientation.hits.load() * 8) {//use reversed_ BC ..
+	const uint64_t hits = orientation.hits.load(), reverseHits = orientation.reverseHits.load();
+	if (reverseHits > hits * 8) {//use reversed_ BC ..
 		orientation.reversed.store(true);
 	}
-	orientation.fixed.store(true); // after reversed: a reader seeing fixed also sees reversed
+	else if (hits <= reverseHits * 8) {
+		orientation.mixed.store(true);
+	}
+	orientation.fixed.store(true); // after reversed/mixed: a reader seeing fixed also sees them
 	syncBarcodeOrientation(fwd);
+}
+
+bool Filters::primerFollowsBarcode(const shared_ptr<DNA>& d, int idx, int stop) const {
+	if (idx < 0 || (size_t)idx >= PrimerIdx.size()) { return false; }
+	const int primer = PrimerIdx[idx];
+	if (primer < 0 || (size_t)primer >= PrimerL.size() || PrimerL[primer].empty()) { return false; }
+	// The window cutPrimer searches once the barcode is cut.
+	return d->matchSeq(PrimerL[primer], PrimerErrs, stop + (Bcheck4illuAdapts ? 40 : 22), stop) >= 0;
+}
+
+bool Filters::resolveBarcodeOrientation(const shared_ptr<DNA>& d, int& start, int& stop, int& idx, int& c_err,
+	int scanRegion, string& presentBC, bool isPair1, bool endCheck) {
+	// Only a read-1 barcode at the 5' end is followed by a forward primer.
+	const bool primerCheck = isPair1 && !endCheck && !d->isMIDseq() && !PrimerL.empty();
+	if (start != -1 && !primerCheck) { return false; } // forward wins without primer evidence
+	int rStart(-1), rStop(-1), rIdx(-1), rErr(0);
+	string rPresent;
+	const auto qualityFlags = d->QualCtrl;
+	scanBC(d, rStart, rStop, rIdx, rErr, scanRegion, rPresent, isPair1, true, endCheck);
+	if (rStart == -1) {
+		if (start != -1) { d->QualCtrl = qualityFlags; } // this scan's correction flags do not apply
+		return false;
+	}
+	// Hits in both orientations: the one followed by its sample's primer wins, forward on a tie.
+	if (start != -1 && (primerFollowsBarcode(d, idx, stop) || !primerFollowsBarcode(d, rIdx, rStop))) {
+		d->QualCtrl = qualityFlags;
+		return false;
+	}
+	start = rStart; stop = rStop; idx = rIdx; c_err = rErr;
+	presentBC.swap(rPresent);
+	return true;
 }
 
 void Filters::syncBarcodeOrientation(bool isPair1) {
@@ -4510,10 +4545,17 @@ void Filters::printStats(ostream& give, string file, string outf, bool greenQual
 					}
 					barcodeMode += " barcodes)";
 				}
+				if (barcodesMixed(true) || barcodesMixed(false)) {
+					barcodeMode += string(" (mixed orientation, both searched: ") +
+						(barcodesMixed(true) && barcodesMixed(false) ? "fwd & rev" : barcodesMixed(true) ? "fwd" : "rev") + " barcodes)";
+				}
 				printInfoRow(barcodeMode);
 			}
 			else if (barcodesReversed(true)) {
 				printInfoRow("All barcodes reversed");
+			}
+			else if (barcodesMixed(true)) {
+				printInfoRow("Barcodes in mixed orientation (both searched)");
 			}
 
 

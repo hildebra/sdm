@@ -221,7 +221,8 @@ void CompactDNA::observe(const std::shared_ptr<DNA>& dna, const std::shared_ptr<
             if (mate) { mateStats.emplace(*mate); }
             if (merged) { mergedStats.emplace(*merged); }
             float best = -1.f;
-            if (seed_selection::better<const SeedReadStats>(&incoming, mateStats ? &*mateStats : nullptr,
+            // As DNAunique::matchedDNA: a passing read replaces a non-passing selection.
+            if (!firstStats_->passing || seed_selection::better<const SeedReadStats>(&incoming, mateStats ? &*mateStats : nullptr,
                 mergedStats ? &*mergedStats : nullptr, &*firstStats_, mateStats_ ? &*mateStats_ : nullptr,
                 mergedStats_ ? &*mergedStats_ : nullptr, best, false, &history_)) {
                 auto selected = materialize(refs);

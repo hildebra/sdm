@@ -43,6 +43,16 @@ Use one identification scheme consistently within a mapping file:
 
 When `-i_path` is used, the map must include `fastqFile`, `alignmentFile` or `fnaFile`, and the command must supply `-o_fna` or `-o_fastq`. Paths in the file columns are resolved relative to `-i_path`. For example, `-i_path reads` and `fastqFile` value `sample_1.fastq.gz` refer to `reads/sample_1.fastq.gz`.
 
+### Barcode orientation
+
+Inline barcodes may be listed in the map as the reverse complement of what the reads contain. For each input file set, sdm searches both orientations of `BarcodeSequence` (and of `Barcode2ndPair` for dual-index data) in the first 5,000 reads with a barcode:
+
+- **Reversed:** reverse-complemented hits outnumber forward hits more than 8:1. The barcodes are reverse-complemented for the rest of the run (log: `All barcodes reversed`).
+- **Forward:** forward hits outnumber reverse-complemented hits more than 8:1. Only the forward orientation is searched afterwards.
+- **Mixed:** neither orientation dominates. Every read stays checked for both orientations (log: `Barcodes in mixed orientation (both searched)`).
+
+While both orientations are searched, a read whose start matches one sample's barcode and, reverse-complemented, another sample's barcode is assigned to the sample whose forward primer follows its barcode; with no primer evidence, the forward match wins. Primers are then searched as usual after the barcode.
+
 ## Mapping examples
 
 These examples contain literal tabs. Preserve the tabs when saving the file, and replace the example sequences with those used in your experiment.

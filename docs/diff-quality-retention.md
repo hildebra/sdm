@@ -41,7 +41,7 @@ The private portable build used GCC 13.3, C++20 and `-O3`. Tests passed with the
 Run the maintained pipeline test directly with:
 
 ```sh
-python3 tests/test_diff_quality_pipeline.py /path/to/sdm
+perl tests/test_diff_quality_pipeline.pl /path/to/sdm
 ```
 
 It is included in `make test`, alongside `TestCoarseDerep` and the existing regression suites. Builds used private directories and did not replace the workspace's root executable.

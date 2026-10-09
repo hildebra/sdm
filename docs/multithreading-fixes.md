@@ -96,7 +96,7 @@ Checks:
     different representatives.
   - On apong its output still matches the 8-thread output.
 - **Regression tests:** `multithreaded_derep_is_deterministic` in
-  `tests/test_regressions_cli.py` compares the derep outputs at 1/4/8/8 threads, with
+  `tests/test_regressions_cli.pl` compares the derep outputs at 1/4/8/8 threads, with
   failed reads ahead of their passing copies. `testSnapshotCommits` in
   `tests/TestCoarseDerep.cpp` checks that snapshot probes plus delta commits
   reproduce the serial assignments exactly.

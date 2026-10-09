@@ -1510,12 +1510,14 @@ void DNAunique::matchedDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2,
 	}
 	// only replace old unique dna with new if it has good quality and its seed is better
 	// betterPreSeed makes sense with uparse/
+	// A subgroup opened by a non-passing read (admitted for its counts) takes the
+	// first passing read unconditionally: a rejected read must never be written.
 	float tmp(-1.f);
 	// Borrow this representative for the synchronous comparison without allocating a control block.
 	const shared_ptr<DNA> self_view(shared_ptr<DNA>{}, this);
-	if (doReplacementCheck &&
+	if (doReplacementCheck && (!this->isGreenQual() ||
 		whoIsBetter(dna, dna2, dnaM, self_view, this->getPair(), this->getMerge(),
-		 tmp, false, this)) { //this->getBestSeedLength(),
+		 tmp, false, this))) { //this->getBestSeedLength(),
 		//betterPreSeed(dna, dna2)) {
 		// Uparse does NOT use qualities for clustering, therefore we do not need to calculate average qualities for this dna object
 		// Lotus uses qualities for constructing taxonomy (therefore we do replace dna if theres a better quality read)
@@ -2254,10 +2256,16 @@ shared_ptr<DNAunique> DNAuniqSet::best(bool addCnts, bool collectQualities) {
 void DNAuniqSet::setBest(bool addCnts, bool collectQualities) {
     if (compact_) { bestDNU = compact_->best(addCnts, collectQualities); return; }
     bestDNU.reset();
+    // Non-passing reads of a known key are counted, and one can open a merge-offset
+    // subgroup (an N under the first merge seeds shifts the offset). Such a subgroup
+    // keeps its counts but cannot supply the representative while any subgroup has
+    // a passing one (always the case for keys opened by a passing read).
+    const bool anyPassing = std::any_of(DNUs.begin(), DNUs.end(),
+        [](const auto& entry) { return entry.second && entry.second->isGreenQual(); });
     auto winner = DNUs.end();
     uint64_t bestCount = 0;
     for (auto it = DNUs.begin(); it != DNUs.end(); ++it) {
-        if (!it->second) { continue; }
+        if (!it->second || (anyPassing && !it->second->isGreenQual())) { continue; }
         if (winner == DNUs.end()) {
             winner = it;
             bestCount = it->second->totalSum();

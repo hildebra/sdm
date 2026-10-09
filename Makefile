@@ -107,10 +107,10 @@ $(BUILD_DIR)/Test%: $(BENCH_DIR)/Test%.cpp tests/TestSupport.cpp $(TEST_OBJECTS)
 # Runs every C++ and pipeline suite, continues past failures, prints a summary and
 # exits non-zero if any suite failed. Logs: $(BUILD_DIR)/test-logs/<suite>.log
 test: sdm $(TEST_PROGRAMS)
-	python3 tests/run_tests.py --sdm ./sdm --bin-dir $(BUILD_DIR) $(if $(filter 1,$(WITH_HTS)),--hts) $(TEST_ARGS)
+	perl tests/run_tests.pl --sdm ./sdm --bin-dir $(BUILD_DIR) $(if $(filter 1,$(WITH_HTS)),--hts) $(TEST_ARGS)
 # Skips the slow parity and seed-extension suites (about a minute).
 test-quick: sdm $(TEST_PROGRAMS)
-	python3 tests/run_tests.py --sdm ./sdm --bin-dir $(BUILD_DIR) $(if $(filter 1,$(WITH_HTS)),--hts) --quick $(TEST_ARGS)
+	perl tests/run_tests.pl --sdm ./sdm --bin-dir $(BUILD_DIR) $(if $(filter 1,$(WITH_HTS)),--hts) --quick $(TEST_ARGS)
 test-portable:
 	$(MAKE) WITH_HTS=0 test
 test-hts:

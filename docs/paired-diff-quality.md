@@ -98,7 +98,7 @@ The optimized portable build validates:
 Run the paired pipeline test directly, or through `make test`:
 
 ```sh
-python3 tests/test_paired_diff_quality_pipeline.py /path/to/sdm
+perl tests/test_paired_diff_quality_pipeline.pl /path/to/sdm
 ```
 
 The paired path adds a second reference, patch, quality vector and scoring summary per selected pair, plus R2 candidate verification. Memory depends on unique pair count and both processed lengths; R2 diversity can increase variant counts even when all R1 sequences are identical. The earlier single-end benchmark is not a measured paired performance result.

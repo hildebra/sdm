@@ -48,6 +48,21 @@ Also on 2026-09-25, for findings 4 to 8:
 
 Finding 6 (merged and R1 keys in one dereplication) and the items under 9 remain open.
 
+Fixed on 2026-10-09, after a LotuS3 report (SWARM rejected an `N` in `derep.fas` despite
+`maxAmbiguousNT 0`): with merged search keys, an R1 rejected for an `N` that R2 corrects is
+counted into the passing dereplicate of its key (finding 1), and at a merge offset without a
+subgroup it opened one with itself as representative. An `N` under the first merge seeds gives
+all such reads one shifted offset, so that subgroup could hold most reads, win `setBest` and
+write the rejected R1 to the main output and HQ seeds (reproduced with sdm 3.26, 3.37 and 3.61,
+not 3.08). Such subgroups now keep their counts but are not chosen while a subgroup has a
+passing representative (always the case for a key opened by a passing read), and the first
+passing read replaces a non-passing representative (`DNAunique::matchedDNA`,
+`CompactDNA::observe`). Verified with `testDerepRejectedReadNeverRepresents` (`TestRegression`)
+and a passing-representative check in the `TestCoarseDerep` compact parity case. Not limited to
+`N`: on Apong (LotuS3-style paired run, 4 threads) 112 of 25,980 representatives were R1s
+rejected by quality filters; the fix replaces exactly those with passing reads and leaves the
+passing read set, per-sample counts and total abundance unchanged.
+
 ## What holds up
 
 - Sample counting is consistent: `diffDNA::addSample` ignores negative sample ids, so deferred

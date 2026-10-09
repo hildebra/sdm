@@ -70,7 +70,7 @@ The supplied aggregate logs cannot assign each of the 41,422 missing map observa
 
 ## Controlled reproduction
 
-The existing `tests/test_derep_behavior_parity.py` now has `--consensus-errors`. It generates **1,000 paired fragments** in two samples. Two 30-copy families per sample contain different low-confidence R1 errors within the overlap and the first 200 bases; R2 contains the correct high-confidence bases. The R1 reads still pass filtering. With a minimum-copy cutoff of 40, merged consensus combines their capped keys into a passing 60-copy group, whereas the two R1-only groups remain in rest. The fixture also includes one-passing-mate pairs, failed and mid-quality recovery, failures preceding anchors, and varying lengths.
+The existing `tests/test_derep_behavior_parity.pl` now has `--consensus-errors`. It generates **1,000 paired fragments** in two samples. Two 30-copy families per sample contain different low-confidence R1 errors within the overlap and the first 200 bases; R2 contains the correct high-confidence bases. The R1 reads still pass filtering. With a minimum-copy cutoff of 40, merged consensus combines their capped keys into a passing 60-copy group, whereas the two R1-only groups remain in rest. The fixture also includes one-passing-mate pairs, failed and mid-quality recovery, failures preceding anchors, and varying lengths.
 
 With `--complete-mates`, no physical-empty-mate exclusion is present. Results at **1, 4, and 12 threads**, using one binary and the same input/filter/search/cutoff settings for each comparison:
 

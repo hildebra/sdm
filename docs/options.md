@@ -75,7 +75,7 @@ These settings report substitution variants of primers. Reporting is disabled un
 | --- | --- | --- |
 | `TrimStartNTs` | `0` | Number of leading bases to remove, after barcode and primer removal; applies with and without a mapping file. |
 | `TruncateSequenceLength` | `-1` | Length cap for ordinary filtered reads and unmerged dereplication output; `-1` disables it. |
-| `TechnicalAdapter` | Unset | Adapter sequence to remove. Omit this setting if unused. |
+| `TechnicalAdapter` | Unset | Adapter sequence removed from the 5' end of read 1 (exact match) before barcode detection; the log reports how many reads had it. Omit this setting if unused. |
 | `fastqVersion` | `auto` | Input quality encoding: `auto`, `1` (offset 33), `2` (offset 64), or `3` (legacy offset 59). |
 | `PEheaderPairFmt` | `0` | `0` preserves paired headers; `1` converts Illumina headers to `/1` or `/2`. Conversion to mode `2` is not implemented. |
 

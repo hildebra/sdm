@@ -43,7 +43,7 @@ The fixed-length path avoids sorting a prefix index and retaining deferred failu
 The new integration test can be run with:
 
 ```sh
-python3 tests/test_prefix_derep.py /path/to/sdm
+perl tests/test_prefix_derep.pl /path/to/sdm
 ```
 
 Validation used an isolated portable build. HTS-enabled linking was not part of this test run; the concurrent HTSlib integration was left in place.

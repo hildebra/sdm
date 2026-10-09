@@ -43,7 +43,9 @@ make test WITH_HTS=0        # the same without SAM/BAM/CRAM suites
 make test-quick             # skip the slow parity/seed-extension suites
 ```
 
-`make test` builds the C++ test programs and runs every suite through `tests/run_tests.py`. It continues after a failure, prints `PASS`/`FAIL` per suite with the last lines of any failing output, and exits non-zero if anything failed. Full logs are written to `.build/<configuration>/test-logs/<suite>.log`. Run selected suites with `make test TEST_ARGS="test_regressions_cli TestAuditFixes"`, or list them with `python3 tests/run_tests.py --list`. Individual suites can also be run directly: `.build/portable-1/TestAuditFixes [test-name]` or `python3 tests/test_regressions_cli.py ./sdm [case-name ...]`.
+`make test` builds the C++ test programs and runs every suite through `tests/run_tests.pl` (Perl 5 with core modules; no Python needed). It continues after a failure, prints `PASS`/`FAIL` per suite with the last lines of any failing output, and exits non-zero if anything failed. Full logs are written to `.build/<configuration>/test-logs/<suite>.log`. Run selected suites with `make test TEST_ARGS="test_regressions_cli TestAuditFixes"`, or list them with `perl tests/run_tests.pl --list`. Individual suites can also be run directly: `.build/portable-1/TestAuditFixes [test-name]` or `perl tests/test_regressions_cli.pl ./sdm [case-name ...]`.
+
+GitHub Actions ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs `make test` on every push and pull request in five configurations: with HTSlib, portable, zlib only (`WITH_LIBDEFLATE=0`), ASan + UBSan, and TSan. Failing jobs upload their test logs.
 
 ### Make options
 
