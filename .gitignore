@@ -11,7 +11,7 @@ sdm
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 .build
-
+.build/*
 
 Makefile_d
 MakefileD
