@@ -1,0 +1,17 @@
+minSeqLength	2
+maxSeqLength	20000
+minAvgQuality	0
+QualWindowThreshhold	0
+TrimWindowThreshhold	0
+maxAccumulatedError	-1
+BinErrorModelAlpha	-1
+maxAmbiguousNT	0
+maxHomonucleotide	0
+trimHomonucleotide	0
+TruncateSequenceLength	-1
+maxBarcodeErrs	1
+maxPrimerErrs	0
+keepBarcodeSeq	0
+keepPrimerSeq	0
+RejectSeqWithoutFwdPrim	T
+RejectSeqWithoutRevPrim	T

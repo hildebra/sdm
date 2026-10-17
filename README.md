@@ -13,7 +13,7 @@ It accepts FASTA and FASTQ files, including gzip-compressed files, and supports 
 
 ## Build from source
 
-The supplied Makefile uses a C++20 compiler, GNU Make, POSIX threads, zlib and HTSlib. By default, `make` produces **one fully static executable, `sdm`, with HTSlib enabled**. It reads FASTA/FASTQ (including gzip), SAM, BAM and CRAM.
+The supplied Makefile uses a C++20 compiler, GNU Make, POSIX threads, ISA-L, zstd and HTSlib. By default, `make` produces **one fully static executable, `sdm`, with HTSlib enabled**. It reads FASTA/FASTQ (plain, gzip/BGZF or zstd), SAM, BAM and CRAM.
 
 | Command | Linking | Input support |
 | --- | --- | --- |
@@ -24,11 +24,11 @@ The supplied Makefile uses a C++20 compiler, GNU Make, POSIX threads, zlib and H
 
 Every configuration writes `sdm`; switching configurations replaces that executable. `make hts` and `make portable` are aliases for selecting `WITH_HTS=1` and `WITH_HTS=0`. The former `sdm-hts` executable and `HTS_STATIC` setting are no longer used.
 
-The default build needs HTSlib headers, `libhts.a`, and static archives for its enabled dependencies as well as the compiler runtime and system libraries. `pkg-config --static --libs htslib` supplies the dependency flags. On Debian/Ubuntu, start with `build-essential zlib1g-dev libhts-dev pkg-config`; additional development packages depend on how HTSlib was built (for example libbz2, liblzma, libdeflate or libcurl). Some distributions do not supply every required static archive; build those dependencies from source or use `STATIC=0` in that case. Missing dependencies produce a build error with setup instructions.
+The default build needs HTSlib headers, `libhts.a`, and static archives for its enabled dependencies as well as the compiler runtime and system libraries. `pkg-config --static --libs htslib` supplies the dependency flags. On Debian/Ubuntu, start with `build-essential libisal-dev libzstd-dev libhts-dev pkg-config`; additional development packages depend on how HTSlib was built (always zlib, and for example libbz2, liblzma, libdeflate or libcurl). sdm itself uses neither zlib nor libdeflate; a portable build (`WITH_HTS=0`) and its tests need neither. Some distributions do not supply every required static archive; build those dependencies from source or use `STATIC=0` in that case. Missing dependencies produce a build error with setup instructions.
 
-libdeflate is optional. When its header and library are found (Debian/Ubuntu: `libdeflate-dev`; a static build needs `libdeflate.a`), BGZF `.gz` output and BGZF input use it instead of zlib: compression is about 1.8× faster and the files are about 11% smaller, with identical content. Otherwise zlib is used; `WITH_LIBDEFLATE` controls this.
+ISA-L (igzip) reads every gzip input, BGZF or not, and compresses the BGZF of `.gz` output; zstd reads and writes `.zst`. A static build needs `libisal.a` and `libzstd.a`, and Debian/Ubuntu's `libisal-dev` has no `libisal.a`: `make deps` (`./build_deps.sh`) builds static ISA-L 2.32.1 and zstd 1.5.7 from their checksummed release tarballs into `.deps/` (needs cmake, curl or wget, and nasm 2.14.01 or later for x86-64, which it builds itself if missing), and `make` uses `.deps/` from then on. `make distclean` removes it; `make clean` keeps it. See [compressed input and output](docs/compression.md) for the formats and how they are read and written.
 
-To build the default static `sdm` with micromamba (no root access needed), run `./build_static.sh -j8`. The first run creates the micromamba env `sdm-static` from conda-forge (`gcc_linux-64 gxx_linux-64 sysroot_linux-64 make cmake pkg-config curl zlib bzip2 liblzma-devel liblzma-static`). It then builds libdeflate 1.26 and HTSlib 1.24 from source into that env, because conda-forge's `libdeflate` has no `libdeflate.a` and bioconda's `htslib` needs libcurl and OpenSSL, which conda does not provide as static archives. This HTSlib has no remote-URL (libcurl, S3, GCS) or plugin support. Later runs only rebuild sdm, with objects in `.build/conda-*`. Arguments are passed to make, e.g. `./build_static.sh -j8 test`. Set `SDM_ENV`, `SDM_MICROMAMBA`, `HTSLIB_VERSION` or `LIBDEFLATE_VERSION` to change the defaults; `micromamba env remove -y -n sdm-static` starts over. A shared build (`make STATIC=0`) in a conda env needs only the compilers plus `htslib libdeflate zlib pkg-config`.
+To build the default static `sdm` with micromamba (no root access needed), run `./build_static.sh -j8`. The first run creates the micromamba env `sdm-static` from conda-forge (`gcc_linux-64 gxx_linux-64 sysroot_linux-64 make cmake pkg-config curl nasm zlib bzip2 liblzma-devel liblzma-static`). It then builds HTSlib 1.24 from source into that env, because bioconda's `htslib` needs libcurl and OpenSSL, which conda does not provide as static archives, and static ISA-L and zstd into `<env>/sdm-deps` (`build_deps.sh`). This HTSlib uses zlib, bzip2 and liblzma (no libdeflate) and has no remote-URL (libcurl, S3, GCS) or plugin support. Later runs only rebuild sdm, with objects in `.build/conda-*`. Arguments are passed to make, e.g. `./build_static.sh -j8 test`. Set `SDM_ENV`, `SDM_MICROMAMBA`, `HTSLIB_VERSION`, `ISAL_VERSION` or `ZSTD_VERSION` to change the defaults; `micromamba env remove -y -n sdm-static` starts over. A shared build (`make STATIC=0`) in a conda env needs only the compilers plus `htslib isa-l zstd pkg-config`.
 
 ```sh
 make -j2
@@ -45,7 +45,7 @@ make test-quick             # skip the slow parity/seed-extension suites
 
 `make test` builds the C++ test programs and runs every suite through `tests/run_tests.pl` (Perl 5 with core modules; no Python needed). It continues after a failure, prints `PASS`/`FAIL` per suite with the last lines of any failing output, and exits non-zero if anything failed. Full logs are written to `.build/<configuration>/test-logs/<suite>.log`. Run selected suites with `make test TEST_ARGS="test_regressions_cli TestAuditFixes"`, or list them with `perl tests/run_tests.pl --list`. Individual suites can also be run directly: `.build/portable-1/TestAuditFixes [test-name]` or `perl tests/test_regressions_cli.pl ./sdm [case-name ...]`.
 
-GitHub Actions ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs `make test` on every push and pull request in five configurations: with HTSlib, portable, zlib only (`WITH_LIBDEFLATE=0`), ASan + UBSan, and TSan. Failing jobs upload their test logs.
+GitHub Actions ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs `make test` on every push and pull request in five configurations: with HTSlib, portable, static portable (ISA-L and zstd from `make deps`), ASan + UBSan, and TSan. Failing jobs upload their test logs.
 
 ### Make options
 
@@ -63,8 +63,9 @@ GitHub Actions ([.github/workflows/tests.yml](.github/workflows/tests.yml)) runs
 | `HTS_LIBS` | From pkg-config; fallback `-lhts` | HTSlib link flags; static linking needs all transitive dependencies. |
 | `LDFLAGS`, `LDLIBS` | Empty | Additional linker flags and libraries. |
 | `isa_FLAGS`, `isa_FLAGS2` | Empty | Existing CPU/compiler and linker overrides. |
-| `WITH_LIBDEFLATE` | `auto` | Use libdeflate for BGZF when a test program links against it (`auto`); `1` requires it, `0` keeps zlib. |
-| `LIBDEFLATE_LIBS` | `-ldeflate` | libdeflate link flags. |
+| `DEPS_PREFIX` | `.deps` | Where `make deps` builds static ISA-L and zstd; used when it holds `lib/libisal.a` (and `lib/libzstd.a`). |
+| `ISAL_CFLAGS`, `ISAL_LIBS` | `DEPS_PREFIX`, else pkg-config `libisal`; fallback `-lisal` | ISA-L include and link flags. |
+| `ZSTD_CFLAGS`, `ZSTD_LIBS` | `DEPS_PREFIX`, else pkg-config `libzstd`; fallback `-lzstd` | zstd include and link flags. |
 
 For a custom installation with complete pkg-config metadata:
 
@@ -81,7 +82,7 @@ make -j2 HTS_CFLAGS='-I/opt/htslib/include' \
 
 Use the libraries required by your own HTSlib configuration. Shared builds with a custom library directory may also need a runtime search path in `LDFLAGS`. No HTSlib source is downloaded or copied by `make`.
 
-`make all` and `make sdm` select the default executable target. `make hts` / `make portable` select the same target with HTS enabled/disabled. `make test` tests the selected configuration; `make test-hts` / `make test-portable` select the corresponding test configuration. `make clean` removes executables and `.build/`; `make distclean` is an alias. Reapply custom build variables when invoking test targets. Do not build different configurations concurrently in the same checkout, since they write the same `sdm`.
+`make all` and `make sdm` select the default executable target. `make hts` / `make portable` select the same target with HTS enabled/disabled. `make test` tests the selected configuration; `make test-hts` / `make test-portable` select the corresponding test configuration. `make clean` removes executables and `.build/`; `make distclean` also removes `.deps/`. Reapply custom build variables when invoking test targets. Do not build different configurations concurrently in the same checkout, since they write the same `sdm`.
 
 A fully static executable does **not** need `libhts.a`, `libhts.so`, or an HTSlib installation on the recipient's machine. Build it for the recipient's operating system and CPU. Externally referenced CRAM files can still need their matching reference FASTA and indexes; see [CRAM references](docs/hts.md#cram-references).
 
@@ -358,7 +359,7 @@ The default build links HTSlib, copyright Genome Research Limited. Its code outs
 
 - [HTSlib MIT/Expat and modified BSD licenses](licenses/HTSlib-LICENSE).
 - [htscodecs license and public-domain notices](licenses/htscodecs-LICENSE.md).
-- [libdeflate MIT/Expat license](licenses/libdeflate-LICENSE), when libdeflate is linked.
+- [ISA-L BSD 3-clause license](licenses/isa-l-LICENSE) and [zstd BSD license](licenses/zstd-LICENSE), linked by every build.
 - [Versions and notice provenance](licenses/README.md).
 
 These copies come from HTSlib 1.24 and its included htscodecs 1.6.7. The Makefile uses the installed HTSlib selected by your build flags; include matching notices if you distribute a different release, plus required notices/materials for the actual linked compression, networking and runtime libraries.

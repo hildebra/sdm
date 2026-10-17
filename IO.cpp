@@ -21,12 +21,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <thread>
 #include <condition_variable>
 #include <deque>
+#if defined(__linux__)
+#include <sched.h>
+#endif
 #include "ThreadPool.h"
 #include "IO.h"
 #include "OutputStreamer.h"
 #include "Filters.h"
 #include "Benchmark.h"
 #include "OutputFileStream.h"
+#include "InputFileStream.h"
 #include <future>
 #include <utility>
 
@@ -52,20 +56,24 @@ void multi_read_paired_STRget(shared_ptr<InputStreamer> IS, OutputStreamer* MD, 
 
 bool multi_read_paired_STRready(multi_tmp_lines* tmpLines,
 	bool MIDuse, OutputStreamer* MD, int curThread,
-	bool keepPairHd, qual_score FastqVer, uint64_t derepBlock) {
-	MD->beginDerepBlock(derepBlock);
+	bool keepPairHd, qual_score FastqVer, uint64_t derepBlock, uint64_t outputBlock) {
+	MD->beginDerepBlock(derepBlock, outputBlock);
 	bool isOK(true);
 	try {
 		isOK = process_read_block(tmpLines, MIDuse, MD, curThread, keepPairHd, FastqVer);
 	}
 	catch (...) {
-		// Seal the block anyway, so later blocks are not held back behind it.
+		// Seal the block anyway, so later blocks are not held back behind it;
+		// workers waiting for this block's output to be published stop waiting.
 		try { MD->endDerepBlock(derepBlock); } catch (...) {}
+		MD->failOutputBlocks();
 		throw;
 	}
-	MD->endDerepBlock(derepBlock);
-	// Publish this block's output (no-op unless per-worker batching is active).
-	MD->flushWriteBatch(curThread);
+	try { MD->endDerepBlock(derepBlock); }
+	catch (...) { MD->failOutputBlocks(); throw; }
+	// Publish this block's output, in input order with a block number (no-op
+	// unless per-worker batching is active).
+	MD->finishOutputBlock(curThread, outputBlock);
 	return isOK;
 }
 
@@ -377,7 +385,7 @@ bool process_DNA(vector< shared_ptr<DNA>>& tdn,
 		MD->write2Demulti(tdn[0], tdn[1], curFil->getBCoffset(), curThread);
 	}
 	if (MD->doWriteNonBCrds()) {
-		MD->writeNonBCReads(tdn[0], tdn[1]);
+		MD->writeNonBCReads(tdn[0], tdn[1], curThread);
 	}
 
 	//save for later .. and collect stats (also prepares the records for writing)
@@ -432,6 +440,20 @@ struct CompletedBlocks {
 		return slot;
 	}
 };
+
+// The CPUs this process may run on: its affinity (a SLURM job's cpuset, taskset's)
+// where the system tells it, else the online CPUs.
+static size_t availableCpus() {
+#if defined(__linux__)
+	cpu_set_t set;
+	CPU_ZERO(&set);
+	if (sched_getaffinity(0, sizeof(set), &set) == 0 && CPU_COUNT(&set) > 0) {
+		return static_cast<size_t>(CPU_COUNT(&set));
+	}
+#endif
+	const unsigned n = std::thread::hardware_concurrency();
+	return n > 0 ? n : 1;
+}
 
 bool read_sequences(OutputStreamer* MD, 
 	shared_ptr<InputStreamer> IS, int Nthreads) {
@@ -543,7 +565,14 @@ bool read_sequences(OutputStreamer* MD,
 		tmpStrHolders[ii] = make_unique<multi_tmp_lines>();
 		tmpStrHolders[ii]->tmp.resize(tmpBlockSize, tmpLines);
 	}
-	MD->beginWriteBatching();
+	// Blocks are published in input order, so the outputs do not depend on -threads.
+	// At most one finished block per worker, and per CPU this process may run on,
+	// is held back: with more threads than CPUs, a descheduled worker's block
+	// otherwise held back one block per thread, published in bursts, and on 16
+	// threads of 6 CPUs the peak memory grew with the input (+47 MB on apong,
+	// +87 MB on 4x apong; capped: +16/+22 MB; 2026-10-16).
+	const size_t cpus = availableCpus();
+	MD->beginWriteBatching(std::max<size_t>(1, std::min(static_cast<size_t>(Nthreads), cpus)));
 	CompletedBlocks completed;
 	vector<size_t> freeSlots;
 	for (size_t ii = slotCount; ii-- > 0;) { freeSlots.push_back(ii); }
@@ -592,13 +621,14 @@ bool read_sequences(OutputStreamer* MD,
 					// Numbered here, in input order, so dereplication can apply
 					// blocks in that order however they are scheduled.
 					const uint64_t derepBlock = MD->reserveDerepBlock();
-					(void)pool->submit([&, block, slot, derepBlock]() {
+					const uint64_t outputBlock = MD->reserveOutputBlock();
+					(void)pool->submit([&, block, slot, derepBlock, outputBlock]() {
 						try {
 							const int worker = workerIndexed ? pool->worker_index_of_current_thread() : static_cast<int>(slot);
 							if (worker < 0 || worker >= Nthreads) {
 								throw std::logic_error("Block processed outside the processing pool");
 							}
-							multi_read_paired_STRready(block, MIDuse, MD, worker, keepPairedHD, fastqVer, derepBlock);
+							multi_read_paired_STRready(block, MIDuse, MD, worker, keepPairedHD, fastqVer, derepBlock, outputBlock);
 						}
 						catch (...) {
 							slotErrors[slot] = std::current_exception();
@@ -622,8 +652,11 @@ bool read_sequences(OutputStreamer* MD,
 			// If we read any records into the tmp buffer, process them even if cont==false (partial final block).
 			if (tmpStrHolders[0]->size() > 0) {
 				//fastqVer = IS->fastQscore();
+				// Numbered blocks as with several threads, so the outputs are the same.
+				const uint64_t derepBlock = MD->reserveDerepBlock();
+				const uint64_t outputBlock = MD->reserveOutputBlock();
 				bool cont2 = multi_read_paired_STRready(tmpStrHolders[0].get(), MIDuse,
-					MD, 0, keepPairedHD, fastqVer);
+					MD, 0, keepPairedHD, fastqVer, derepBlock, outputBlock);
 			}
 			if (!cont && tmpStrHolders[0]->size() == 0) { break; }
 				//if (tdn[0]->isConstellationPairRev()) { revConstellation++; }
@@ -848,8 +881,8 @@ bool readCmdArgs(int argc, char* argv[]){
 	}
 
 
-	// .gzi block indexes next to gzip outputs are opt-in: they only speed up
-	// parallel re-reading by sdm and clutter per-sample output directories.
+	// .gzi block indexes next to gzip outputs are opt-in: sdm reads BGZF in
+	// parallel without them, and they clutter per-sample output directories.
 	setDefault("-o_gzi", "0");
 	if ((*cmdArgs)["-o_gzi"] != "0" && (*cmdArgs)["-o_gzi"] != "1") {
 		throw std::runtime_error("-o_gzi must be 0 or 1");
@@ -1473,11 +1506,7 @@ void Announce_sdm(){
 }
 namespace {
 void printBuildFeatures() {
-#ifdef _gzipread
-    cout << "Gzip support: enabled (zlib)\n";
-#else
-    cout << "Gzip support: disabled\n";
-#endif
+    cout << "Compression: " << compressionLibraries() << "\n";
     // The std::thread worker pool is part of every current build.
     const OptContainer::RuntimeOptions defaults;
     cout << "ONT amplicon end matching: enabled (-ontMode 1)\n";
@@ -1619,8 +1648,10 @@ void printCmdsHelp(){//actually these are flags
          << "                              Disable merge_pairs_derep, merge_pairs_filter, and merge_pairs_demulti.\n"
          << " -derepSubclusterFasta <0|1>   Export exact single/pair FASTA; requires derepStoreDiffs=1 (default: 0)\n"
 		 << " -merge_pairs_filter/-merge_pairs_seed/-merge_pairs_demulti <0|1> Enable pair merging\n"
-		 << " -merge_pairs_derep <0|1>       Merge pairs during dereplication\n"
-		 << " -noSearchWithMerge <value>     Use R1 rather than merged derep search; presence enables, even value 0\n"
+		 << " -merge_pairs_derep <0|1>       Write merged dereplicates (.merg) and key them on the consensus\n"
+		 << "                              Without it, paired derep keys are R1 (the written sequence).\n"
+		 << " -noSearchWithMerge <value>     R1 derep keys even with -merge_pairs_derep; without that option,\n"
+		 << "                              derep merges no pairs. Presence enables, even value 0\n"
 		 << " -OTU_fallback/-OTU_fallback_refclust <file> Fallback OTU FASTA sequences\n"
          << " -seedSubclusters <0|1>        Extend seeds from reconstructed variant HQ FASTQ (default: 0)\n"
          << "                              Use parent mappings and derep.map; count each parent once.\n"

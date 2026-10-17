@@ -11,7 +11,9 @@ sdm
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 .build
-.build/*
+# static ISA-L and zstd from make deps (build_deps.sh)
+.deps/
+
 
 Makefile_d
 MakefileD
@@ -22,7 +24,6 @@ docs/benchmarks
 Makefile.old
 deprecated/
 include/izlib.h
-tests/
 
 out
 
@@ -36,11 +37,13 @@ x86/
 bld/
 [Bb]in/
 [Oo]bj/
-# Keep regression sources/scripts visible while ignoring their generated outputs.
-tests/*
-!tests/*.cpp
-!tests/*.sh
-!tests/*.txt
+# Test sources (make test) are tracked; scratch files the C++ tests write below tests/
+# (removed by tests/run_tests.pl after a run) are not.
+tests/tmp*
+tests/reg_*
+tests/seed_route_*
+tests/search_header_ids.map
+TestInputHelpers_tmp_*
 
 # Visual Studio 2015 cache/options directory
 .vs/

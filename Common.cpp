@@ -121,6 +121,19 @@ bool isGZfile(const string fi) {
         (f.size() >= 5 && f.compare(f.size() - 5, 5, ".gzip") == 0);
 }
 
+bool isZstdFile(const string fi) {
+    string f = normalizePathToken(fi);
+    std::transform(f.begin(), f.end(), f.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return (f.size() >= 4 && f.compare(f.size() - 4, 4, ".zst") == 0) ||
+        (f.size() >= 5 && f.compare(f.size() - 5, 5, ".zstd") == 0);
+}
+
+bool isCompressedFile(const string fi) {
+    return isGZfile(fi) || isZstdFile(fi);
+}
+
 static string normalizeInputPath(string fileS) {
     return normalizePathToken(std::move(fileS));
 }
@@ -254,8 +267,8 @@ std::ptrdiff_t len_common_prefix_base(char const a[], char const b[])
     return std::distance(b, std::mismatch(b, b + std::strlen(b), a).first);
 }
 
-// Inserts ".<it>" and/or xtr before the file extension of x, keeping a .gz
-// suffix last: out.fq.gz -> out.1.fq.gz, out.gz -> out.1.gz (not out.gz.1, which
+// Inserts ".<it>" and/or xtr before the file extension of x, keeping a .gz (or
+// .zst) suffix last: out.fq.gz -> out.1.fq.gz, out.gz -> out.1.gz (not out.gz.1, which
 // was written uncompressed), /data/run.2024/out -> /data/run.2024/out.1 (a dot in
 // a directory name is not an extension).
 string applyFileIT(string x, int it,const string xtr){
@@ -263,7 +276,7 @@ string applyFileIT(string x, int it,const string xtr){
     const size_t base = sep == string::npos ? 0 : sep + 1;
     size_t pos = x.find_last_of(".");
     if (pos != string::npos && pos < base) { pos = string::npos; }
-    if (pos != string::npos && isGZfile(x)) {
+    if (pos != string::npos && isCompressedFile(x)) {
         const size_t inner = pos > base ? x.find_last_of(".", pos - 1) : string::npos;
         if (inner != string::npos && inner >= base) { pos = inner; }
     }
@@ -318,14 +331,10 @@ string detectSeqFmt(const string inF) {
             string fLower = fileS;
             std::transform(fLower.begin(), fLower.end(), fLower.begin(), [](unsigned char c) { return (char)std::tolower(c); });
 
-            // Prefer extension-based detection for gzip files to avoid stream backend issues during auto-detect.
-            if (isGZfile(fileS)) {
-                const size_t suffixLength =
-                    fLower.size() >= 5 &&
-                    fLower.compare(fLower.size() - 5, 5, ".gzip") == 0
-                        ? 5
-                        : 3;
-                string base = fLower.substr(0, fLower.size() - suffixLength);
+            // Prefer extension-based detection for compressed files (.gz, .gzip, .zst, .zstd) to avoid
+            // decompressing during auto-detect.
+            if (isCompressedFile(fileS)) {
+                string base = fLower.substr(0, fLower.find_last_of('.'));
                 if (base.size() >= 6 && (base.compare(base.size() - 6, 6, ".fastq") == 0)) {
                     return "-i_fastq";
                 }

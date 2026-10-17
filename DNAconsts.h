@@ -62,7 +62,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #define _CRT_SECURE_NO_DEPRECATE
 #endif
 
-// Read and write gzip/BGZF using the custom zlib backends.
+// Read and write gzip/BGZF and zstd (ISA-L, libzstd: InputFileStream.cpp, OutputFileStream.cpp).
 #if defined(WIN32) || defined(_WIN32) || defined(__WIN32) && !defined(__CYGWIN__)
 #include <stdlib.h>
 #include <crtdbg.h>
@@ -207,7 +207,21 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //      reverse-complemented barcodes (was fixed forward after 5,000 reads, losing later reversed ones);
 //      a read matching both takes the one followed by its sample's primer. TechnicalAdapter is removed
 //      again (was never applied). Test suites now in Perl (tests/*.pl, run_tests.pl) instead of Python.
-static const char* sdm_version = "3.64";
+//3.65: 13.10.26: derep output never repeats a sequence (LotuS3 issue #32, SWARM "identical sequences"):
+//      paired derep keyed on the merged consensus but wrote R1, so an R2 base winning in the overlap,
+//      or (uncapped) a different R2 tail, wrote the same R1 under a second key. Keys are now R1 unless
+//      merged reads are written (-merge_pairs_derep); merges still choose subgroups and representatives.
+//3.66: 16.10.26: gzip/zstd I/O ported from protal (docs/compression.md): ISA-L reads all gzip (BGZF blocks,
+//      members and single-member gzip in pieces on several threads) and writes .gz as BGZF (the same bytes
+//      on any -threads); zstd input and .zst/.zstd output. Input format by content, not name. A file that
+//      ends early (truncated, BGZF without its end-of-file block) is read with a warning, corrupt data is
+//      an error, as before. zlib and libdeflate dropped (also from the tests and build_static.sh's
+//      HTSlib); static ISA-L/zstd via make deps (build_deps.sh). Output files are byte-identical for any
+//      -threads: read blocks are published in input order (withheld mid-quality sets after their block's
+//      reads, -DemultiBPperSR admission in input order), on one thread as on several; with
+//      -maxReadsPerOutput and -XfirstReadsWritten too (records counted at publication, 17.10.26).
+//      -maxReadsPerOutput with -o_fastq_noBC no longer crashes at the first file switch.
+static const char* sdm_version = "3.66";
 static const char* sdm_status = "beta";
 
 

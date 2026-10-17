@@ -1,7 +1,10 @@
 #include "OutputFileStream.h"
 
+#include "Bgzf.h"
 #include "Common.h"
 #include "ThreadPool.h"
+
+#include <zstd.h>
 
 #include <algorithm>
 #include <array>
@@ -14,17 +17,12 @@
 #include <fstream>
 #include <future>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <streambuf>
+#include <thread>
 #include <utility>
 #include <vector>
-
-#ifdef _gzipread
-#include <zlib.h>
-#endif
-#if defined(_gzipread) && defined(SDM_WITH_LIBDEFLATE)
-#include <libdeflate.h>
-#endif
 
 namespace {
 
@@ -36,21 +34,18 @@ public:
     virtual void finalize() = 0;
 };
 
-#ifdef _gzipread
+namespace bgzf = sdm::bgzf;
 
-constexpr size_t kBgzfBlockSize = 0xff00;
-constexpr size_t kBgzfMaxBlockSize = 0x10000;
-constexpr size_t kBgzfHeaderSize = 18;
-constexpr size_t kBgzfFooterSize = 8;
+constexpr size_t kBgzfBlockSize = bgzf::kBlockInput;
+constexpr size_t kBgzfMaxBlockSize = bgzf::kMaxBlock;
+constexpr size_t kBgzfHeaderSize = bgzf::kHeaderBytes;
+constexpr size_t kBgzfFooterSize = bgzf::kFooterBytes;
 
-// CRC-32 of a BGZF block payload (libdeflate and zlib compute the same value).
-uint32_t bgzfCrc32(const uint8_t* data, size_t size) {
-#ifdef SDM_WITH_LIBDEFLATE
-    return libdeflate_crc32(0, data, size);
-#else
-    return static_cast<uint32_t>(crc32(crc32(0L, Z_NULL, 0), data, static_cast<uInt>(size)));
-#endif
-}
+// zstd output: independent frames of up to kZstdFrameInput content bytes each, every
+// one with its content size and checksum (as pzstd writes them), so that readers can
+// decompress them on several threads (ThreadedGzStreambuf) and any zstd reads the file.
+constexpr size_t kZstdFrameInput = size_t{1} << 20;
+constexpr int kZstdLevel = 3; // zstd's default
 
 bool shouldUseParallelGzip(bool requested) {
     if (!requested) {
@@ -74,6 +69,7 @@ constexpr std::array<uint8_t, 28> kBgzfEof = {
     0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00
 };
+static_assert(sizeof(bgzf::kEof) == kBgzfEof.size(), "the BGZF end-of-file block");
 
 void storeLe16(uint8_t* dst, uint16_t value) {
     dst[0] = static_cast<uint8_t>(value);
@@ -135,106 +131,113 @@ CompressedBlock makeStoredBgzfBlock(const std::vector<uint8_t>& input) {
         std::memcpy(body + 5, input.data(), input.size());
     }
 
-    const uint32_t checksum = bgzfCrc32(input.data(), input.size());
+    const uint32_t checksum = bgzf::Crc32(input.data(), input.size());
     storeLe32(result.bytes.data() + totalSize - 8, checksum);
     storeLe32(result.bytes.data() + totalSize - 4, result.uncompressedSize);
     return result;
 }
 
+// One BGZF block, deflated with ISA-L at level 1 (bgzf::Deflater, one per thread): its
+// bytes depend on the input alone, not on the thread that compresses it, so the file
+// is the same however many threads write it.
 CompressedBlock compressBgzfBlock(std::vector<uint8_t> input) {
     if (input.empty() || input.size() > kBgzfBlockSize) {
         throw std::runtime_error("invalid BGZF input block size");
     }
 
+    thread_local bgzf::Deflater deflater;
     CompressedBlock result;
     result.bytes.resize(kBgzfMaxBlockSize);
     result.uncompressedSize = static_cast<uint32_t>(input.size());
-
-#ifdef SDM_WITH_LIBDEFLATE
-    // One compressor per thread: its state is much larger than a BGZF block.
-    struct Compressor {
-        libdeflate_compressor* handle = libdeflate_alloc_compressor(1);
-        ~Compressor() { libdeflate_free_compressor(handle); }
-    };
-    thread_local Compressor compressor;
-    if (!compressor.handle) {
-        throw std::runtime_error("libdeflate_alloc_compressor failed");
-    }
-    const size_t compressedBodySize = libdeflate_deflate_compress(
-        compressor.handle, input.data(), input.size(), result.bytes.data() + kBgzfHeaderSize,
+    const size_t compressedBodySize = deflater.Compress(
+        reinterpret_cast<const char*>(input.data()), input.size(),
+        result.bytes.data() + kBgzfHeaderSize,
         kBgzfMaxBlockSize - kBgzfHeaderSize - kBgzfFooterSize);
     if (compressedBodySize == 0) { // does not fit: store the block
         return makeStoredBgzfBlock(input);
     }
-#else
-    z_stream stream{};
-    stream.next_in = input.data();
-    stream.avail_in = static_cast<uInt>(input.size());
-    stream.next_out = result.bytes.data() + kBgzfHeaderSize;
-    stream.avail_out = static_cast<uInt>(
-        kBgzfMaxBlockSize - kBgzfHeaderSize - kBgzfFooterSize);
-
-    const int initResult = deflateInit2(
-        &stream, Z_BEST_SPEED, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
-    if (initResult != Z_OK) {
-        throw std::runtime_error(
-            "deflateInit2 failed with code " + std::to_string(initResult));
-    }
-
-    const int deflateResult = deflate(&stream, Z_FINISH);
-    const size_t compressedBodySize = static_cast<size_t>(stream.total_out);
-    const bool useStoredBlock = stream.avail_out == 0;
-    const int endResult = deflateEnd(&stream);
-
-    if (useStoredBlock) {
-        return makeStoredBgzfBlock(input);
-    }
-    if (deflateResult != Z_STREAM_END) {
-        throw std::runtime_error(
-            "deflate failed with code " + std::to_string(deflateResult));
-    }
-    if (endResult != Z_OK) {
-        throw std::runtime_error(
-            "deflateEnd failed with code " + std::to_string(endResult));
-    }
-#endif
 
     const size_t totalSize = kBgzfHeaderSize + compressedBodySize + kBgzfFooterSize;
-    if (totalSize > kBgzfMaxBlockSize) {
-        return makeStoredBgzfBlock(input);
-    }
-
     std::copy(kBgzfHeader.begin(), kBgzfHeader.end(), result.bytes.begin());
     storeLe16(result.bytes.data() + 16, static_cast<uint16_t>(totalSize - 1));
-    const uint32_t checksum = bgzfCrc32(input.data(), input.size());
+    const uint32_t checksum = bgzf::Crc32(input.data(), input.size());
     storeLe32(result.bytes.data() + totalSize - 8, checksum);
     storeLe32(result.bytes.data() + totalSize - 4, result.uncompressedSize);
     result.bytes.resize(totalSize);
     return result;
 }
 
-class ParallelBgzfOstream final : public std::ostream,
-                                  private std::streambuf,
-                                  public FinalizableOutput {
+// One zstd frame of the input, with its content size and checksum (one compression
+// context per thread).
+CompressedBlock compressZstdFrame(std::vector<uint8_t> input) {
+    if (input.size() > kZstdFrameInput) {
+        throw std::runtime_error("invalid zstd input frame size");
+    }
+    struct Context {
+        ZSTD_CCtx* cctx = ZSTD_createCCtx();
+        Context() {
+            if (cctx &&
+                (ZSTD_isError(ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, kZstdLevel)) ||
+                 ZSTD_isError(ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 1)) ||
+                 ZSTD_isError(ZSTD_CCtx_setParameter(cctx, ZSTD_c_contentSizeFlag, 1)))) {
+                ZSTD_freeCCtx(cctx);
+                cctx = nullptr;
+            }
+        }
+        ~Context() { ZSTD_freeCCtx(cctx); }
+    };
+    thread_local Context context;
+    if (!context.cctx) {
+        throw std::runtime_error("cannot allocate a zstd compression context");
+    }
+    CompressedBlock result;
+    result.uncompressedSize = static_cast<uint32_t>(input.size());
+    result.bytes.resize(ZSTD_compressBound(input.size()));
+    const size_t written = ZSTD_compress2(
+        context.cctx, result.bytes.data(), result.bytes.size(), input.data(), input.size());
+    if (ZSTD_isError(written)) {
+        throw std::runtime_error(
+            std::string("zstd compression failed: ") + ZSTD_getErrorName(written));
+    }
+    result.bytes.resize(written);
+    return result;
+}
+
+// Compressed output in independent blocks, compressed in order on one thread or on the
+// gzip thread pool and written in order: BGZF (gzip) or zstd frames.
+class ParallelBlockOstream final : private std::streambuf,
+                                   public std::ostream,
+                                   public FinalizableOutput {
 public:
-    ParallelBgzfOstream(
+    enum class Format { Bgzf, Zstd };
+
+    ParallelBlockOstream(
         const std::string& filename,
         std::ios_base::openmode mode,
-        size_t requestedBufferSize,
+        Format format,
         bool parallel)
-        : std::ostream(this),
+        : std::ostream(static_cast<std::streambuf*>(this)),
           filename_(filename),
+          format_(format),
           parallel_(parallel),
-          maxPending_(parallel
-              ? std::min<size_t>(64, std::max<size_t>(2,
-                    ThreadPool::configured_gzip_thread_count() * 2))
-              : 0) {
-        (void)requestedBufferSize;
-        buffer_.resize(kBgzfBlockSize);
+          // Blocks in flight per stream: BGZF's are 64 KB, zstd's 1 MiB frames (one per pool thread, at most 8).
+          maxPending_(!parallel ? 0
+              : format == Format::Bgzf
+                  ? std::min<size_t>(64, std::max<size_t>(2, ThreadPool::configured_gzip_thread_count() * 2))
+                  : std::min<size_t>(8, std::max<size_t>(2, ThreadPool::configured_gzip_thread_count()))) {
+        buffer_.resize(format_ == Format::Bgzf ? kBgzfBlockSize : kZstdFrameInput);
         setp(reinterpret_cast<char*>(buffer_.data()),
             reinterpret_cast<char*>(buffer_.data() + buffer_.size()));
 
-        prepareAppend(mode);
+        if (format_ == Format::Bgzf) {
+            prepareAppend(mode);
+        }
+        else {
+            std::error_code sizeError;
+            const bool hasContent = (mode & std::ios::app) != 0 &&
+                std::filesystem::file_size(filename_, sizeError) > 0 && !sizeError;
+            emptyFrameIfNothing_ = !hasContent;
+        }
         file_.open(filename_, mode | std::ios::binary);
         if (!file_.is_open()) {
             throw std::runtime_error("Error opening output file: " + filename_);
@@ -242,7 +245,7 @@ public:
         file_.exceptions(std::ios::badbit | std::ios::failbit);
     }
 
-    ~ParallelBgzfOstream() override {
+    ~ParallelBlockOstream() override {
         try {
             finalize();
         }
@@ -262,9 +265,18 @@ public:
             }
             drainPending();
             if (!failure_) {
-                file_.write(
-                    reinterpret_cast<const char*>(kBgzfEof.data()),
-                    static_cast<std::streamsize>(kBgzfEof.size()));
+                if (format_ == Format::Bgzf) {
+                    file_.write(
+                        reinterpret_cast<const char*>(kBgzfEof.data()),
+                        static_cast<std::streamsize>(kBgzfEof.size()));
+                }
+                else if (emptyFrameIfNothing_ && compressedOffset_ == 0) {
+                    // No content: one empty frame, so that the file is zstd for every reader.
+                    const CompressedBlock empty = compressZstdFrame({});
+                    file_.write(
+                        reinterpret_cast<const char*>(empty.bytes.data()),
+                        static_cast<std::streamsize>(empty.bytes.size()));
+                }
                 file_.flush();
             }
         }
@@ -281,7 +293,7 @@ public:
             rememberFailure(std::current_exception());
         }
 
-        if (!failure_) {
+        if (!failure_ && format_ == Format::Bgzf) {
             try {
                 if (bgzfIndexOutput()) {
                     writeGzi();
@@ -351,6 +363,12 @@ private:
         uint64_t uncompressedOffset;
     };
 
+    static CompressedBlock compress(Format format, std::vector<uint8_t> input) {
+        return format == Format::Bgzf
+            ? compressBgzfBlock(std::move(input))
+            : compressZstdFrame(std::move(input));
+    }
+
     bool queueCurrentBuffer() {
         if (failure_ || closed_) {
             return false;
@@ -367,12 +385,12 @@ private:
 
         try {
             if (!parallel_) {
-                writeBlock(compressBgzfBlock(std::move(input)));
+                writeBlock(compress(format_, std::move(input)));
                 return !failure_;
             }
             pending_.emplace_back(ThreadPool::gzip_instance().submit(
-                [block = std::move(input)]() mutable {
-                    return compressBgzfBlock(std::move(block));
+                [format = format_, block = std::move(input)]() mutable {
+                    return compress(format, std::move(block));
                 }));
             if (pending_.size() >= maxPending_) {
                 writeNextPending();
@@ -408,11 +426,11 @@ private:
     }
 
     void writeBlock(CompressedBlock block) {
-        if (block.bytes.empty() || block.bytes.size() > kBgzfMaxBlockSize ||
-            block.uncompressedSize == 0) {
-            throw std::runtime_error("invalid compressed BGZF block");
+        if (block.bytes.empty() || block.uncompressedSize == 0 ||
+            (format_ == Format::Bgzf && block.bytes.size() > kBgzfMaxBlockSize)) {
+            throw std::runtime_error("invalid compressed output block");
         }
-        if (uncompressedOffset_ != 0) {
+        if (format_ == Format::Bgzf && uncompressedOffset_ != 0) {
             index_.push_back({compressedOffset_, uncompressedOffset_});
         }
         file_.write(
@@ -562,13 +580,13 @@ private:
     std::vector<IndexEntry> index_;
     uint64_t compressedOffset_ = 0;
     uint64_t uncompressedOffset_ = 0;
+    Format format_ = Format::Bgzf;
+    bool emptyFrameIfNothing_ = false; // zstd: the file holds no frame unless this stream writes one
     bool parallel_ = true;
     size_t maxPending_ = 2;
     bool closed_ = false;
     std::exception_ptr failure_;
 };
-
-#endif
 
 } // namespace
 
@@ -585,16 +603,12 @@ std::unique_ptr<std::ostream> openOutputFile(
     std::ios_base::openmode mode,
     size_t bufferSize,
     bool parallelGzip) {
-    if (isGZfile(filename)) {
-#ifdef _gzipread
-        const bool useParallelGzip = shouldUseParallelGzip(parallelGzip);
-        return std::make_unique<ParallelBgzfOstream>(
-            filename, mode, bufferSize, useParallelGzip);
-#else
-        (void)bufferSize;
-        (void)parallelGzip;
-        throw std::runtime_error("gzip output requested but support is not compiled: " + filename);
-#endif
+    (void)bufferSize;
+    if (isGZfile(filename) || isZstdFile(filename)) {
+        return std::make_unique<ParallelBlockOstream>(
+            filename, mode,
+            isGZfile(filename) ? ParallelBlockOstream::Format::Bgzf : ParallelBlockOstream::Format::Zstd,
+            shouldUseParallelGzip(parallelGzip));
     }
 
     auto output = std::make_unique<std::ofstream>(filename, mode | std::ios::binary);
@@ -629,4 +643,3 @@ void finalizeOutputFile(std::ostream& stream, const std::string& filename) {
         throw std::runtime_error("Failed to finalize output file: " + filename);
     }
 }
-

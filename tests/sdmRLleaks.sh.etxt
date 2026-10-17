@@ -1,0 +1,47 @@
+==15540== Memcheck, a memory error detector
+==15540== Copyright (C) 2002-2022, and GNU GPL'd, by Julian Seward et al.
+==15540== Using Valgrind-3.21.0 and LibVEX; rerun with -h for copyright info
+==15540== Command: /hpc-home/hildebra/dev/Cpp/sdm/tests/sdmD -i /ei/projects/8/88e80936-2a5d-4f4a-afab-6f74b374c765/data/cloudpool/data/raw/Public/PRJNA763692//SRR17827816_1.sm.fastq,/ei/projects/8/88e80936-2a5d-4f4a-afab-6f74b374c765/data/cloudpool/data/raw/Public/PRJNA763692//SRR17827816_2.sm.fastq -o_fastq /ei/projects/6/6209c9f1-a78a-4f8e-aa49-16176b0cc246/scratch//sdmTest1234D//filtered.1.fq.gz,/ei/projects/6/6209c9f1-a78a-4f8e-aa49-16176b0cc246/scratch//sdmTest1234D//filtered.2.fq.gz -options sdmo_150_.txt -paired 2 -log /hpc-home/hildebra/grp/data/projects/postDrama/Mong.C83//LOGandSUB//sdm/filter.log -ignore_IO_errors 1 -i_qual_offset auto -binomialFilterBothPairs 1 -threads 4 -illuminaClip 1 -5PR1cut 0 -5PR2cut 0
+==15540== 
+
+This is sdm (simple demultiplexer) 2.14 beta.
+
+sdm run in No Map Mode. Using paired end sequencing files.
+Run with 4 cores.At /ei/projects/8/88e80936-2a5d-4f4a-afab-6f74b374c765/data/cloudpool/data/raw/Public/PRJNA763692//SRR17827816_1.sm.fastq: sdm 2.14 beta
+Input File:  /ei/projects/8/88e80936-2a5d-4f4a-afab-6f74b374c765/data/cloudpool/data/raw/Public/PRJNA763692//SRR17827816_1.sm.fastq,/ei/projects/8/88e80936-2a5d-4f4a-afab-6f74b374c765/data/cloudpool/data/raw/Public/PRJNA763692//SRR17827816_2.sm.fastq
+Output File: /ei/projects/6/6209c9f1-a78a-4f8e-aa49-16176b0cc246/scratch//sdmTest1234D//filtered.1.fq.gz
+
+Reads processed: 250,000; 250,000 (pair 1;pair 2)
+Rejected: 25,195; 25,499
+Accepted (High qual): 224,805; 224,501 (1,002; 1,061 end-trimmed)
+Accepted (Mid qual): 0;0
+Singletons among these: 0; 0
+Bad Reads recovered with dereplication: 0
+Min/Avg/Max stats Pair 1
+     - sequence Length : 105/149.936/150
+     - Quality :   30/37.4375/41
+     - Median sequence Length : 150, Quality : 40
+     - Accum. Error 0.138625
+Trimmed due to:
+  > 20 avg qual_ in 18 bp windows :         0; 0
+  > (2.5) acc. errors, trimmed seqs :      0; 0
+Rejected due to:
+  < min Sequence length (105)  :                1,033; 64
+  < avg Quality (27)  :                    0; 0
+  < window (30 nt) avg. Quality (0)  :    0; 0
+  > max Sequence length (900)  :                0; 0
+  > (15) homo-nt run  :                    0; 2
+  > (2) amb. Bases  :                      0; 0
+  > (2.8) binomial est. errors :           25,140; 25,440
+Specific sequence searches:
+  -With rev Primer remaining (<= 3 mismatches) :           0; 0
+Time taken: : 18m 35s 814ms
+==15540== 
+==15540== HEAP SUMMARY:
+==15540==     in use at exit: 0 bytes in 0 blocks
+==15540==   total heap usage: 16,841,965 allocs, 16,841,965 frees, 3,615,047,424 bytes allocated
+==15540== 
+==15540== All heap blocks were freed -- no leaks are possible
+==15540== 
+==15540== For lists of detected and suppressed errors, rerun with: -s
+==15540== ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)

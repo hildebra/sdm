@@ -407,8 +407,18 @@ public:
 	// (the mid-quality tier). A set is either counted or written, never both, so
 	// pipelines that back-map the mid-quality output cannot count it twice.
 	struct DerepTierRoute { int idx1 = -1, cstr1 = 100, idx2 = -1, cstr2 = 100; };
-	using UncountedPublisher = std::function<void(const shared_ptr<DNA>&, const shared_ptr<DNA>&, const DerepTierRoute&)>;
+	// A set's output block (the caller's number of the read block it came from, beginBlock; kNoBlock
+	// outside blocks) and its position among the block's entries, so that its output can be written
+	// in input order however the block is applied.
+	using UncountedPublisher = std::function<void(const shared_ptr<DNA>&, const shared_ptr<DNA>&, const DerepTierRoute&,
+		uint64_t outputBlock, uint32_t indexInBlock)>;
 	void setUncountedPublisher(UncountedPublisher publisher) { publisher_ = std::move(publisher); }
+	// Called once every entry of an output block has been applied (so every withheld set of it has been
+	// published), from the thread that applied it.
+	using BlockAppliedListener = std::function<void(uint64_t outputBlock)>;
+	void setBlockAppliedListener(BlockAppliedListener listener) { blockApplied_ = std::move(listener); }
+	// Whether reserveBlock numbers blocks (ordered admission).
+	bool ordersBlocks() const { return orderedAdmission_; }
 	// Applies every queued entry (publishing withheld sets); call when the
 	// output streams that the publisher writes to are about to close.
 	void flushPending();
@@ -456,7 +466,8 @@ public:
 	// matter how the blocks are scheduled. Shards still apply in parallel.
 	static constexpr uint64_t kNoBlock = std::numeric_limits<uint64_t>::max();
 	uint64_t reserveBlock();
-	void beginBlock(uint64_t block);
+	// outputBlock: the caller's number of the block for its output (publisher, block-applied listener).
+	void beginBlock(uint64_t block, uint64_t outputBlock = kNoBlock);
 	void endBlock();
 
 
@@ -476,6 +487,8 @@ private:
 		// if this set is not counted.
 		bool withheld = false;
 		DerepTierRoute route{};
+		uint64_t outputBlock = kNoBlock; // the producer's output block, and the entry's place in it
+		uint32_t indexInBlock = 0;
 	};
 
 	struct alignas(64) ThreadLocalBatch {
@@ -484,6 +497,7 @@ private:
 		Dereplicate* owner;
 		std::atomic<bool> active{false};
 		uint64_t block = kNoBlock; // block being processed (ordered admission)
+		uint64_t outputBlock = kNoBlock; // its output block (beginBlock)
 		// Global coarse index: reads this producer allocated, handed back by the
 		// threads that committed or applied them and freed here, in its own arena.
 		std::mutex returnedMutex;
@@ -494,7 +508,10 @@ private:
 	struct SealedBlock {
 		std::vector<PendingDerepEntry> entries;
 		ThreadLocalBatch* owner = nullptr;
+		uint64_t outputBlock = kNoBlock;
 	};
+	// Tells the block-applied listener that these blocks are applied.
+	void notify_applied(const std::vector<SealedBlock>& blocks) const;
 
 	// deferring: the entry goes into a shard's deferred (rejected) table, which
 	// also accepts non-passing reads whose key is unknown.
@@ -515,6 +532,7 @@ private:
     bool exact_key_known(const PendingDerepEntry& pending, const Shard& shard) const;
     void publish_uncounted(const PendingDerepEntry& pending);
     UncountedPublisher publisher_;
+    BlockAppliedListener blockApplied_;
 	void flush_batch(ThreadLocalBatch& batch);
     // Global coarse index with several workers: candidate searches run
     // concurrently against a snapshot, commits are exclusive and in batch
@@ -731,7 +749,10 @@ private:
     size_t tracker_size_total() const;
 
 
-	bool searchWithMerg;
+	bool searchWithMerg;// merge pairs during dereplication (subgroups, representative choice)
+	// Key on the merged consensus only where it is also written (-merge_pairs_derep);
+	// otherwise the written R1 is the key, so no two output records are identical.
+	bool mergedSearchKeys_ = false;
 
 };
 

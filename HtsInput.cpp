@@ -1,10 +1,10 @@
 #include "HtsInput.h"
 #include "Common.h"
+#include "InputFileStream.h"
 #include <array>
 #include <fstream>
 #include <stdexcept>
 #include <sys/stat.h>
-#include <zlib.h>
 #ifdef SDM_WITH_HTSLIB
 #include <htslib/hts.h>
 #include <htslib/sam.h>
@@ -28,17 +28,21 @@ std::string HtsInput::detectFormat(const std::string& filename) {
     for (const std::string ext : {"sam", "bam", "cram"}) {
         if (lower.ends_with("." + ext)) return "-i_" + ext;
     }
-    // gzread transparently reads plain files too. Probe only a small prefix;
+    // openInputFile reads plain files too. Probe only a small prefix;
     // BAM's magic is inside its BGZF stream, CRAM's is uncompressed.
     struct stat info;
     if (stat(filename.c_str(), &info) != 0 || !S_ISREG(info.st_mode)) return "";
-    gzFile input = gzopen(filename.c_str(), "rb");
-    if (!input) return "";
     char prefix[4096];
-    const int count = gzread(input, prefix, sizeof(prefix));
-    gzclose(input);
+    std::streamsize count = 0;
+    try {
+        auto input = openInputFile(filename, std::ios::in, 0, false);
+        input->read(prefix, sizeof(prefix));
+        count = input->gcount();
+    } catch (const std::exception&) {
+        return ""; // not readable (or corrupt within its first bytes): reading it reports that
+    }
     if (count <= 0) return "";
-    const std::string text(prefix, count);
+    const std::string text(prefix, static_cast<size_t>(count));
     if (text.starts_with(std::string("BAM\1", 4))) return "-i_bam";
     if (text.starts_with("CRAM")) return "-i_cram";
     if (text.starts_with("@HD\t") || text.starts_with("@SQ\t") ||

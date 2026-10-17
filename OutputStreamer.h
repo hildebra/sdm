@@ -18,6 +18,8 @@
 #include <thread>
 #include <shared_mutex>
 #include <type_traits>
+#include <limits>
+#include <map>
 
 class AsyncOutputWriter;
 
@@ -172,10 +174,24 @@ public:
 	// Per-worker output batching. While enabled, records written by worker
 	// `curThread` are staged in its own buffers and published once per block
 	// by flushWriteBatch(), instead of taking the output locks for every read.
-	// Disabled when output rotation or read limits need per-record accounting.
-	void beginWriteBatching();
+	// Without ordering, disabled when output rotation or read limits need
+	// per-record accounting (with it, records are counted at publication).
+	// With orderWindow > 0 the blocks are published in input order: the reader
+	// numbers them (reserveOutputBlock) and the worker hands its block over
+	// (finishOutputBlock); a block's output is its records, then the mid-quality
+	// sets the dereplicator withheld and did not count, in record order. So the
+	// files do not depend on the number of threads or on scheduling. A worker
+	// whose block is orderWindow blocks or more ahead of the next one to publish
+	// waits, which bounds the output held back.
+	void beginWriteBatching(size_t orderWindow = 0);
 	void flushWriteBatch(int curThread);
 	void endWriteBatching();
+	static constexpr uint64_t kNoOutputBlock = std::numeric_limits<uint64_t>::max();
+	uint64_t reserveOutputBlock();
+	// Publishes (or queues) the block's output; without a block number as flushWriteBatch.
+	void finishOutputBlock(int curThread, uint64_t block);
+	// After an error: nothing more is published, and waiting workers return.
+	void failOutputBlocks();
 	//pretty final bool, aborts all, so careful with this
 	//collects stats on read, writes then. Keep read pairs together by using "writeForWrite"in second mutext step
 	bool saveForWrite(const shared_ptr<DNA>& d, int Pair, int thr, int& Cstr, bool = true);//Pair:1=pair1;2=pair2;3=singleton
@@ -221,7 +237,7 @@ public:
 	// the output streams are still open.
 	void flushDereplication();
 	//debug function to look closer at nonBC reads, threadsafe
-    void writeNonBCReads(const shared_ptr<DNA>& d, const shared_ptr<DNA>& d2);
+    void writeNonBCReads(const shared_ptr<DNA>& d, const shared_ptr<DNA>& d2, int curThread = -1);
 	void setReadLimit(uint64_t x) { maxRdsOut = x; }
 
 	//demultiplex related
@@ -267,8 +283,8 @@ public:
 	uint64_t reserveDerepBlock() {
 		return (b_doDereplicate && dereplicator) ? dereplicator->reserveBlock() : Dereplicate::kNoBlock;
 	}
-	void beginDerepBlock(uint64_t block) {
-		if (block != Dereplicate::kNoBlock && dereplicator) { dereplicator->beginBlock(block); }
+	void beginDerepBlock(uint64_t block, uint64_t outputBlock = kNoOutputBlock) {
+		if (block != Dereplicate::kNoBlock && dereplicator) { dereplicator->beginBlock(block, outputBlock); }
 	}
 	void endDerepBlock(uint64_t block) {
 		if (block != Dereplicate::kNoBlock && dereplicator) { dereplicator->endBlock(); }
@@ -302,6 +318,34 @@ private:
 	bool reserveDemultiBases(bool merged, uint64_t bases);
 	std::vector<std::unique_ptr<WriteBatch>> writeBatches_;
 	std::atomic<bool> batchWrites_{false};
+	// Ordered output with -maxReadsPerOutput or -XfirstReadsWritten: records are staged with their
+	// text and written (counted, limited, rotated) as their block is published, in input order.
+	struct StagedRecord;
+	void replayStagedRecords(WriteBatch& batch);
+	std::atomic<bool> replayWrites_{false};
+	std::mutex replayMTX;                     // before outputEpochMTX and sqfqostrMTX
+	std::unique_ptr<WriteBatch> replayOut_;   // under replayMTX: a block's text per stream
+	// Ordered output (beginWriteBatching with an order window), under orderMTX.
+	struct OrderedBlock;
+	OrderedBlock& orderedBlockLocked(uint64_t block);
+	// Publishes the blocks that are ready, in order (all: every block held, at the end).
+	void publishOrderedBlocks(std::unique_lock<std::mutex>& lock, bool all);
+	void publishOrderedBlock(OrderedBlock& block);
+	// A withheld mid-quality set the dereplicator does not count: held for its block's
+	// output; false if it is to be written now (no ordered block).
+	bool holdWithheld(uint64_t block, uint32_t index, const shared_ptr<DNA>& d1, const shared_ptr<DNA>& d2,
+		const Dereplicate::DerepTierRoute& route);
+	void derepBlockApplied(uint64_t block);
+	std::mutex orderMTX;
+	std::condition_variable orderCV;
+	std::map<uint64_t, std::unique_ptr<OrderedBlock>> orderedBlocks_;
+	std::vector<std::vector<std::unique_ptr<WriteBatch>>> freeBatches_; // per worker: its published buffers
+	std::atomic<uint64_t> nextOutputBlock_{0};
+	std::atomic<size_t> orderWindow_{0};
+	uint64_t nextPublish_ = 0;     // the next block to publish
+	bool orderDerep_ = false;      // a block waits for the dereplicator to apply it
+	bool orderPublishing_ = false; // a thread is publishing (others leave their blocks to it)
+	bool orderFailed_ = false;
 	void setwriteMode(std::ios_base::openmode wm) { wrMode = wm; }
 	inline void setFilePos(ofstream& str, streamoff& pos) {
 		str.seekp(0, ios_base::end);	pos = str.tellp();
@@ -320,7 +364,8 @@ private:
 	void delAllDNAvectors();
 	void incrementOutputFile();
 	// internal variant of closeOutStreams that assumes sqfqostrMTX already held
-	void closeOutStreams_locked(bool wr);
+	// rotating: an output file switch (-maxReadsPerOutput), which keeps the no-barcode files open.
+	void closeOutStreams_locked(bool wr, bool rotating = false);
 	// internal variant of closeOutFilesDemulti that assumes dmltMTX/sqfqostrMTX already held
 	void closeOutFilesDemulti_locked();
 

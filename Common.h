@@ -42,6 +42,9 @@ string intwithcommas(uint64_t value);
 inline std::string itos(int number) { return std::to_string(number); }
 std::string ftos(float number, int digits = 4);
 bool isGZfile(const string fileS);
+// .zst or .zstd (any case): zstd output; isCompressedFile: either of them.
+bool isZstdFile(const string fileS);
+bool isCompressedFile(const string fileS);
 
 // trim leading and trailing whitespace
 void trim(std::string& str);

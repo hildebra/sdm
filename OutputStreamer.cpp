@@ -438,6 +438,25 @@ void dualOfBufStream::emptyStreams(bool force) {
 }
 
 //**************************** per-worker output batches ****************************
+// A record of the main outputs staged for the per-record path (output rotation, read
+// limits) with ordered output: what selects its streams, and where its text, formatted
+// by the worker, is in the batch's stagedText; replayStagedRecords counts, limits,
+// rotates and writes it at publication.
+struct OutputStreamer::StagedRecord {
+	// The record's pieces of text, one after another from `start`.
+	enum Piece { kFastq1, kFastq2, kSeq1, kQual1, kSeq2, kQual2, kPieces };
+	int pair1 = -1, cstream1 = 100, pair2 = -1, cstream2 = 100;
+	bool hasD1 = false, hasD2 = false;
+	bool writeFastq = false, mergedOutput = false, strictPair = false, strictPairFastq = false;
+	size_t start = 0;
+	uint32_t length[kPieces] = {};  // FASTQ of each read (merged output: the merged read's in kFastq1), else FASTA/QUAL
+	std::string_view piece(const std::string& text, Piece which) const {
+		size_t offset = start;
+		for (int i = 0; i < which; ++i) { offset += length[i]; }
+		return std::string_view(text).substr(offset, length[which]);
+	}
+};
+
 // Records one worker formats for one input block. Publishing the whole block
 // at once keeps R1/R2 (and FASTA/QUAL) files in step with a single lock per
 // block instead of several locks per read.
@@ -458,27 +477,56 @@ struct OutputStreamer::WriteBatch {
 		std::string firstData, secondData, mergedData;
 		bool touched = false;
 	};
+	// Ordered output with a -DemultiBPperSR cap: records whose admission under the
+	// cap is decided when the block is published, in input order (stageCapped).
+	struct CappedDemulti {
+		size_t sample;
+		bool merged;
+		ostr* firstStream;
+		ostr* secondStream;
+		std::string first, second;
+		uint64_t bases;
+	};
 	std::vector<Dual> duals;
 	std::vector<Single> singles;
 	std::vector<Demulti> demulti;      // indexed by sample
 	std::vector<size_t> demultiTouched;
+	std::vector<CappedDemulti> capped;
+	std::vector<StagedRecord> staged;  // replayWrites_: main-output records in input order
+	std::string stagedText;            // and their text
 	uint64_t records = 0;
 	size_t bytes = 0;
 
-	void stageDual(dualOfBufStream* stream, const std::string& first, const std::string& second) {
+	// An entry without a stream (releaseStreams) is reused, buffer and all.
+	void stageDual(dualOfBufStream* stream, std::string_view first, std::string_view second) {
 		Dual* entry = nullptr;
-		for (auto& candidate : duals) { if (candidate.stream == stream) { entry = &candidate; break; } }
+		Dual* unused = nullptr;
+		for (auto& candidate : duals) {
+			if (candidate.stream == stream) { entry = &candidate; break; }
+			if (!candidate.stream && !unused) { unused = &candidate; }
+		}
+		if (!entry && unused) { entry = unused; entry->stream = stream; }
 		if (!entry) { duals.push_back(Dual{stream, {}, {}}); entry = &duals.back(); }
 		entry->first += first;
 		entry->second += second;
 		bytes += first.size() + second.size();
 	}
-	void stage(ostr* stream, const std::string& data) {
+	void stage(ostr* stream, std::string_view data) {
 		Single* entry = nullptr;
-		for (auto& candidate : singles) { if (candidate.stream == stream) { entry = &candidate; break; } }
+		Single* unused = nullptr;
+		for (auto& candidate : singles) {
+			if (candidate.stream == stream) { entry = &candidate; break; }
+			if (!candidate.stream && !unused) { unused = &candidate; }
+		}
+		if (!entry && unused) { entry = unused; entry->stream = stream; }
 		if (!entry) { singles.push_back(Single{stream, {}}); entry = &singles.back(); }
 		entry->data += data;
 		bytes += data.size();
+	}
+	// After publication (buffers empty): forget the streams, which a file switch may close.
+	void releaseStreams() {
+		for (auto& entry : duals) { entry.stream = nullptr; }
+		for (auto& entry : singles) { entry.stream = nullptr; }
 	}
 	void stageDemulti(size_t sample, bool merged, ostr* firstStream, const std::string& first,
 		ostr* secondStream, const std::string& second) {
@@ -494,10 +542,19 @@ struct OutputStreamer::WriteBatch {
 		}
 		bytes += first.size() + second.size();
 	}
-	bool empty() const { return bytes == 0 && records == 0 && demultiTouched.empty(); }
+	void stageCapped(size_t sample, bool merged, ostr* firstStream, const std::string& first,
+		ostr* secondStream, const std::string& second, uint64_t bases) {
+		capped.push_back(CappedDemulti{sample, merged, firstStream, secondStream, first, second, bases});
+		bytes += first.size() + second.size();
+	}
+	bool empty() const {
+		return bytes == 0 && records == 0 && demultiTouched.empty() && capped.empty() && staged.empty();
+	}
 	void clearMain() {
 		for (auto& entry : duals) { entry.first.clear(); entry.second.clear(); }
 		for (auto& entry : singles) { entry.data.clear(); }
+		staged.clear();
+		stagedText.clear();
 		records = 0;
 	}
 	void clearDemulti() {
@@ -507,6 +564,7 @@ struct OutputStreamer::WriteBatch {
 			entry.touched = false;
 		}
 		demultiTouched.clear();
+		capped.clear();
 	}
 };
 
@@ -518,14 +576,30 @@ OutputStreamer::WriteBatch* OutputStreamer::writeBatch(int curThread) {
 	return writeBatches_[curThread].get();
 }
 
-void OutputStreamer::beginWriteBatching() {
-	// Output rotation and read limits count records one at a time; they keep
-	// the per-record path so file boundaries and limits stay exact.
-	if (maxReadsPerOFile > 0 || maxRdsOut > 0) { return; }
+void OutputStreamer::beginWriteBatching(size_t orderWindow) {
+	// Output rotation and read limits count records one at a time. Without
+	// ordering they keep the per-record path; with it, records are staged with
+	// their text and counted (limited, rotated) at publication, in input order,
+	// so file boundaries and limits stay exact and do not depend on -threads.
+	const bool perRecord = maxReadsPerOFile > 0 || maxRdsOut > 0;
+	if (perRecord && orderWindow == 0) { return; }
 	std::lock_guard<std::mutex> guard(sqfqostrMTX);
+	replayWrites_.store(perRecord, std::memory_order_relaxed);
 	writeBatches_.clear();
 	const size_t workers = static_cast<size_t>(std::max(Nthrds, 1));
 	for (size_t i = 0; i < workers; ++i) { writeBatches_.push_back(std::make_unique<WriteBatch>()); }
+	{
+		std::lock_guard<std::mutex> order(orderMTX);
+		orderedBlocks_.clear();
+		freeBatches_.clear();
+		freeBatches_.resize(workers);
+		nextOutputBlock_.store(0, std::memory_order_relaxed);
+		nextPublish_ = 0;
+		orderPublishing_ = false;
+		orderFailed_ = false;
+		orderDerep_ = b_doDereplicate && dereplicator && dereplicator->ordersBlocks();
+		orderWindow_.store(orderWindow, std::memory_order_relaxed);
+	}
 	batchWrites_.store(true, std::memory_order_release);
 }
 
@@ -557,6 +631,7 @@ void OutputStreamer::publishDemultiBatch(WriteBatch& batch) {
 void OutputStreamer::flushWriteBatch(int curThread) {
 	WriteBatch* batch = writeBatch(curThread);
 	if (!batch || batch->empty()) { return; }
+	replayStagedRecords(*batch);
 	{
 		std::lock_guard<std::mutex> guard(sqfqostrMTX);
 		publishBatchLocked(*batch);
@@ -576,11 +651,174 @@ void OutputStreamer::flushAllWriteBatchesLocked() {
 
 void OutputStreamer::endWriteBatching() {
 	if (!batchWrites_.load(std::memory_order_acquire)) { return; }
-	// Workers have finished; publish what each staged, then write per record again.
+	// Workers have finished and the dereplicator has applied every block
+	// (flushDereplication): publish what is held, in order (after a failure:
+	// nothing), and write withheld sets directly from now on.
+	{
+		std::unique_lock<std::mutex> order(orderMTX);
+		if (orderWindow_.load(std::memory_order_relaxed) > 0) {
+			publishOrderedBlocks(order, true);
+			orderedBlocks_.clear();
+			freeBatches_.clear();
+			orderWindow_.store(0, std::memory_order_relaxed);
+		}
+	}
+	// Then publish what each worker staged, and write per record again.
+	for (auto& batch : writeBatches_) {
+		if (batch) { replayStagedRecords(*batch); }
+	}
 	std::lock_guard<std::mutex> guard(sqfqostrMTX);
 	flushAllWriteBatchesLocked();
 	batchWrites_.store(false, std::memory_order_release);
+	replayWrites_.store(false, std::memory_order_relaxed);
 	writeBatches_.clear();
+}
+
+//**************************** ordered output ****************************
+// With an order window (beginWriteBatching), each read block's output is
+// published in input order, by whichever thread completes the next block to
+// publish: the records its worker staged (finishOutputBlock), then the
+// mid-quality sets the dereplicator withheld and did not count, in the block's
+// record order, once the dereplicator has applied the block (derepBlockApplied).
+// A single-threaded run publishes the same blocks in the same way, so the files
+// are byte-identical for any number of threads.
+struct OutputStreamer::OrderedBlock {
+	struct Withheld {
+		uint32_t index;
+		shared_ptr<DNA> d1, d2;
+		Dereplicate::DerepTierRoute route;
+	};
+	std::unique_ptr<WriteBatch> batch;
+	int owner = -1; // the worker whose buffers these are (they go back to it)
+	std::vector<Withheld> withheld;
+	bool recordsDone = false;
+	bool derepDone = false;
+};
+static_assert(OutputStreamer::kNoOutputBlock == Dereplicate::kNoBlock, "one number for no block");
+
+uint64_t OutputStreamer::reserveOutputBlock() {
+	return orderWindow_.load(std::memory_order_relaxed) > 0
+		? nextOutputBlock_.fetch_add(1, std::memory_order_relaxed) : kNoOutputBlock;
+}
+
+OutputStreamer::OrderedBlock& OutputStreamer::orderedBlockLocked(uint64_t block) {
+	auto& slot = orderedBlocks_[block];
+	if (!slot) { slot = std::make_unique<OrderedBlock>(); }
+	return *slot;
+}
+
+void OutputStreamer::finishOutputBlock(int curThread, uint64_t block) {
+	const size_t window = orderWindow_.load(std::memory_order_relaxed);
+	if (block == kNoOutputBlock || window == 0) { flushWriteBatch(curThread); return; }
+	WriteBatch* batch = writeBatch(curThread);
+	std::unique_lock<std::mutex> lock(orderMTX);
+	// Every earlier block was submitted (and, the pool being FIFO, started) before
+	// this one, and the next one to publish never waits here: no deadlock.
+	orderCV.wait(lock, [&] { return orderFailed_ || block < nextPublish_ + window; });
+	if (orderFailed_) {
+		if (batch) { batch->clearMain(); batch->clearDemulti(); batch->bytes = 0; }
+		return;
+	}
+	// The worker goes on with buffers of its own that were published before (or new
+	// ones): each worker's buffers only ever hold its own blocks, keep their capacity
+	// and are not reallocated once grown. Large buffers allocated and freed by other
+	// threads are what glibc kept ever more of; with the window capped at the CPUs as
+	// well (read_sequences), the peak no longer grows with the input (2026-10-16,
+	// docs/multithreading-fixes.md).
+	std::unique_ptr<WriteBatch> staged;
+	if (curThread >= 0 && static_cast<size_t>(curThread) < freeBatches_.size() && !freeBatches_[curThread].empty()) {
+		staged = std::move(freeBatches_[curThread].back());
+		freeBatches_[curThread].pop_back();
+	}
+	else { staged = std::make_unique<WriteBatch>(); }
+	if (batch) { std::swap(*staged, *batch); }
+	OrderedBlock& entry = orderedBlockLocked(block);
+	entry.batch = std::move(staged);
+	entry.owner = batch ? curThread : -1;
+	entry.recordsDone = true;
+	publishOrderedBlocks(lock, false);
+}
+
+void OutputStreamer::failOutputBlocks() {
+	std::lock_guard<std::mutex> lock(orderMTX);
+	orderFailed_ = true;
+	orderCV.notify_all();
+}
+
+bool OutputStreamer::holdWithheld(uint64_t block, uint32_t index, const shared_ptr<DNA>& d1,
+	const shared_ptr<DNA>& d2, const Dereplicate::DerepTierRoute& route) {
+	std::lock_guard<std::mutex> lock(orderMTX);
+	// A block is published only after the dereplicator applied it, so its sets
+	// arrive before; a late one (none expected) is written at once.
+	if (orderWindow_.load(std::memory_order_relaxed) == 0 || orderFailed_ || block < nextPublish_) { return false; }
+	orderedBlockLocked(block).withheld.push_back(OrderedBlock::Withheld{index, d1, d2, route});
+	return true;
+}
+
+void OutputStreamer::derepBlockApplied(uint64_t block) {
+	std::unique_lock<std::mutex> lock(orderMTX);
+	if (orderWindow_.load(std::memory_order_relaxed) == 0 || orderFailed_ || block < nextPublish_) { return; }
+	orderedBlockLocked(block).derepDone = true;
+	publishOrderedBlocks(lock, false);
+}
+
+void OutputStreamer::publishOrderedBlocks(std::unique_lock<std::mutex>& lock, bool all) {
+	if (orderPublishing_) { return; } // the publishing thread will take the new blocks too
+	orderPublishing_ = true;
+	try {
+		while (!orderFailed_ && !orderedBlocks_.empty()) {
+			auto first = orderedBlocks_.begin();
+			const OrderedBlock& next = *first->second;
+			if (!all && (first->first != nextPublish_ || !next.recordsDone || (orderDerep_ && !next.derepDone))) { break; }
+			std::unique_ptr<OrderedBlock> block = std::move(first->second);
+			nextPublish_ = first->first + 1;
+			orderedBlocks_.erase(first);
+			lock.unlock();
+			publishOrderedBlock(*block);
+			lock.lock();
+			// Back to the worker that filled them (published: emptied, capacity kept).
+			if (block->batch && block->owner >= 0 && static_cast<size_t>(block->owner) < freeBatches_.size()) {
+				freeBatches_[block->owner].push_back(std::move(block->batch));
+			}
+			orderCV.notify_all();
+		}
+	}
+	catch (...) {
+		if (!lock.owns_lock()) { lock.lock(); }
+		orderPublishing_ = false;
+		orderFailed_ = true;
+		orderCV.notify_all();
+		throw;
+	}
+	orderPublishing_ = false;
+}
+
+void OutputStreamer::publishOrderedBlock(OrderedBlock& block) {
+	if (block.batch) {
+		// -maxReadsPerOutput, -XfirstReadsWritten: the block's records in input order.
+		replayStagedRecords(*block.batch);
+		// -DemultiBPperSR: the block's records are admitted in input order.
+		for (const auto& record : block.batch->capped) {
+			if (reserveDemultiBases(record.merged, record.bases)) {
+				block.batch->stageDemulti(record.sample, record.merged, record.firstStream, record.first,
+					record.secondStream, record.second);
+			}
+		}
+		block.batch->capped.clear();
+	}
+	if (block.batch && !block.batch->empty()) {
+		{
+			std::lock_guard<std::mutex> guard(sqfqostrMTX);
+			publishBatchLocked(*block.batch);
+		}
+		publishDemultiBatch(*block.batch);
+	}
+	if (block.batch) { block.batch->bytes = 0; }
+	std::sort(block.withheld.begin(), block.withheld.end(),
+		[](const OrderedBlock::Withheld& a, const OrderedBlock::Withheld& b) { return a.index < b.index; });
+	for (const auto& set : block.withheld) {
+		writeForWrite(set.d1, set.route.idx1, set.route.cstr1, set.d2, set.route.idx2, set.route.cstr2, -1);
+	}
 }
 
 OutputStreamer::OutputStreamer(Filters* fil, OptContainer* cmdArgs,
@@ -701,6 +939,7 @@ OutputStreamer::~OutputStreamer() {
 		try { dereplicator->flushPending(); }
 		catch (const std::exception& error) { cerr << "Failed to apply queued dereplication entries: " << error.what() << "\n"; }
 		dereplicator->setUncountedPublisher(nullptr);
+		dereplicator->setBlockAppliedListener(nullptr);
 	}
     // Acquire stream-creation/usage mutex first, then demulti mutex to avoid lock-order inversion
     {
@@ -955,9 +1194,15 @@ bool OutputStreamer::writeDemultiRecords(int idx, const string& first, const str
 			if (!first.empty()) { firstStream = streams[0].get(); }
 			if (!second.empty()) { secondStream = streams[1].get(); }
 		}
+		if (demultiBPperSR > 0 && orderWindow_.load(std::memory_order_relaxed) > 0) {
+			// Which records fit under the cap is decided in input order, when the block is published.
+			batch->stageCapped(static_cast<size_t>(idx), merged, firstStream, first, secondStream, second, bases);
+			return true;
+		}
 		if (!reserveDemultiBases(merged, bases)) { return false; }
 		batch->stageDemulti(static_cast<size_t>(idx), merged, firstStream, first, secondStream, second);
-		if (batch->bytes >= WriteBatch::kFlushBytes) { flushWriteBatch(curThread); }
+		// Without ordering a large block is published in parts; ordered, a block is published whole.
+		if (batch->bytes >= WriteBatch::kFlushBytes && orderWindow_.load(std::memory_order_relaxed) == 0) { flushWriteBatch(curThread); }
 		return true;
 	}
 	std::lock_guard<std::mutex> guard(dmltMTX);
@@ -1105,8 +1350,13 @@ void OutputStreamer::generateDemultiOutFiles(string path, Filters* fil,
 	}
 
 }
+// Called with the exclusive epoch lock, also while ordered blocks are published
+// (so not through closeOutStreams, which ends batching).
 void OutputStreamer::incrementOutputFile() {
-	this->closeOutStreams(true);
+	{
+		std::lock_guard<std::mutex> guard(sqfqostrMTX);
+		closeOutStreams_locked(true, true);
+	}
 	MFil->incrementFileIncrementor();
 	this->openOutStreams(locCmdArgs, MFil->getFileIncrementor(), ios_base::out);
 	ReadsWritten = 0;
@@ -1243,9 +1493,11 @@ bool OutputStreamer::writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int
 		Cstream1 = Cstream2 = std::max(Cstream1, Cstream2);
 	}
 	WriteBatch* batch = writeBatch(curThread);
-	// Batching excludes rotation, so the epoch lock is only needed per record.
+	// Batching without replay excludes rotation, so the epoch lock is needed per
+	// record and when records are staged for replay (the publisher rotates meanwhile).
+	const bool replay = batch && replayWrites_.load(std::memory_order_relaxed);
 	std::shared_lock<std::shared_mutex> epochGuard(outputEpochMTX, std::defer_lock);
-	if (!batch) { epochGuard.lock(); }
+	if (!batch || replay) { epochGuard.lock(); }
 	// Output rotation re-opens the streams (and sets the format) under the
 	// exclusive epoch lock, so read the format only after taking it.
 	const bool writeFastq = BWriteFastQ || mergedOutput;
@@ -1277,6 +1529,40 @@ bool OutputStreamer::writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int
 			paired_sync_skipped_counter_++;
 			return false;
 		}
+	}
+
+	if (replay) {
+		// Formatted here, by the worker that owns the reads; the streams, the read
+		// limit and file rotation are decided when the block is published.
+		if (Cstream1 >= 100 && Cstream2 >= 100) { return false; }
+		StagedRecord record;
+		record.pair1 = Pair1; record.cstream1 = Cstream1;
+		record.pair2 = Pair2; record.cstream2 = Cstream2;
+		record.hasD1 = bool(d1); record.hasD2 = bool(d2);
+		record.writeFastq = writeFastq; record.mergedOutput = mergedOutput;
+		record.strictPair = isStrictPairedWrite; record.strictPairFastq = isStrictPairedFastqWrite;
+		// One text buffer per batch (its capacity kept), the pieces in Piece order.
+		std::string& text = batch->stagedText;
+		record.start = text.size();
+		auto add = [&](StagedRecord::Piece which, const std::string& piece) {
+			text += piece;
+			record.length[which] = static_cast<uint32_t>(piece.size());
+		};
+		if (mergedOutput) {
+			add(StagedRecord::kFastq1, *mergedFastq);
+		} else if (isStrictPairedFastqWrite) {
+			add(StagedRecord::kFastq1, fastqTmp1);
+			add(StagedRecord::kFastq2, fastqTmp2);
+		} else if (writeFastq) {
+			if (d1) { fastqTmp1.clear(); d1->writeFastQ(fastqTmp1); add(StagedRecord::kFastq1, fastqTmp1); }
+			if (d2) { fastqTmp2.clear(); d2->writeFastQ(fastqTmp2); add(StagedRecord::kFastq2, fastqTmp2); }
+		} else {
+			add(StagedRecord::kSeq1, seqTmp1); add(StagedRecord::kQual1, qualTmp1);
+			add(StagedRecord::kSeq2, seqTmp2); add(StagedRecord::kQual2, qualTmp2);
+		}
+		batch->bytes += text.size() - record.start;
+		batch->staged.push_back(record);
+		return true;
 	}
 
 	if (batch) {
@@ -1326,7 +1612,8 @@ bool OutputStreamer::writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int
 			}
 		}
 		++batch->records;
-		if (batch->bytes >= WriteBatch::kFlushBytes) { flushWriteBatch(curThread); }
+		// Without ordering a large block is published in parts; ordered, a block is published whole.
+		if (batch->bytes >= WriteBatch::kFlushBytes && orderWindow_.load(std::memory_order_relaxed) == 0) { flushWriteBatch(curThread); }
 		return true;
 	}
 
@@ -1416,6 +1703,98 @@ bool OutputStreamer::writeForWriteImpl(const shared_ptr<DNA>& d1, int Pair1, int
 	}
 }
 
+// The per-record path above for the records a worker staged (replayWrites_), at
+// publication: read limit, file rotation and stream choice in input order. Their text
+// is collected per stream and written once per block, and before each switch to the
+// next file, so the publisher does little per record.
+void OutputStreamer::replayStagedRecords(WriteBatch& batch) {
+	if (batch.staged.empty()) { return; }
+	std::lock_guard<std::mutex> replayGuard(replayMTX);
+	if (!replayOut_) { replayOut_ = std::make_unique<WriteBatch>(); }
+	WriteBatch& out = *replayOut_;
+	std::shared_lock<std::shared_mutex> epochGuard(outputEpochMTX);
+	std::unique_lock<std::mutex> streamGuard(sqfqostrMTX);
+	auto publish = [&]() { // records were counted one by one: out.records stays 0
+		publishBatchLocked(out);
+		out.bytes = 0;
+		out.releaseStreams();
+	};
+	auto raw = [](const auto* slot) { return slot ? slot->get() : nullptr; };
+	for (size_t i = 0; i < batch.staged.size();) {
+		// Once the limit is reached, no later record is written or counted.
+		if (maxRdsOut > 0 && TotalReadsWritten >= maxRdsOut) { break; }
+		const StagedRecord& record = batch.staged[i];
+		const StreamSlots slots = selectStreams(record.writeFastq, record.strictPair, record.mergedOutput,
+			record.pair1, record.cstream1, record.pair2, record.cstream2);
+		dualOfBufStream* fqPair = raw(slots.fqPair);
+		ostr* fq1 = raw(slots.fq1);
+		ostr* fq2 = raw(slots.fq2);
+		ostr* seq1 = raw(slots.seq1);
+		ostr* seq2 = raw(slots.seq2);
+		ostr* qual1 = raw(slots.qual1);
+		ostr* qual2 = raw(slots.qual2);
+		if (record.strictPair && ((record.writeFastq && !fqPair) ||
+			(!record.writeFastq && (!seq1 || !seq2 ||
+				((qual1 || qual2) && (!qual1 || !qual2 ||
+					record.length[StagedRecord::kQual1] == 0 || record.length[StagedRecord::kQual2] == 0)))))) {
+			paired_sync_skipped_counter_++;
+			++i;
+			continue;
+		}
+		const bool willWrite = (fqPair && record.hasD1 && record.hasD2) || (fq1 && record.hasD1) ||
+			(fq2 && record.hasD2) || (seq1 && record.hasD1) || (seq2 && record.hasD2);
+		if (!willWrite) {
+			if (record.strictPairFastq) { paired_sync_skipped_counter_++; }
+			++i;
+			continue;
+		}
+		if (maxReadsPerOFile > 0 && ReadsWritten >= maxReadsPerOFile) {
+			// The current files are full: write what they still get, then switch.
+			publish();
+			streamGuard.unlock();
+			epochGuard.unlock();
+			{
+				std::unique_lock<std::shared_mutex> rotationGuard(outputEpochMTX);
+				std::lock_guard<std::mutex> incrementGuard(fileIncMTX);
+				if (maxReadsPerOFile > 0 && ReadsWritten >= maxReadsPerOFile &&
+					(maxRdsOut == 0 || TotalReadsWritten < maxRdsOut)) {
+					incrementOutputFile();
+				}
+			}
+			epochGuard.lock();
+			streamGuard.lock();
+			continue; // the same record, to the new files
+		}
+		++ReadsWritten;
+		++TotalReadsWritten;
+		auto text = [&](StagedRecord::Piece which) { return record.piece(batch.stagedText, which); };
+		if (fqPair) {
+			out.stageDual(fqPair, text(StagedRecord::kFastq1), text(StagedRecord::kFastq2));
+		}
+		else if (record.mergedOutput) {
+			if (fq1) { out.stage(fq1, text(StagedRecord::kFastq1)); }
+		}
+		else {
+			if (fq1 && record.hasD1) { out.stage(fq1, text(StagedRecord::kFastq1)); }
+			if (fq2 && record.hasD2) { out.stage(fq2, text(StagedRecord::kFastq2)); }
+			if (!record.writeFastq) {
+				if (seq1 && record.hasD1) {
+					out.stage(seq1, text(StagedRecord::kSeq1));
+					if (qual1) { out.stage(qual1, text(StagedRecord::kQual1)); }
+				}
+				if (seq2 && record.hasD2) {
+					out.stage(seq2, text(StagedRecord::kSeq2));
+					if (qual2) { out.stage(qual2, text(StagedRecord::kQual2)); }
+				}
+			}
+		}
+		++i;
+	}
+	publish();
+	batch.staged.clear();
+	batch.stagedText.clear();
+}
+
 bool OutputStreamer::saveForWrite_merge(shared_ptr<DNAunique> d,
 	string newHeader, int curThread, bool elseWriteD1) {
 	if (!d) { return false; }
@@ -1493,7 +1872,7 @@ void OutputStreamer::writeSelectiveStream(shared_ptr<DNA> d, int Pair, int FS) {
 	//	delete d;
 
 }
-void OutputStreamer::writeNonBCReads(const shared_ptr<DNA>& d, const shared_ptr<DNA>& d2) {
+void OutputStreamer::writeNonBCReads(const shared_ptr<DNA>& d, const shared_ptr<DNA>& d2, int curThread) {
 	if (fqNoBCFile.empty() || !d || d->getBarcodeDetected()) { return; }
 	if (pairedSeq > 1 && (!d2 || d2->getBarcodeDetected())) { return; }
 	string d1s, d2s;
@@ -1503,6 +1882,12 @@ void OutputStreamer::writeNonBCReads(const shared_ptr<DNA>& d, const shared_ptr<
 		d2->prepareWrite(fastQoutVer);
 		d2->writeFastQ(d2s);
 		if (d1s.empty() || d2s.empty()) { return; }
+	}
+	// While batching, with the block's other output (only its publisher writes these files then).
+	if (WriteBatch* batch = writeBatch(curThread)) {
+		batch->stage(fqNoBCFile[0].get(), d1s);
+		if (!d2s.empty()) { batch->stage(fqNoBCFile[fqNoBCFile.size() == 1 ? 0 : 1].get(), d2s); }
+		return;
 	}
 	std::lock_guard<std::mutex> guard(dmltMTX);
 	*(fqNoBCFile[0]) << d1s;
@@ -1547,11 +1932,14 @@ void OutputStreamer::attachDereplicator(shared_ptr<Dereplicate> de) {
 		dereplicator = de; b_doDereplicate = true;
 		dereplicator->setPaired(pairedSeq > 1);
 		// Withheld mid-quality sets the dereplicator does not count are written
-		// here, through the per-record (locked) path since any thread may apply them.
+		// here, through the per-record (locked) path since any thread may apply them;
+		// with ordered output, after their block's records, in record order.
 		dereplicator->setUncountedPublisher([this](const shared_ptr<DNA>& d1, const shared_ptr<DNA>& d2,
-			const Dereplicate::DerepTierRoute& route) {
+			const Dereplicate::DerepTierRoute& route, uint64_t block, uint32_t index) {
+			if (block != kNoOutputBlock && holdWithheld(block, index, d1, d2, route)) { return; }
 			writeForWrite(d1, route.idx1, route.cstr1, d2, route.idx2, route.cstr2, -1);
 		});
+		dereplicator->setBlockAppliedListener([this](uint64_t block) { derepBlockApplied(block); });
 		//insert code here to fix BC offset in filter & add to derep info on sample names from the current filter
 		int curBCOffset = dereplicator->getHighestBCoffset();
 
@@ -1630,7 +2018,7 @@ void OutputStreamer::resetOutFilesAndFilter() {
 // reported to the caller instead of being swallowed by ~ofbufstream. All
 // streams are closed before the first failure is rethrown. Retained streams are
 // only flushed here and finalized by OutputStreamRetention::closeAll().
-void OutputStreamer::closeOutStreams_locked(bool wr) {
+void OutputStreamer::closeOutStreams_locked(bool wr, bool rotating) {
 	(void)wr;
 	write2File = true;
 	std::exception_ptr failure;
@@ -1655,7 +2043,11 @@ void OutputStreamer::closeOutStreams_locked(bool wr) {
 	for (auto& tier : qFile) { for (auto& stream : tier) { closeStream(stream); } }
 	for (auto& tier : fqFile) { for (auto& stream : tier) { closeStream(stream); } }
 	for (auto& stream : of_merged_fq) { closeStream(stream); }
-	for (auto& stream : fqNoBCFile) { closeStream(stream); }
+	// Reads without a barcode go to one file pair for the whole run (openOutStreams
+	// does not reopen it; closing it here crashed the next write, 3.65 and before).
+	if (!rotating) {
+		for (auto& stream : fqNoBCFile) { closeStream(stream); }
+	}
 	for (auto& stream : fqPairFile) { closePair(stream); }
 	for (auto& stream : sPairFile) { closePair(stream); }
 	for (auto& stream : qPairFile) { closePair(stream); }

@@ -398,7 +398,7 @@ bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending, H
             group->addNewDNAuniq(pending.dna, coarse_->storesQualities() ? pending.dna2 : nullptr,
                 b_merge_pairs_derep_ ? pending.dna_merged : nullptr, pending.mergePos, -1, true, false);
             if (coarse_->storesQualities() || coarse_->storesDiffs()) {
-                const auto& source = searchWithMerg && pending.dna_merged ? pending.dna_merged : pending.dna;
+                const auto& source = mergedSearchKeys_ && pending.dna_merged ? pending.dna_merged : pending.dna;
                 auto reference = std::make_shared<const string>(coarse_->storesQualities() ? std::string_view(source->getSequence()) : source->getSeqPseudoView());
                 auto mateReference = coarse_->storesQualities() && pending.dna2 ?
                     std::make_shared<const string>(pending.dna2->getSequence()) : nullptr;
@@ -410,7 +410,7 @@ bool Dereplicate::apply_pending_entry_locked(const PendingDerepEntry& pending, H
         if (coarse_->storesQualities() && pending.dna2) { dna->recordDiffPairQuality(*pending.dna, *pending.dna2, pending.sample_id); }
         else if (coarse_->storesQualities()) { dna->recordDiffQuality(*pending.dna, pending.sample_id); }
         else {
-            const auto& source = searchWithMerg && pending.dna_merged ? pending.dna_merged : pending.dna;
+            const auto& source = mergedSearchKeys_ && pending.dna_merged ? pending.dna_merged : pending.dna;
             dna->recordDiffDNA(source->getSeqPseudoView(), pending.sample_id);
         }
         return true;
@@ -432,7 +432,7 @@ void Dereplicate::apply_pending_entry(const PendingDerepEntry& pending, Shard& s
     // Called with a shard lock or exclusive work-pool ownership. Statistics are
     // finalized here, not while filtering still has this observation queued.
     auto& stats = shard.admission;
-    stats.mergedKeys += searchWithMerg && bool(pending.dna_merged);
+    stats.mergedKeys += mergedSearchKeys_ && bool(pending.dna_merged);
     // A non-passing read whose key already has a passing dereplicate is counted
     // right away. Otherwise a set with withheld mid-quality output is written
     // instead of counted (a pipeline back-maps it; never both), while a set
@@ -474,7 +474,7 @@ void Dereplicate::apply_pending_entry(const PendingDerepEntry& pending, Shard& s
     }
     bool admitted;
     if (shard.coarse && (!pending.srchSeq.empty() || !shard.coarse->storageOnly())) {
-        const auto& source = searchWithMerg && pending.dna_merged ? pending.dna_merged : pending.dna;
+        const auto& source = mergedSearchKeys_ && pending.dna_merged ? pending.dna_merged : pending.dna;
         admitted = shard.coarse->add(pending.srchSeq, source->getSeqPseudoView(), pending.dna, pending.dna2,
             pending.dna_merged, pending.sample_id, pending.pass, searchLength,
             b_derep_as_fasta_, b_merge_pairs_derep_, pending.mergePos, probe, deferred) != CoarseDereplication::npos;
@@ -492,7 +492,7 @@ void Dereplicate::apply_pending_entry(const PendingDerepEntry& pending, Shard& s
 
 void Dereplicate::publish_uncounted(const PendingDerepEntry& pending) {
     if (!publisher_) { throw std::logic_error("Dereplicate: a withheld record set has no publisher"); }
-    publisher_(pending.dna, pending.dna2, pending.route);
+    publisher_(pending.dna, pending.dna2, pending.route, pending.outputBlock, pending.indexInBlock);
 }
 
 void Dereplicate::flushPending() {
@@ -733,7 +733,9 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
     if (coarseMode) { coarse_ = shards_.front()->coarse.get(); }
     if (coarseMode && shardCount > 1) { coarseWorkPool_ = std::make_unique<PartitionWorkPool>(shardCount); }
     parallelGlobalCoarse_ = coarseMode && shardCount == 1 && runtimeOpts.threads > 1;
-    orderedAdmission_ = runtimeOpts.threads > 1;
+    // Also on one thread: entries are then applied, and withheld sets published, at the end of each
+    // read block as with several, so the outputs do not depend on the number of threads.
+    orderedAdmission_ = true;
     if (orderedAdmission_ && !coarseWorkPool_ && !parallelGlobalCoarse_) { orderedPool_ = std::make_unique<PartitionWorkPool>(shardCount); }
     // Enough queued blocks to keep the committer busy while every other worker
     // processes its next block; queued blocks keep their reads in memory.
@@ -806,6 +808,10 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 	if (runtimeOpts.hasMergePairsDerep && runtimeOpts.mergePairsDerep) {
 		b_merge_pairs_derep_ = true;
 	}
+	// A consensus key that differs from its representative's R1 (an R2 base won
+	// in the overlap, or the key extends into R2) would write that R1 again under
+	// a second key. Merged keys are therefore used only with merged output.
+	mergedSearchKeys_ = searchWithMerg && b_merge_pairs_derep_;
 
 	if (runtimeOpts.hasDerepSrchLen) {
 		const string& searchLenArg = (*cmdArgs)["-derepSrchLen"];
@@ -824,7 +830,7 @@ Dereplicate::Dereplicate(OptContainer* cmdArgs, Filters* mf):
 		}
 		searchLength = static_cast<int>(parsedLen);
 	}
-    const int fixedLength = mf->fixedDereplicationLength(searchWithMerg);
+    const int fixedLength = mf->fixedDereplicationLength(mergedSearchKeys_);
     const int clusteringCap = mf->dereplicationLengthLimit();
     const bool explicitCap = mf->hasExplicitDerepSearchLength() && searchLength > 0;
     prefixMode_ = (!coarse_ || coarse_->outputsExact()) && (prefixOption == "1" || (prefixOption == "auto" && !explicitCap && fixedLength == 0));
@@ -960,7 +966,7 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* fil
         if (dna_merged) { dna->adoptMergeStats(*dna_merged); dna2->adoptMergeStats(*dna_merged); }
 	}
 
-    if (dna_merged && searchWithMerg){
+    if (dna_merged && mergedSearchKeys_){
 		const std::string_view mergedSeq = dna_merged->getSeqPseudoView();
 		const size_t searchLen = (searchLength == -1)
 			? mergedSeq.size()
@@ -996,6 +1002,8 @@ bool Dereplicate::addDNA(shared_ptr<DNA> dna, shared_ptr<DNA> dna2, Filters* fil
 		keyHash % shards_.size()
 		});
 	if (route) { threadBatch.pending.back().withheld = true; threadBatch.pending.back().route = *route; }
+	threadBatch.pending.back().outputBlock = threadBatch.outputBlock;
+	threadBatch.pending.back().indexInBlock = static_cast<uint32_t>(threadBatch.pending.size() - 1);
 	if (queued) { *queued = true; }
 	// Inside an ordered block, entries are applied when the block is sealed.
 	bool flushNow = threadBatch.pending.size() >= kThreadBatchFlushThreshold;
@@ -1011,7 +1019,7 @@ uint64_t Dereplicate::reserveBlock() {
 	return orderedAdmission_ ? nextBlock_.fetch_add(1, std::memory_order_relaxed) : kNoBlock;
 }
 
-void Dereplicate::beginBlock(uint64_t block) {
+void Dereplicate::beginBlock(uint64_t block, uint64_t outputBlock) {
 	if (block == kNoBlock) { return; }
 	ThreadLocalBatch& batch = get_or_create_thread_batch();
 	if (!batch.pending.empty()) {
@@ -1020,6 +1028,14 @@ void Dereplicate::beginBlock(uint64_t block) {
 		flush_batch(batch);
 	}
 	batch.block = block;
+	batch.outputBlock = outputBlock;
+}
+
+void Dereplicate::notify_applied(const std::vector<SealedBlock>& blocks) const {
+	if (!blockApplied_) { return; }
+	for (const auto& block : blocks) {
+		if (block.outputBlock != kNoBlock) { blockApplied_(block.outputBlock); }
+	}
 }
 
 void Dereplicate::account_search_keys(const std::vector<PendingDerepEntry>& entries) {
@@ -1033,7 +1049,9 @@ void Dereplicate::endBlock() {
 	ThreadLocalBatch& batch = get_or_create_thread_batch();
 	if (batch.block == kNoBlock) { return; }
 	const uint64_t block = batch.block;
+	const uint64_t outputBlock = batch.outputBlock;
 	batch.block = kNoBlock;
+	batch.outputBlock = kNoBlock;
 	free_returned_reads(batch);
 	bool queued = false;
 	{
@@ -1064,7 +1082,7 @@ void Dereplicate::endBlock() {
 		bool commit = false;
 		{
 			std::lock_guard<std::mutex> lock(sequenceMutex_);
-			sealed_.emplace(block, SealedBlock{std::move(entries), &batch});
+			sealed_.emplace(block, SealedBlock{std::move(entries), &batch, outputBlock});
 			while (!sealed_.empty() && sealed_.begin()->first == nextSubmit_) {
 				ready.push_back(std::move(sealed_.begin()->second));
 				sealed_.erase(sealed_.begin());
@@ -1109,6 +1127,9 @@ void Dereplicate::commit_global_blocks() {
 			lock.unlock();
 			try {
 				commit_global_block(block);
+				// Its withheld sets are published (apply_pending_entry); the coarse updates
+				// still queued in lanes publish none.
+				if (blockApplied_ && block.outputBlock != kNoBlock) { blockApplied_(block.outputBlock); }
 				return_reads(block.owner, std::move(block.entries));
 			} catch (...) {
 				lock.lock();
@@ -1277,6 +1298,8 @@ void Dereplicate::apply_blocks_ordered(std::vector<SealedBlock>& blocks,
 		}
 	}, [&submitLock] { submitLock.unlock(); });
 	if (submitLock.owns_lock()) { submitLock.unlock(); }
+	// Every job of these blocks has run (an earlier batch may still be running on other shards).
+	notify_applied(blocks);
 	// This thread may have taken over blocks sealed by other producers. Freeing
 	// their reads here would lock those producers' malloc arenas (and did, for up
 	// to half of all arena lock waits): hand them back to be freed by their owner.
@@ -1741,7 +1764,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
     CoarseDereplication::Refinement refinement;
     std::vector<DerepOutputGroup> dereplicated_dnas;
     if (coarse_ && coarse_->reassigns()) {
-        refinement = coarse_->refine(searchWithMerg, searchLength);
+        refinement = coarse_->refine(mergedSearchKeys_, searchLength);
         for (size_t i = 0; i < refinement.representatives.size(); ++i) {
             auto& dna = refinement.representatives[i];
             if (dna) { dereplicated_dnas.push_back({dna->totalSum(), coarse_->groups()[i]->key(), nullptr, {}, dna}); }
@@ -1818,7 +1841,7 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
             if (coarse_->storesQualities() && read->dna2) { dna->recordDiffPairQuality(*read->dna, *read->dna2, read->sample); }
             else if (coarse_->storesQualities()) { dna->recordDiffQuality(*read->dna, read->sample); }
             else {
-                const auto& source = searchWithMerg && read->merged ? read->merged : read->dna;
+                const auto& source = mergedSearchKeys_ && read->merged ? read->merged : read->dna;
                 dna->recordDiffDNA(source->getSeqPseudoView(), read->sample);
             }
         }
@@ -2170,7 +2193,8 @@ string Dereplicate::writeDereplDNA(Filters* mf, string SRblock) {
         admission.unmatched += local.unmatched; admission.deferred += local.deferred; admission.mergedKeys += local.mergedKeys;
         admission.published += local.published; admission.deferredDropped += local.deferredDropped;
     }
-    report += "Dereplication search policy: " + string(searchWithMerg ? "merged when available" : "R1 only") +
+    report += "Dereplication search policy: " + string(mergedSearchKeys_ ? "merged when available" :
+        searchWithMerg ? "R1 (merges rank representatives)" : "R1 only") +
         "; " + (coarse_ && !coarse_->outputsExact() ? "coarse clusters" : prefixMode_ ? "exact prefix consolidation" : "equal exact keys") +
         "; search cap " + to_string(searchLength) + "\n";
     report += "Dereplication key sources: " + formatCount64(admission.mergedKeys) + " merged; " +

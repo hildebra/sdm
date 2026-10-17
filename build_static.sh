@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Builds a fully static sdm with HTSlib (SAM/BAM/CRAM input) and libdeflate from a micromamba env.
+# Builds a fully static sdm with HTSlib (SAM/BAM/CRAM input), ISA-L and zstd from a micromamba env.
 #
 #   ./build_static.sh -j8           # build ./sdm
 #   ./build_static.sh -j8 test      # build and run all test suites with the same toolchain
 #
 # Arguments go to make. The first run creates the env (conda-forge: GCC with a static glibc
-# sysroot, make, cmake, pkg-config, curl, and zlib/bzip2/xz with static archives) and builds
-# libdeflate and HTSlib from source into it: conda-forge's libdeflate ships no libdeflate.a, and
-# bioconda's htslib needs libcurl/OpenSSL, which conda does not provide as static archives.
+# sysroot, make, cmake, pkg-config, curl, nasm, and zlib/bzip2/xz with static archives, which
+# HTSlib needs) and builds HTSlib from source into it: bioconda's htslib needs libcurl/OpenSSL,
+# which conda does not provide as static archives. HTSlib is built without libdeflate (optional for
+# it); sdm itself uses neither zlib nor libdeflate.
+# ISA-L (all gzip input, BGZF output) and zstd are built as static libraries by build_deps.sh into
+# <env>/sdm-deps, apart from the env's own zstd (a dependency of its cmake).
 # HTSlib is built without remote-URL (libcurl, S3, GCS) and plugin support. Later runs only
 # rebuild sdm. Start over with: micromamba env remove -y -n sdm-static
 #
@@ -15,25 +18,21 @@
 #   SDM_ENV             env name (default sdm-static); an existing env gets missing packages
 #   SDM_MICROMAMBA      micromamba executable (default: $MAMBA_EXE, else micromamba on PATH)
 #   HTSLIB_VERSION      default 1.24; set HTSLIB_SHA256 to verify the download of other versions
-#   LIBDEFLATE_VERSION  default 1.26; LIBDEFLATE_SHA256 likewise
+#   ISAL_VERSION, ZSTD_VERSION and their *_SHA256 and *_URL: see build_deps.sh
 set -euo pipefail
 
 die() { echo "build_static.sh: $*" >&2; exit 1; }
 
 env_name=${SDM_ENV:-sdm-static}
 htslib_version=${HTSLIB_VERSION:-1.24}
-libdeflate_version=${LIBDEFLATE_VERSION:-1.26}
-# Checksums of the default versions, as in the bioconda htslib and conda-forge libdeflate recipes.
+# The checksum of the default version, as in the bioconda htslib recipe.
 if [[ $htslib_version == 1.24 ]]; then
     : "${HTSLIB_SHA256:=28a8de191381c7a97a35675ceac76fa1ea95e7b678d6a2e9d600a7874e4077de}"
 fi
-if [[ $libdeflate_version == 1.26 ]]; then
-    : "${LIBDEFLATE_SHA256:=bba03fffc5538576213675ce6968fcff6ce2e67d82e4d5febea2d05f9f13cf85}"
-fi
-packages=(gcc_linux-64 gxx_linux-64 sysroot_linux-64 make cmake pkg-config curl
+packages=(gcc_linux-64 gxx_linux-64 sysroot_linux-64 make cmake pkg-config curl nasm
           zlib bzip2 liblzma-devel liblzma-static)
 target=x86_64-conda-linux-gnu
-required=(bin/make bin/cmake bin/pkg-config bin/curl bin/bzip2
+required=(bin/make bin/cmake bin/pkg-config bin/curl bin/bzip2 bin/nasm
           "bin/$target-gcc" "bin/$target-g++" "bin/$target-readelf"
           lib/libz.a lib/libbz2.a lib/liblzma.a include/zlib.h include/bzlib.h include/lzma.h)
 
@@ -84,7 +83,7 @@ fetch() {  # url file sha256
     fi
 }
 
-deps="libdeflate-$libdeflate_version htslib-$htslib_version"
+deps="htslib-$htslib_version without-libdeflate"
 stamp=$prefix/share/sdm-static-deps
 if [[ $(cat "$stamp" 2> /dev/null) != "$deps" ]]; then
     ncpu=$(nproc 2> /dev/null || echo 4)
@@ -92,24 +91,16 @@ if [[ $(cat "$stamp" 2> /dev/null) != "$deps" ]]; then
     trap 'rm -rf "$work"' EXIT
     (
         cd "$work"
-        echo "== building static libdeflate $libdeflate_version"
-        fetch "https://github.com/ebiggers/libdeflate/archive/v$libdeflate_version.tar.gz" \
-            libdeflate.tar.gz "${LIBDEFLATE_SHA256:-}"
-        tar -xzf libdeflate.tar.gz
-        # PIC because HTSlib also builds a shared library, which links libdeflate.a in.
-        cmake -S "libdeflate-$libdeflate_version" -B libdeflate-build -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_INSTALL_LIBDIR=lib \
-            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            -DLIBDEFLATE_BUILD_SHARED_LIB=OFF -DLIBDEFLATE_BUILD_GZIP=OFF
-        cmake --build libdeflate-build -j "$ncpu"
-        cmake --install libdeflate-build
+        # The libdeflate earlier versions of this script built into the env.
+        rm -rf "$prefix"/lib/libdeflate.* "$prefix"/include/libdeflate.h "$prefix"/lib/pkgconfig/libdeflate.pc \
+            "$prefix"/lib/cmake/libdeflate
 
         echo "== building static HTSlib $htslib_version"
         fetch "https://github.com/samtools/htslib/releases/download/$htslib_version/htslib-$htslib_version.tar.bz2" \
             htslib.tar.bz2 "${HTSLIB_SHA256:-}"
         tar -xjf htslib.tar.bz2
         cd "htslib-$htslib_version"
-        ./configure --prefix="$prefix" --with-libdeflate --disable-libcurl --disable-gcs \
+        ./configure --prefix="$prefix" --without-libdeflate --disable-libcurl --disable-gcs \
             --disable-s3 --disable-plugins --disable-ref-cache
         make -j "$ncpu" AR="$AR" RANLIB="$RANLIB"
         make install AR="$AR" RANLIB="$RANLIB"
@@ -118,14 +109,23 @@ if [[ $(cat "$stamp" 2> /dev/null) != "$deps" ]]; then
     echo "$deps" > "$stamp"
 fi
 
+# Static ISA-L and zstd in a prefix of their own (build_deps.sh does nothing once they are there).
+deps_prefix=$prefix/sdm-deps
+bash ./build_deps.sh --prefix "$deps_prefix"
+
 hts_cflags=$(pkg-config --cflags htslib) || die "pkg-config cannot find htslib in $prefix"
 hts_libs=$(pkg-config --static --libs htslib) || die "pkg-config cannot resolve htslib's static libraries"
 echo "== building sdm (HTS_LIBS: $hts_libs)"
 # Objects go to .build/conda-<the Makefile's configuration name>, apart from builds with other
-# compilers in this checkout. The single quotes leave the $(...) to make.
-make STATIC=1 WITH_HTS=1 WITH_LIBDEFLATE=1 CC="$CC" CXX="$CXX" CXXFLAGS=-O3 \
+# compilers in this checkout. The single quotes leave the $(...) to make. ISA-L's and zstd's
+# headers come before the env's, which may hold another zstd.h (CPPFLAGS from the environment, so
+# that the Makefile still adds its own).
+CPPFLAGS="-I$deps_prefix/include $CPPFLAGS" \
+make STATIC=1 WITH_HTS=1 CC="$CC" CXX="$CXX" CXXFLAGS=-O3 \
     'BUILD_DIR=.build/conda-$(if $(filter 1,$(WITH_HTS)),hts,portable)-$(STATIC)' \
-    HTS_CFLAGS="$hts_cflags" HTS_LIBS="$hts_libs" "$@"
+    HTS_CFLAGS="$hts_cflags" HTS_LIBS="$hts_libs" \
+    ISAL_CFLAGS= ISAL_LIBS="$deps_prefix/lib/libisal.a" \
+    ZSTD_CFLAGS= ZSTD_LIBS="$deps_prefix/lib/libzstd.a -pthread" "$@"
 
 if [[ -e sdm ]]; then
     if [[ $("$prefix/bin/$target-readelf" -d sdm) == *NEEDED* ]]; then
